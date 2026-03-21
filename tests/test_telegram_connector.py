@@ -16,6 +16,9 @@ def test_telegram_polling_service_ingests_updates_and_exposes_connected_status(
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["telegram"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["telegram"]["enabled"] = True
     connectors["telegram"]["transport"] = "polling"

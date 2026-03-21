@@ -11,6 +11,7 @@ We especially thank the following projects for their ideas, research direction, 
 - AlphaEvolve
 - OpenEvolve
 - EvoScientist
+- Orchestra-Research
 - Orchestra-Research/AI-Research-SKILLs
 
 These projects have been important references for thinking about automated research, open-ended exploration, evolutionary search, experiment organization, and long-horizon research agents.

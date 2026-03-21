@@ -10,6 +10,7 @@ from ..channels import get_channel_factory, register_builtin_channels
 from ..config import ConfigManager
 from ..connector_runtime import conversation_identity_key, infer_connector_transport, normalize_conversation_id
 from ..gitops import (
+    branch_exists,
     canonical_worktree_root,
     checkpoint_repo,
     create_worktree,
@@ -42,13 +43,17 @@ from .guidance import build_guidance_for_record, guidance_summary
 from .metrics import (
     baseline_metric_lines,
     build_metrics_timeline,
+    canonicalize_baseline_submission,
     compare_with_baseline,
     compute_progress_eval,
+    MetricContractValidationError,
     normalize_metric_contract,
     normalize_metric_rows,
     normalize_metrics_summary,
     selected_baseline_metrics,
     to_number,
+    validate_baseline_metric_contract_submission,
+    validate_main_experiment_against_baseline_contract,
 )
 from .schemas import ARTIFACT_DIRS, guidance_for_kind, validate_artifact_payload
 
@@ -126,6 +131,19 @@ class ArtifactService:
         lines = [f"- {label}: {normalized[key]}" for key, label in labels if normalized.get(key)]
         return lines or ["- Not recorded."]
 
+    def _load_metric_contract_payload(self, quest_root: Path, metric_contract_json_rel_path: str | None) -> dict[str, Any] | None:
+        rel_path = str(metric_contract_json_rel_path or "").strip()
+        if not rel_path:
+            return None
+        try:
+            resolved_path = resolve_within(quest_root, rel_path)
+        except ValueError:
+            return None
+        if not resolved_path.exists():
+            return None
+        payload = read_json(resolved_path, {})
+        return payload if isinstance(payload, dict) and payload else None
+
     def _workspace_root_for(self, quest_root: Path, workspace_root: Path | None = None) -> Path:
         if workspace_root is not None:
             return workspace_root
@@ -138,6 +156,73 @@ class ArtifactService:
             return path.resolve().relative_to(quest_root.resolve()).as_posix()
         except ValueError:
             return str(path)
+
+    @staticmethod
+    def _branch_kind_from_name(branch_name: str | None) -> str:
+        normalized = str(branch_name or "").strip()
+        if normalized in {"main", "master"} or normalized.startswith("quest/"):
+            return "quest"
+        if normalized.startswith("idea/"):
+            return "idea"
+        if normalized.startswith("analysis/"):
+            return "analysis"
+        if normalized.startswith("paper/"):
+            return "paper"
+        if normalized.startswith("run/"):
+            return "run"
+        return "branch"
+
+    def _workspace_mode_for_branch(self, branch_name: str | None, *, has_idea: bool = False) -> str:
+        branch_kind = self._branch_kind_from_name(branch_name)
+        if branch_kind == "paper":
+            return "paper"
+        if branch_kind == "analysis":
+            return "analysis"
+        if branch_kind == "run":
+            return "run"
+        if branch_kind == "idea" or has_idea:
+            return "idea"
+        return "quest"
+
+    def _prepare_branch_worktree_root(
+        self,
+        quest_root: Path,
+        *,
+        branch_name: str,
+        branch_kind: str,
+        run_id: str | None = None,
+        idea_id: str | None = None,
+    ) -> Path:
+        normalized_kind = str(branch_kind or "").strip().lower() or "run"
+        normalized_run_id = str(run_id or "").strip() or None
+        normalized_idea_id = str(idea_id or "").strip() or None
+        if normalized_kind == "idea" and normalized_idea_id:
+            return canonical_worktree_root(quest_root, f"idea-{normalized_idea_id}")
+        if normalized_kind == "paper":
+            return canonical_worktree_root(
+                quest_root,
+                f"paper-{normalized_run_id or slugify(branch_name, 'paper')}",
+            )
+        if normalized_kind == "run" and normalized_run_id:
+            return canonical_worktree_root(quest_root, normalized_run_id)
+        return canonical_worktree_root(quest_root, slugify(branch_name, "branch"))
+
+    def _latest_prepare_branch_record(self, quest_root: Path, branch_name: str) -> dict[str, Any]:
+        normalized_branch = str(branch_name or "").strip()
+        if not normalized_branch:
+            return {}
+        for item in reversed(self.quest_service._collect_artifacts(quest_root)):
+            payload = dict(item.get("payload") or {}) if isinstance(item.get("payload"), dict) else {}
+            if not payload:
+                continue
+            if str(payload.get("kind") or "").strip() != "decision":
+                continue
+            if str(payload.get("action") or "").strip() != "prepare_branch":
+                continue
+            if str(payload.get("branch") or "").strip() != normalized_branch:
+                continue
+            return payload
+        return {}
 
     def _git_config(self) -> dict[str, Any]:
         config = ConfigManager(self.home).load_named("config")
@@ -623,43 +708,91 @@ class ArtifactService:
         )
         return normalized
 
-    def _paper_root(self, quest_root: Path) -> Path:
-        return ensure_dir(quest_root / "paper")
+    def _paper_root(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+        prefer_workspace: bool = True,
+        create: bool = False,
+    ) -> Path:
+        roots: list[Path] = []
+        if prefer_workspace:
+            roots.append(self._workspace_root_for(quest_root, workspace_root))
+        roots.append(quest_root)
+        seen: set[str] = set()
+        first_candidate: Path | None = None
+        for root in roots:
+            key = str(root.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            candidate = root / "paper"
+            if first_candidate is None:
+                first_candidate = candidate
+            if candidate.exists():
+                return candidate
+        fallback = first_candidate or (quest_root / "paper")
+        return ensure_dir(fallback) if create else fallback
 
-    def _paper_outline_candidates_root(self, quest_root: Path) -> Path:
-        return ensure_dir(self._paper_root(quest_root) / "outlines" / "candidates")
+    def _paper_outline_candidates_root(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return ensure_dir(self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "outlines" / "candidates")
 
-    def _paper_outline_revisions_root(self, quest_root: Path) -> Path:
-        return ensure_dir(self._paper_root(quest_root) / "outlines" / "revisions")
+    def _paper_outline_revisions_root(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return ensure_dir(self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "outlines" / "revisions")
 
-    def _paper_selected_outline_path(self, quest_root: Path) -> Path:
-        return self._paper_root(quest_root) / "selected_outline.json"
+    def _paper_selected_outline_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._paper_root(quest_root, workspace_root=workspace_root) / "selected_outline.json"
 
-    def _paper_outline_selection_path(self, quest_root: Path) -> Path:
-        return self._paper_root(quest_root) / "outline_selection.md"
+    def _paper_outline_selection_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "outline_selection.md"
 
-    def _paper_bundle_manifest_path(self, quest_root: Path) -> Path:
-        return self._paper_root(quest_root) / "paper_bundle_manifest.json"
+    def _paper_bundle_manifest_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "paper_bundle_manifest.json"
 
-    def _paper_baseline_inventory_path(self, quest_root: Path) -> Path:
-        return self._paper_root(quest_root) / "baseline_inventory.json"
+    def _paper_baseline_inventory_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "baseline_inventory.json"
 
-    def _open_source_root(self, quest_root: Path) -> Path:
-        return ensure_dir(quest_root / "release" / "open_source")
+    def _open_source_root(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+        prefer_workspace: bool = True,
+        create: bool = False,
+    ) -> Path:
+        roots: list[Path] = []
+        if prefer_workspace:
+            roots.append(self._workspace_root_for(quest_root, workspace_root))
+        roots.append(quest_root)
+        seen: set[str] = set()
+        first_candidate: Path | None = None
+        for root in roots:
+            key = str(root.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            candidate = root / "release" / "open_source"
+            if first_candidate is None:
+                first_candidate = candidate
+            if candidate.exists():
+                return candidate
+        fallback = first_candidate or (quest_root / "release" / "open_source")
+        return ensure_dir(fallback) if create else fallback
 
-    def _open_source_manifest_path(self, quest_root: Path) -> Path:
-        return self._open_source_root(quest_root) / "manifest.json"
+    def _open_source_manifest_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._open_source_root(quest_root, workspace_root=workspace_root, create=True) / "manifest.json"
 
-    def _open_source_cleanup_plan_path(self, quest_root: Path) -> Path:
-        return self._open_source_root(quest_root) / "cleanup_plan.md"
+    def _open_source_cleanup_plan_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._open_source_root(quest_root, workspace_root=workspace_root, create=True) / "cleanup_plan.md"
 
-    def _open_source_include_paths_path(self, quest_root: Path) -> Path:
-        return self._open_source_root(quest_root) / "include_paths.json"
+    def _open_source_include_paths_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._open_source_root(quest_root, workspace_root=workspace_root, create=True) / "include_paths.json"
 
-    def _open_source_exclude_paths_path(self, quest_root: Path) -> Path:
-        return self._open_source_root(quest_root) / "exclude_paths.json"
+    def _open_source_exclude_paths_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._open_source_root(quest_root, workspace_root=workspace_root, create=True) / "exclude_paths.json"
 
-    def _write_paper_baseline_inventory(self, quest_root: Path) -> dict[str, Any]:
+    def _write_paper_baseline_inventory(self, quest_root: Path, *, workspace_root: Path | None = None) -> dict[str, Any]:
         quest_yaml = self.quest_service.read_quest_yaml(quest_root)
         confirmed_baseline_ref = (
             dict(quest_yaml.get("confirmed_baseline_ref") or {})
@@ -675,22 +808,23 @@ class ArtifactService:
             ],
             "updated_at": utc_now(),
         }
-        write_json(self._paper_baseline_inventory_path(quest_root), payload)
+        write_json(self._paper_baseline_inventory_path(quest_root, workspace_root=workspace_root), payload)
         return payload
 
     def _ensure_open_source_prep(
         self,
         quest_root: Path,
         *,
+        workspace_root: Path | None,
         source_branch: str | None,
         source_bundle_manifest_path: str,
         baseline_inventory_path: str,
     ) -> dict[str, Any]:
-        root = self._open_source_root(quest_root)
-        cleanup_plan_path = self._open_source_cleanup_plan_path(quest_root)
-        include_paths_path = self._open_source_include_paths_path(quest_root)
-        exclude_paths_path = self._open_source_exclude_paths_path(quest_root)
-        manifest_path = self._open_source_manifest_path(quest_root)
+        root = self._open_source_root(quest_root, workspace_root=workspace_root, create=True)
+        cleanup_plan_path = self._open_source_cleanup_plan_path(quest_root, workspace_root=workspace_root)
+        include_paths_path = self._open_source_include_paths_path(quest_root, workspace_root=workspace_root)
+        exclude_paths_path = self._open_source_exclude_paths_path(quest_root, workspace_root=workspace_root)
+        manifest_path = self._open_source_manifest_path(quest_root, workspace_root=workspace_root)
         if not cleanup_plan_path.exists():
             write_text(
                 cleanup_plan_path,
@@ -737,11 +871,17 @@ class ArtifactService:
             or source_bundle_manifest_path,
             "baseline_inventory_path": str(existing.get("baseline_inventory_path") or baseline_inventory_path or "").strip()
             or baseline_inventory_path,
-            "cleanup_plan_path": str(existing.get("cleanup_plan_path") or "release/open_source/cleanup_plan.md").strip()
+            "cleanup_plan_path": str(
+                existing.get("cleanup_plan_path") or self._workspace_relative(quest_root, cleanup_plan_path) or ""
+            ).strip()
             or "release/open_source/cleanup_plan.md",
-            "include_paths_path": str(existing.get("include_paths_path") or "release/open_source/include_paths.json").strip()
+            "include_paths_path": str(
+                existing.get("include_paths_path") or self._workspace_relative(quest_root, include_paths_path) or ""
+            ).strip()
             or "release/open_source/include_paths.json",
-            "exclude_paths_path": str(existing.get("exclude_paths_path") or "release/open_source/exclude_paths.json").strip()
+            "exclude_paths_path": str(
+                existing.get("exclude_paths_path") or self._workspace_relative(quest_root, exclude_paths_path) or ""
+            ).strip()
             or "release/open_source/exclude_paths.json",
             "created_at": existing.get("created_at") or utc_now(),
             "updated_at": utc_now(),
@@ -1064,6 +1204,7 @@ class ArtifactService:
             "metric_contract": metric_contract,
             "primary_metric": entry.get("primary_metric"),
             "metrics_summary": metrics_summary,
+            "metric_details": entry.get("metric_details") or [],
         }
         json_path = ensure_dir(baseline_root / "json") / "metric_contract.json"
         write_json(json_path, payload)
@@ -1169,9 +1310,43 @@ class ArtifactService:
             "Use `artifact.confirm_baseline(...)` or `artifact.waive_baseline(...)` first."
         )
 
+    @staticmethod
+    def _artifact_record_identity(path: Path, payload: dict[str, Any], *, kind: str | None = None) -> str:
+        normalized_kind = str(kind or payload.get("kind") or path.parent.name or "artifact").strip() or "artifact"
+        branch_name = str(payload.get("branch") or "").strip()
+        run_id = str(payload.get("run_id") or "").strip()
+        if normalized_kind == "run" and run_id and branch_name:
+            return f"{normalized_kind}:branch_run:{branch_name}:{run_id}"
+        artifact_id = str(payload.get("artifact_id") or payload.get("id") or "").strip()
+        if artifact_id:
+            return f"{normalized_kind}:artifact:{artifact_id}"
+        if normalized_kind == "run" and run_id:
+            return f"{normalized_kind}:run:{run_id}"
+        idea_id = str(payload.get("idea_id") or "").strip()
+        if normalized_kind == "idea" and idea_id and branch_name:
+            return f"{normalized_kind}:branch_idea:{branch_name}:{idea_id}"
+        if normalized_kind == "idea" and idea_id:
+            return f"{normalized_kind}:idea:{idea_id}"
+        baseline_id = str(payload.get("baseline_id") or payload.get("entry_id") or "").strip()
+        if baseline_id:
+            return f"{normalized_kind}:baseline:{baseline_id}"
+        interaction_id = str(payload.get("interaction_id") or "").strip()
+        if interaction_id:
+            return f"{normalized_kind}:interaction:{interaction_id}"
+        return f"path:{path.resolve()}"
+
+    @staticmethod
+    def _artifact_record_rank(payload: dict[str, Any], *, path: Path, mtime_ns: int) -> tuple[str, str, int, int, str]:
+        return (
+            str(payload.get("updated_at") or ""),
+            str(payload.get("created_at") or ""),
+            len(payload),
+            mtime_ns,
+            str(path),
+        )
+
     def _main_run_artifacts(self, quest_root: Path) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
-        seen_paths: set[str] = set()
+        records_by_identity: dict[str, dict[str, Any]] = {}
         for root in self.quest_service.workspace_roots(quest_root):
             artifacts_root = root / "artifacts" / "runs"
             if not artifacts_root.exists():
@@ -1179,10 +1354,6 @@ class ArtifactService:
             for path in sorted(artifacts_root.glob("*.json")):
                 if not path.is_file():
                     continue
-                key = str(path.resolve())
-                if key in seen_paths:
-                    continue
-                seen_paths.add(key)
                 payload = read_json(path, {})
                 if not isinstance(payload, dict) or not payload:
                     continue
@@ -1194,7 +1365,19 @@ class ArtifactService:
                     enriched["_artifact_mtime_ns"] = path.stat().st_mtime_ns
                 except OSError:
                     enriched["_artifact_mtime_ns"] = 0
-                records.append(enriched)
+                identity = self._artifact_record_identity(path, enriched, kind="run")
+                existing = records_by_identity.get(identity)
+                if existing is None or self._artifact_record_rank(
+                    enriched,
+                    path=path,
+                    mtime_ns=int(enriched.get("_artifact_mtime_ns") or 0),
+                ) >= self._artifact_record_rank(
+                    existing,
+                    path=Path(str(existing.get("_artifact_path") or path)),
+                    mtime_ns=int(existing.get("_artifact_mtime_ns") or 0),
+                ):
+                    records_by_identity[identity] = enriched
+        records = list(records_by_identity.values())
         records.sort(
             key=lambda item: (
                 str(item.get("updated_at") or item.get("created_at") or ""),
@@ -1276,6 +1459,173 @@ class ArtifactService:
             except Exception:
                 continue
         return None
+
+    def _branch_activation_worktree_root(
+        self,
+        quest_root: Path,
+        *,
+        branch_name: str,
+        idea_id: str | None = None,
+        run_id: str | None = None,
+    ) -> Path:
+        normalized_branch = str(branch_name or "").strip()
+        branch_kind = self._branch_kind_from_name(normalized_branch)
+        normalized_idea_id = str(idea_id or "").strip() or None
+        if branch_kind == "paper":
+            normalized_run_id = str(run_id or "").strip() or None
+            return canonical_worktree_root(
+                quest_root,
+                f"paper-{normalized_run_id or slugify(normalized_branch, 'paper')}",
+            )
+        if normalized_idea_id and branch_kind == "idea":
+            return canonical_worktree_root(quest_root, f"idea-{normalized_idea_id}")
+        normalized_run_id = str(run_id or "").strip() or None
+        if normalized_run_id and branch_kind == "run":
+            return canonical_worktree_root(quest_root, normalized_run_id)
+        return canonical_worktree_root(quest_root, f"branch-{slugify(normalized_branch, 'branch')}")
+
+    @staticmethod
+    def _resolve_activate_branch_anchor(
+        *,
+        anchor: str | None,
+        has_idea: bool,
+        has_main_result: bool,
+    ) -> str:
+        normalized_anchor = str(anchor or "auto").strip().lower() or "auto"
+        if normalized_anchor == "auto":
+            if has_main_result:
+                return "decision"
+            if has_idea:
+                return "experiment"
+            return "idea"
+        aliases = {
+            "analysis": "analysis-campaign",
+        }
+        resolved_anchor = aliases.get(normalized_anchor, normalized_anchor)
+        allowed = {
+            "scout",
+            "baseline",
+            "idea",
+            "experiment",
+            "analysis-campaign",
+            "write",
+            "finalize",
+            "decision",
+        }
+        if resolved_anchor not in allowed:
+            allowed_text = ", ".join(sorted(allowed | {"auto"}))
+            raise ValueError(f"Unsupported activate_branch anchor `{anchor}`. Allowed values: {allowed_text}.")
+        return resolved_anchor
+
+    def _resolve_branch_activation_target(
+        self,
+        quest_root: Path,
+        *,
+        branch: str | None = None,
+        idea_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        provided = sum(
+            1
+            for value in (
+                str(branch or "").strip(),
+                str(idea_id or "").strip(),
+                str(run_id or "").strip(),
+            )
+            if value
+        )
+        if provided != 1:
+            raise ValueError("activate_branch requires exactly one of `branch`, `idea_id`, or `run_id`.")
+
+        latest_idea: dict[str, Any] | None = None
+        latest_run: dict[str, Any] | None = None
+        normalized_branch = str(branch or "").strip()
+        normalized_idea_id = str(idea_id or "").strip()
+        normalized_run_id = str(run_id or "").strip()
+
+        if normalized_idea_id:
+            candidates = [
+                item for item in self._idea_artifacts(quest_root) if str(item.get("idea_id") or "").strip() == normalized_idea_id
+            ]
+            if not candidates:
+                raise FileNotFoundError(f"Unknown idea `{normalized_idea_id}`.")
+            latest_idea = candidates[-1]
+            normalized_branch = str(latest_idea.get("branch") or "").strip()
+        elif normalized_run_id:
+            candidates = [
+                item for item in self._main_run_artifacts(quest_root) if str(item.get("run_id") or "").strip() == normalized_run_id
+            ]
+            if not candidates:
+                raise FileNotFoundError(f"Unknown main run `{normalized_run_id}`.")
+            latest_run = candidates[-1]
+            normalized_branch = str(latest_run.get("branch") or "").strip()
+        else:
+            if normalized_branch.startswith("analysis/"):
+                raise ValueError(
+                    "activate_branch only supports durable idea/main branches. "
+                    "Analysis slice branches remain managed by analysis campaigns."
+                )
+            if not branch_exists(quest_root, normalized_branch):
+                raise FileNotFoundError(f"Unknown branch `{normalized_branch}`.")
+
+        if not normalized_branch:
+            raise ValueError("Unable to resolve a durable branch to activate.")
+
+        prepare_record = self._latest_prepare_branch_record(quest_root, normalized_branch)
+        prepare_details = dict(prepare_record.get("details") or {}) if isinstance(prepare_record.get("details"), dict) else {}
+        recorded_parent_branch = (
+            str(prepare_record.get("parent_branch") or prepare_details.get("parent_branch") or "").strip() or None
+        )
+        recorded_branch_kind = (
+            str(prepare_record.get("branch_kind") or prepare_details.get("branch_kind") or "").strip().lower()
+            or self._branch_kind_from_name(normalized_branch)
+        )
+
+        latest_idea = latest_idea or self._latest_idea_for_branch(quest_root, normalized_branch)
+        latest_run = latest_run or self._latest_main_run_for_branch(quest_root, normalized_branch)
+        if not latest_run and recorded_branch_kind == "idea":
+            latest_run = self._latest_child_main_run_for_branch(quest_root, normalized_branch)
+        if not latest_run and recorded_parent_branch:
+            latest_run = self._latest_main_run_for_branch(quest_root, recorded_parent_branch)
+        resolved_idea_id = (
+            normalized_idea_id
+            or str((latest_run or {}).get("idea_id") or "").strip()
+            or str((latest_idea or {}).get("idea_id") or "").strip()
+            or str(prepare_record.get("idea_id") or "").strip()
+            or self._latest_branch_idea_id(quest_root, normalized_branch)
+            or None
+        )
+        idea_paths = dict((latest_idea or {}).get("paths") or {}) if isinstance((latest_idea or {}).get("paths"), dict) else {}
+        recorded_root = (
+            str((latest_idea or {}).get("worktree_root") or "").strip()
+            or str((latest_run or {}).get("worktree_root") or "").strip()
+            or str(prepare_record.get("worktree_root") or "").strip()
+            or None
+        )
+        return {
+            "branch": normalized_branch,
+            "idea_id": resolved_idea_id,
+            "run_id": normalized_run_id or str((latest_run or {}).get("run_id") or "").strip() or None,
+            "has_main_result": bool((latest_run or {}).get("run_id")),
+            "latest_idea": latest_idea,
+            "latest_main_run": latest_run,
+            "branch_kind": recorded_branch_kind,
+            "parent_branch": recorded_parent_branch,
+            "recorded_worktree_root": recorded_root,
+            "idea_md_path": str(idea_paths.get("idea_md") or "").strip() or None,
+            "idea_draft_path": str(idea_paths.get("idea_draft_md") or "").strip() or None,
+            "suggested_worktree_root": self._branch_activation_worktree_root(
+                quest_root,
+                branch_name=normalized_branch,
+                idea_id=resolved_idea_id,
+                run_id=(
+                    normalized_run_id
+                    or str(prepare_record.get("run_id") or "").strip()
+                    or str((latest_run or {}).get("run_id") or "").strip()
+                    or None
+                ),
+            ),
+        }
 
     def _normalize_foundation_ref(self, foundation_ref: dict[str, Any] | str | None) -> dict[str, Any]:
         if foundation_ref is None:
@@ -1445,6 +1795,17 @@ class ArtifactService:
         ]
         return candidates[-1] if candidates else None
 
+    def _latest_child_main_run_for_branch(self, quest_root: Path, branch_name: str) -> dict[str, Any] | None:
+        normalized_branch = str(branch_name or "").strip()
+        if not normalized_branch:
+            return None
+        candidates = [
+            item
+            for item in self._main_run_artifacts(quest_root)
+            if str(item.get("parent_branch") or "").strip() == normalized_branch
+        ]
+        return candidates[-1] if candidates else None
+
     def _latest_idea_for_branch(self, quest_root: Path, branch_name: str) -> dict[str, Any] | None:
         normalized_branch = str(branch_name or "").strip()
         if not normalized_branch:
@@ -1527,6 +1888,16 @@ class ArtifactService:
         if not parent_branch:
             raise ValueError("Unable to resolve a parent branch for the analysis campaign.")
 
+        if self._branch_kind_from_name(parent_branch) == "idea":
+            latest_child_run = self._latest_child_main_run_for_branch(quest_root, parent_branch)
+            if isinstance(latest_child_run, dict) and str(latest_child_run.get("branch") or "").strip():
+                parent_branch = str(latest_child_run.get("branch") or "").strip()
+                recorded_worktree_root = str(latest_child_run.get("worktree_root") or "").strip()
+                if recorded_worktree_root:
+                    candidate = Path(recorded_worktree_root)
+                    if candidate.exists():
+                        parent_worktree_root = candidate
+
         idea_id = self._latest_branch_idea_id(quest_root, parent_branch) or str(state.get("active_idea_id") or "").strip() or None
         return parent_branch, parent_worktree_root, idea_id
 
@@ -1568,15 +1939,22 @@ class ArtifactService:
                 state=state,
                 foundation_ref={"kind": "idea", "ref": str(latest_idea.get("idea_id") or "").strip()},
             )
+        current_workspace_branch = str(state.get("current_workspace_branch") or "").strip()
+        research_head_branch = str(state.get("research_head_branch") or "").strip()
         active_branch = (
-            str(state.get("research_head_branch") or "").strip()
-            or str(state.get("current_workspace_branch") or "").strip()
+            current_workspace_branch
+            or research_head_branch
+            or current_branch(self._workspace_root_for(quest_root))
         )
         if normalized_branch and active_branch and normalized_branch == active_branch:
             return self._resolve_idea_foundation(
                 quest_root,
                 state=state,
-                foundation_ref=None,
+                foundation_ref=(
+                    {"kind": "branch", "ref": normalized_branch}
+                    if current_workspace_branch and research_head_branch and current_workspace_branch != research_head_branch
+                    else None
+                ),
             )
         return self._resolve_idea_foundation(
             quest_root,
@@ -1614,8 +1992,8 @@ class ArtifactService:
     ) -> tuple[str, str, dict[str, Any]]:
         normalized_intent = self._normalize_lineage_intent(lineage_intent) or "continue_line"
         active_branch = (
-            str(state.get("research_head_branch") or "").strip()
-            or str(state.get("current_workspace_branch") or "").strip()
+            str(state.get("current_workspace_branch") or "").strip()
+            or str(state.get("research_head_branch") or "").strip()
         )
         if not active_branch:
             active_branch = current_branch(self._workspace_root_for(quest_root))
@@ -1643,6 +2021,7 @@ class ArtifactService:
     def list_research_branches(self, quest_root: Path) -> dict[str, Any]:
         state = self.quest_service.read_research_state(quest_root)
         active_head_branch = str(state.get("research_head_branch") or "").strip() or None
+        active_workspace_branch = str(state.get("current_workspace_branch") or "").strip() or None
         idea_records = self._idea_artifacts(quest_root)
         main_runs = self._main_run_artifacts(quest_root)
 
@@ -1709,6 +2088,7 @@ class ArtifactService:
                     "verdict": record.get("verdict"),
                     "status": record.get("status"),
                     "idea_id": record.get("idea_id"),
+                    "parent_branch": record.get("parent_branch"),
                     "primary_metric_id": details.get("primary_metric_id"),
                     "primary_value": details.get("primary_value"),
                     "delta_vs_baseline": details.get("delta_vs_baseline"),
@@ -1721,6 +2101,8 @@ class ArtifactService:
 
         if active_head_branch:
             ensure_branch_entry(active_head_branch)
+        if active_workspace_branch:
+            ensure_branch_entry(active_workspace_branch)
 
         ordered_branches = sorted(
             grouped.values(),
@@ -1756,10 +2138,15 @@ class ArtifactService:
                 else {}
             )
             parent_branch = str(latest_idea.get("parent_branch") or "").strip() or None
+            experiment_parent_branch = (
+                str((latest_experiment or {}).get("parent_branch") or "").strip()
+                if isinstance(latest_experiment, dict)
+                else None
+            ) or None
             foundation_branch = (
                 str(latest_foundation.get("branch") or latest_foundation.get("ref") or "").strip() or None
             )
-            resolved_parent_branch = parent_branch or foundation_branch
+            resolved_parent_branch = parent_branch or experiment_parent_branch or foundation_branch
             has_main_result = isinstance(latest_experiment, dict) and bool(latest_experiment.get("run_id"))
             numeric_branch_no = recorded_branch_numbers.get(branch_name)
             if numeric_branch_no is None:
@@ -1774,7 +2161,8 @@ class ArtifactService:
                     "branch_name": branch_name,
                     "worktree_root": item.get("worktree_root"),
                     "is_active_head": branch_name == active_head_branch,
-                    "idea_id": latest_idea.get("idea_id"),
+                    "is_active_workspace": branch_name == active_workspace_branch,
+                    "idea_id": latest_idea.get("idea_id") or (latest_experiment.get("idea_id") if isinstance(latest_experiment, dict) else None),
                     "idea_title": latest_idea.get("title"),
                     "idea_problem": latest_idea.get("problem"),
                     "next_target": latest_idea.get("next_target"),
@@ -1810,6 +2198,7 @@ class ArtifactService:
         return {
             "ok": True,
             "active_head_branch": active_head_branch,
+            "active_workspace_branch": active_workspace_branch,
             "count": len(branches),
             "branches": branches,
         }
@@ -1819,9 +2208,10 @@ class ArtifactService:
         snapshot = self.quest_service.snapshot(self._quest_id(quest_root))
         active_campaign_id = str(state.get("active_analysis_campaign_id") or "").strip() or None
         analysis_parent_branch = str(state.get("analysis_parent_branch") or "").strip() or None
+        paper_parent_branch = str(state.get("paper_parent_branch") or "").strip() or None
         current_workspace_branch = str(state.get("current_workspace_branch") or "").strip() or None
         research_head_branch = str(state.get("research_head_branch") or "").strip() or None
-        canonical_branch = analysis_parent_branch or current_workspace_branch or research_head_branch
+        canonical_branch = analysis_parent_branch or paper_parent_branch or current_workspace_branch or research_head_branch
         latest_main_run = self._latest_main_run_for_branch(quest_root, canonical_branch or "")
         selected_outline = read_json(self._paper_selected_outline_path(quest_root), {})
         selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
@@ -2155,14 +2545,27 @@ class ArtifactService:
         create_worktree_flag: bool = True,
         start_point: str | None = None,
     ) -> dict:
-        parent_branch = current_branch(quest_root)
+        state = self.quest_service.read_research_state(quest_root)
+        parent_branch = (
+            str(start_point or "").strip()
+            or str(state.get("current_workspace_branch") or "").strip()
+            or str(state.get("research_head_branch") or "").strip()
+            or current_branch(self._workspace_root_for(quest_root))
+            or current_branch(quest_root)
+        )
         start_ref = start_point or parent_branch
         branch_name = branch or self._default_branch_name(quest_root, run_id=run_id, idea_id=idea_id, branch_kind=branch_kind)
         branch_result = ensure_branch(quest_root, branch_name, start_point=start_ref, checkout=False)
         worktree_result = None
         worktree_root = None
         if create_worktree_flag:
-            worktree_root = canonical_worktree_root(quest_root, run_id or branch_name)
+            worktree_root = self._prepare_branch_worktree_root(
+                quest_root,
+                branch_name=branch_name,
+                branch_kind=branch_kind,
+                run_id=run_id,
+                idea_id=idea_id,
+            )
             worktree_result = create_worktree(
                 quest_root,
                 branch=branch_name,
@@ -2184,9 +2587,11 @@ class ArtifactService:
                 "parent_branch": parent_branch,
                 "start_point": start_ref,
                 "worktree_root": str(worktree_root) if worktree_root else None,
+                "workspace_mode": self._workspace_mode_for_branch(branch_name, has_idea=bool(idea_id)),
                 "source": {"kind": "system", "role": "artifact"},
             },
             checkpoint=False,
+            workspace_root=worktree_root if worktree_root else None,
         )
         return {
             "ok": True,
@@ -2198,6 +2603,364 @@ class ArtifactService:
             "start_point": start_ref,
             "guidance": "Use this branch/worktree for the isolated idea or run. Keep durable outputs under quest_root.",
             "artifact": artifact_result,
+        }
+
+    def activate_branch(
+        self,
+        quest_root: Path,
+        *,
+        branch: str | None = None,
+        idea_id: str | None = None,
+        run_id: str | None = None,
+        anchor: str | None = "auto",
+        promote_to_head: bool = False,
+        create_worktree_if_missing: bool = True,
+    ) -> dict[str, Any]:
+        state = self.quest_service.read_research_state(quest_root)
+        active_campaign_id = str(state.get("active_analysis_campaign_id") or "").strip() or None
+        if active_campaign_id:
+            raise ValueError(
+                "activate_branch cannot run while an analysis campaign is active. "
+                "Finish or close the campaign first."
+            )
+
+        target = self._resolve_branch_activation_target(
+            quest_root,
+            branch=branch,
+            idea_id=idea_id,
+            run_id=run_id,
+        )
+        branch_name = str(target.get("branch") or "").strip()
+        if str(target.get("branch_kind") or self._branch_kind_from_name(branch_name)).strip().lower() != "paper":
+            self._require_baseline_gate_open(quest_root, action="activate_branch")
+        resolved_idea_id = str(target.get("idea_id") or "").strip() or None
+        latest_main_run = (
+            dict(target.get("latest_main_run") or {})
+            if isinstance(target.get("latest_main_run"), dict)
+            else {}
+        )
+        latest_idea = (
+            dict(target.get("latest_idea") or {})
+            if isinstance(target.get("latest_idea"), dict)
+            else {}
+        )
+        branch_kind = str(target.get("branch_kind") or self._branch_kind_from_name(branch_name)).strip().lower() or "branch"
+        source_parent_branch = str(target.get("parent_branch") or "").strip() or None
+
+        workspace_root = self._branch_workspace_root(quest_root, branch_name)
+        worktree_result = None
+        worktree_created = False
+        if workspace_root is None:
+            recorded_root = str(target.get("recorded_worktree_root") or "").strip()
+            if recorded_root:
+                candidate = Path(recorded_root)
+                if candidate.exists():
+                    workspace_root = candidate
+            if workspace_root is None:
+                if not create_worktree_if_missing:
+                    raise FileNotFoundError(
+                        f"No existing worktree is available for branch `{branch_name}` and create_worktree_if_missing=False."
+                    )
+                workspace_root = Path(target.get("suggested_worktree_root") or "")
+                worktree_result = create_worktree(
+                    quest_root,
+                    branch=branch_name,
+                    worktree_root=workspace_root,
+                    start_point=branch_name,
+                )
+                if not bool(worktree_result.get("ok")):
+                    raise RuntimeError(
+                        f"Failed to activate branch `{branch_name}`: {worktree_result.get('stderr') or 'worktree creation failed.'}"
+                    )
+                worktree_created = True
+
+        resolved_workspace_root = workspace_root or quest_root
+        idea_md_path = (
+            str(target.get("idea_md_path") or "").strip()
+            or str((dict(latest_idea.get("paths") or {}) if isinstance(latest_idea.get("paths"), dict) else {}).get("idea_md") or "").strip()
+            or (str(resolved_workspace_root / "memory" / "ideas" / resolved_idea_id / "idea.md") if resolved_idea_id else "")
+        )
+        idea_draft_path = (
+            str(target.get("idea_draft_path") or "").strip()
+            or str((dict(latest_idea.get("paths") or {}) if isinstance(latest_idea.get("paths"), dict) else {}).get("idea_draft_md") or "").strip()
+            or (str(resolved_workspace_root / "memory" / "ideas" / resolved_idea_id / "draft.md") if resolved_idea_id else "")
+        )
+        resolved_idea_md_path = idea_md_path if resolved_idea_id else None
+        resolved_idea_draft_path = idea_draft_path if resolved_idea_id else None
+        has_main_result = bool(latest_main_run.get("run_id"))
+        if branch_kind == "paper":
+            next_anchor = "write" if str(anchor or "auto").strip().lower() == "auto" else self._resolve_activate_branch_anchor(
+                anchor=anchor,
+                has_idea=bool(resolved_idea_id),
+                has_main_result=has_main_result,
+            )
+        else:
+            next_anchor = self._resolve_activate_branch_anchor(
+                anchor=anchor,
+                has_idea=bool(resolved_idea_id),
+                has_main_result=has_main_result,
+            )
+        workspace_mode = self._workspace_mode_for_branch(branch_name, has_idea=bool(resolved_idea_id))
+        source_run_id = (
+            str(target.get("run_id") or "").strip()
+            or str(latest_main_run.get("run_id") or "").strip()
+            or None
+        )
+
+        artifact = self.record(
+            quest_root,
+            {
+                "kind": "decision",
+                "status": "completed",
+                "verdict": "continue",
+                "action": "activate_branch",
+                "summary": f"Activated durable branch `{branch_name}` as the current workspace.",
+                "reason": (
+                    "Return to an existing research branch without creating a new lineage node, "
+                    "so follow-up experiments or decisions continue from the correct historical context."
+                ),
+                "idea_id": resolved_idea_id,
+                "run_id": str(latest_main_run.get("run_id") or "").strip() or None,
+                "branch": branch_name,
+                "worktree_root": str(resolved_workspace_root),
+                "worktree_rel_path": self._workspace_relative(quest_root, resolved_workspace_root),
+                "flow_type": "branch_activation",
+                "protocol_step": "activate",
+                "details": {
+                    "activate_branch_by": (
+                        "idea_id"
+                        if str(idea_id or "").strip()
+                        else "run_id"
+                        if str(run_id or "").strip()
+                        else "branch"
+                    ),
+                    "promote_to_head": bool(promote_to_head),
+                    "worktree_created": worktree_created,
+                    "next_anchor": next_anchor,
+                    "workspace_mode": workspace_mode,
+                    "latest_main_run_id": str(latest_main_run.get("run_id") or "").strip() or None,
+                    "branch_kind": branch_kind,
+                    "paper_parent_branch": source_parent_branch if branch_kind == "paper" else None,
+                },
+            },
+            checkpoint=False,
+            workspace_root=resolved_workspace_root,
+        )
+
+        research_state_updates: dict[str, Any] = {
+            "active_idea_id": resolved_idea_id,
+            "current_workspace_branch": branch_name,
+            "current_workspace_root": str(resolved_workspace_root),
+            "active_idea_md_path": resolved_idea_md_path,
+            "active_idea_draft_path": resolved_idea_draft_path,
+            "active_analysis_campaign_id": None,
+            "analysis_parent_branch": None,
+            "analysis_parent_worktree_root": None,
+            "paper_parent_branch": source_parent_branch if branch_kind == "paper" else None,
+            "paper_parent_worktree_root": (
+                str(self._branch_workspace_root(quest_root, source_parent_branch))
+                if branch_kind == "paper" and source_parent_branch and self._branch_workspace_root(quest_root, source_parent_branch)
+                else None
+            ),
+            "paper_parent_run_id": source_run_id if branch_kind == "paper" else None,
+            "next_pending_slice_id": None,
+            "workspace_mode": workspace_mode,
+            "last_flow_type": "branch_activation",
+        }
+        if promote_to_head:
+            research_state_updates["research_head_branch"] = branch_name
+            research_state_updates["research_head_worktree_root"] = str(resolved_workspace_root)
+        research_state = self.quest_service.update_research_state(quest_root, **research_state_updates)
+        self.quest_service.update_settings(self._quest_id(quest_root), active_anchor=next_anchor)
+
+        interaction = self.interact(
+            quest_root,
+            kind="milestone",
+            message=(
+                f"Activated branch `{branch_name}`.\n"
+                f"- Worktree: `{resolved_workspace_root}`\n"
+                f"- Active idea: `{resolved_idea_id or 'none'}`\n"
+                f"- Latest main run: `{str(latest_main_run.get('run_id') or '').strip() or 'none'}`\n"
+                f"- Promoted to head: `{bool(promote_to_head)}`\n"
+                f"- Next anchor: `{next_anchor}`"
+            ),
+            deliver_to_bound_conversations=True,
+            include_recent_inbound_messages=False,
+            attachments=[
+                {
+                    "kind": "branch_activation",
+                    "branch": branch_name,
+                    "worktree_root": str(resolved_workspace_root),
+                    "idea_id": resolved_idea_id,
+                    "latest_main_run_id": str(latest_main_run.get("run_id") or "").strip() or None,
+                    "next_anchor": next_anchor,
+                    "promote_to_head": bool(promote_to_head),
+                }
+            ],
+        )
+        return {
+            "ok": True,
+            "branch": branch_name,
+            "worktree_root": str(resolved_workspace_root),
+            "idea_id": resolved_idea_id,
+            "latest_main_run_id": str(latest_main_run.get("run_id") or "").strip() or None,
+            "branch_kind": branch_kind,
+            "source_parent_branch": source_parent_branch,
+            "idea_md_path": resolved_idea_md_path,
+            "idea_draft_path": resolved_idea_draft_path,
+            "workspace_mode": workspace_mode,
+            "next_anchor": next_anchor,
+            "promote_to_head": bool(promote_to_head),
+            "worktree_created": worktree_created,
+            "worktree": worktree_result,
+            "artifact": artifact,
+            "interaction": interaction,
+            "research_state": research_state,
+        }
+
+    def _promote_workspace_to_run_branch(
+        self,
+        quest_root: Path,
+        *,
+        run_id: str,
+        idea_id: str | None,
+        workspace_root: Path,
+        current_branch_name: str,
+    ) -> tuple[str, str | None, bool]:
+        branch_kind = self._branch_kind_from_name(current_branch_name)
+        if branch_kind == "paper":
+            raise ValueError(
+                "record_main_experiment cannot run while the active workspace is a paper branch. "
+                "Return to the evidence branch or create a new run branch first."
+            )
+        if branch_kind == "run":
+            prepare_record = self._latest_prepare_branch_record(quest_root, current_branch_name)
+            parent_branch = str(prepare_record.get("parent_branch") or "").strip() or None
+            return current_branch_name, parent_branch, False
+
+        target_branch = self._default_branch_name(quest_root, run_id=run_id, idea_id=idea_id, branch_kind="run")
+        if branch_exists(quest_root, target_branch):
+            raise ValueError(
+                f"Run branch `{target_branch}` already exists. Reuse that run branch or choose a new `run_id`."
+            )
+
+        ensure_branch(quest_root, target_branch, start_point=current_branch_name, checkout=False)
+        run_command(["git", "switch", target_branch], cwd=workspace_root, check=True)
+        self.record(
+            quest_root,
+            {
+                "kind": "decision",
+                "status": "prepared",
+                "verdict": "prepared",
+                "action": "prepare_branch",
+                "reason": f"Materialized a dedicated main-experiment branch `{target_branch}` before durable recording.",
+                "branch": target_branch,
+                "run_id": run_id,
+                "idea_id": idea_id,
+                "branch_kind": "run",
+                "parent_branch": current_branch_name,
+                "start_point": current_branch_name,
+                "worktree_root": str(workspace_root),
+                "workspace_mode": "run",
+                "source": {"kind": "system", "role": "artifact"},
+            },
+            checkpoint=False,
+            workspace_root=workspace_root,
+        )
+        self.quest_service.update_research_state(
+            quest_root,
+            active_idea_id=idea_id,
+            current_workspace_branch=target_branch,
+            current_workspace_root=str(workspace_root),
+            research_head_branch=target_branch,
+            research_head_worktree_root=str(workspace_root),
+            active_analysis_campaign_id=None,
+            analysis_parent_branch=None,
+            analysis_parent_worktree_root=None,
+            paper_parent_branch=None,
+            paper_parent_worktree_root=None,
+            paper_parent_run_id=None,
+            workspace_mode="run",
+            last_flow_type="main_experiment_branch",
+        )
+        return target_branch, current_branch_name, True
+
+    def _ensure_active_paper_workspace(
+        self,
+        quest_root: Path,
+        *,
+        source_branch: str | None = None,
+        source_run_id: str | None = None,
+        source_idea_id: str | None = None,
+    ) -> dict[str, Any]:
+        state = self.quest_service.read_research_state(quest_root)
+        current_branch_name = (
+            str(state.get("current_workspace_branch") or "").strip()
+            or current_branch(self._workspace_root_for(quest_root))
+        )
+        current_workspace_root = self._workspace_root_for(quest_root)
+        if (
+            str(state.get("workspace_mode") or "").strip() == "paper"
+            and self._branch_kind_from_name(current_branch_name) == "paper"
+        ):
+            return {
+                "ok": True,
+                "branch": current_branch_name,
+                "worktree_root": str(current_workspace_root),
+                "source_branch": str(state.get("paper_parent_branch") or "").strip() or None,
+                "source_run_id": str(state.get("paper_parent_run_id") or "").strip() or None,
+                "source_idea_id": str(state.get("active_idea_id") or "").strip() or None,
+            }
+
+        resolved_source_branch = (
+            str(source_branch or "").strip()
+            or str(state.get("paper_parent_branch") or "").strip()
+            or str(state.get("current_workspace_branch") or "").strip()
+            or str(state.get("research_head_branch") or "").strip()
+            or current_branch(current_workspace_root)
+        )
+        if not resolved_source_branch:
+            raise ValueError("Unable to resolve the source branch for the paper workspace.")
+
+        latest_main_run = self._latest_main_run_for_branch(quest_root, resolved_source_branch)
+        resolved_run_id = (
+            str(source_run_id or "").strip()
+            or str((latest_main_run or {}).get("run_id") or "").strip()
+            or None
+        )
+        resolved_idea_id = (
+            str(source_idea_id or "").strip()
+            or str((latest_main_run or {}).get("idea_id") or "").strip()
+            or str(state.get("active_idea_id") or "").strip()
+            or None
+        )
+        paper_branch = (
+            self._default_branch_name(quest_root, run_id=resolved_run_id, idea_id=resolved_idea_id, branch_kind="paper")
+            if resolved_run_id
+            else f"paper/{slugify(resolved_source_branch, 'paper')}"
+        )
+        if not branch_exists(quest_root, paper_branch):
+            self.prepare_branch(
+                quest_root,
+                run_id=resolved_run_id,
+                idea_id=resolved_idea_id,
+                branch=paper_branch,
+                branch_kind="paper",
+                create_worktree_flag=True,
+                start_point=resolved_source_branch,
+            )
+        activated = self.activate_branch(
+            quest_root,
+            branch=paper_branch,
+            anchor="write",
+            promote_to_head=False,
+            create_worktree_if_missing=True,
+        )
+        return {
+            **activated,
+            "source_branch": resolved_source_branch,
+            "source_run_id": resolved_run_id,
+            "source_idea_id": resolved_idea_id,
         }
 
     def submit_idea(
@@ -2235,8 +2998,8 @@ class ArtifactService:
         if normalized_mode == "create":
             resolved_idea_id = str(idea_id or generate_id("idea")).strip()
             active_branch = (
-                str(state.get("research_head_branch") or "").strip()
-                or str(state.get("current_workspace_branch") or "").strip()
+                str(state.get("current_workspace_branch") or "").strip()
+                or str(state.get("research_head_branch") or "").strip()
                 or current_branch(self._workspace_root_for(quest_root))
             )
             active_parent_branch = self._idea_parent_branch(self._latest_idea_for_branch(quest_root, active_branch))
@@ -2441,9 +3204,17 @@ class ArtifactService:
             raise ValueError("submit_idea(mode='revise') requires an existing active `idea_id`.")
         if normalized_lineage_intent:
             raise ValueError("submit_idea(mode='revise') does not accept `lineage_intent`; use mode='create' for new branch lineage.")
-        branch_name = str(state.get("research_head_branch") or f"idea/{quest_id}-{resolved_idea_id}").strip()
+        branch_name = str(
+            state.get("current_workspace_branch")
+            or state.get("research_head_branch")
+            or f"idea/{quest_id}-{resolved_idea_id}"
+        ).strip()
         worktree_root = Path(
-            str(state.get("research_head_worktree_root") or canonical_worktree_root(quest_root, f"idea-{resolved_idea_id}"))
+            str(
+                state.get("current_workspace_root")
+                or state.get("research_head_worktree_root")
+                or canonical_worktree_root(quest_root, f"idea-{resolved_idea_id}")
+            )
         )
         ensure_dir(worktree_root / "memory" / "ideas" / resolved_idea_id)
         idea_md_path = worktree_root / "memory" / "ideas" / resolved_idea_id / "idea.md"
@@ -2545,17 +3316,22 @@ class ArtifactService:
             checkpoint=False,
             workspace_root=worktree_root,
         )
+        research_state_updates: dict[str, Any] = {
+            "active_idea_id": resolved_idea_id,
+            "current_workspace_branch": branch_name,
+            "current_workspace_root": str(worktree_root),
+            "active_idea_md_path": str(idea_md_path),
+            "active_idea_draft_path": str(idea_draft_path),
+            "workspace_mode": "idea",
+            "last_flow_type": "idea_revision",
+        }
+        current_head_branch = str(state.get("research_head_branch") or "").strip()
+        if not current_head_branch or current_head_branch == branch_name:
+            research_state_updates["research_head_branch"] = branch_name
+            research_state_updates["research_head_worktree_root"] = str(worktree_root)
         research_state = self.quest_service.update_research_state(
             quest_root,
-            active_idea_id=resolved_idea_id,
-            research_head_branch=branch_name,
-            research_head_worktree_root=str(worktree_root),
-            current_workspace_branch=branch_name,
-            current_workspace_root=str(worktree_root),
-            active_idea_md_path=str(idea_md_path),
-            active_idea_draft_path=str(idea_draft_path),
-            workspace_mode="idea",
-            last_flow_type="idea_revision",
+            **research_state_updates,
         )
         self.quest_service.update_settings(quest_id, active_anchor="experiment")
         checkpoint_result = self._checkpoint_with_optional_push(
@@ -2712,13 +3488,20 @@ class ArtifactService:
         baseline_id: str | None = None,
         baseline_variant_id: str | None = None,
         evaluation_summary: dict[str, Any] | None = None,
+        strict_metric_contract: bool = False,
     ) -> dict[str, Any]:
         self._require_baseline_gate_open(quest_root, action="record_main_experiment")
         state = self.quest_service.read_research_state(quest_root)
-        if str(state.get("workspace_mode") or "").strip() == "analysis":
+        workspace_mode = str(state.get("workspace_mode") or "").strip()
+        if workspace_mode == "analysis":
             raise ValueError(
                 "record_main_experiment cannot run while the active workspace is an analysis slice. "
                 "Finish or close the analysis campaign first."
+            )
+        if workspace_mode == "paper":
+            raise ValueError(
+                "record_main_experiment cannot run while the active workspace is a paper branch. "
+                "Return to the source evidence branch or create a new run branch first."
             )
 
         run_identifier = str(run_id or "").strip()
@@ -2727,7 +3510,18 @@ class ArtifactService:
 
         active_idea_id = str(state.get("active_idea_id") or "").strip() or None
         workspace_root = self._workspace_root_for(quest_root)
-        branch_name = str(state.get("research_head_branch") or current_branch(workspace_root)).strip()
+        current_branch_name = str(
+            state.get("current_workspace_branch")
+            or state.get("research_head_branch")
+            or current_branch(workspace_root)
+        ).strip()
+        branch_name, parent_branch, auto_promoted_run_branch = self._promote_workspace_to_run_branch(
+            quest_root,
+            run_id=run_identifier,
+            idea_id=active_idea_id,
+            workspace_root=workspace_root,
+            current_branch_name=current_branch_name,
+        )
         attachment = self._active_baseline_attachment(quest_root, workspace_root=workspace_root)
         baseline_entry = dict(attachment.get("entry") or {}) if isinstance(attachment, dict) else {}
         selected_variant = dict(attachment.get("selected_variant") or {}) if isinstance(attachment, dict) else {}
@@ -2761,12 +3555,24 @@ class ArtifactService:
             metric_contract or baseline_entry.get("metric_contract"),
             baseline_id=resolved_baseline_id,
             metrics_summary=normalized_metrics_summary,
+            metric_rows=normalized_metric_rows,
             primary_metric=baseline_entry.get("primary_metric"),
             baseline_variants=baseline_entry.get("baseline_variants"),
         )
+        baseline_contract_payload = self._load_metric_contract_payload(quest_root, metric_contract_json_rel_path)
+        metric_validation: dict[str, Any] | None = None
+        if strict_metric_contract:
+            metric_validation = validate_main_experiment_against_baseline_contract(
+                baseline_contract_payload=baseline_contract_payload,
+                run_metric_contract=effective_metric_contract,
+                metric_rows=normalized_metric_rows,
+                metrics_summary=normalized_metrics_summary,
+                dataset_scope=dataset_scope,
+            )
         baseline_metrics = selected_baseline_metrics(baseline_entry, resolved_variant_id)
         comparisons = compare_with_baseline(
             metrics_summary=normalized_metrics_summary,
+            metric_rows=normalized_metric_rows,
             metric_contract=effective_metric_contract,
             baseline_metrics=baseline_metrics,
         )
@@ -2827,6 +3633,7 @@ class ArtifactService:
             "",
             f"- Run id: `{run_identifier}`",
             f"- Branch: `{branch_name}`",
+            f"- Parent branch: `{parent_branch or 'none'}`",
             f"- Worktree: `{workspace_root}`",
             f"- Idea: `{active_idea_id or 'none'}`",
             f"- Baseline: `{resolved_baseline_id or 'none'}`",
@@ -2924,6 +3731,7 @@ class ArtifactService:
             "verdict": verdict,
             "idea_id": active_idea_id,
             "branch": branch_name,
+            "parent_branch": parent_branch,
             "worktree_root": str(workspace_root),
             "head_commit": head_commit(workspace_root),
             "baseline_ref": {
@@ -2956,6 +3764,7 @@ class ArtifactService:
             "evidence_paths": resolved_evidence_paths,
             "files_changed": resolved_changed_files,
             "run_md_path": str(run_md_path),
+            "metric_validation": metric_validation,
         }
         write_json(result_json_path, result_payload)
 
@@ -2970,6 +3779,7 @@ class ArtifactService:
                 "reason": conclusion.strip() or progress_eval.get("reason") or "Main experiment result recorded.",
                 "idea_id": active_idea_id,
                 "branch": branch_name,
+                "parent_branch": parent_branch,
                 "worktree_root": str(workspace_root),
                 "worktree_rel_path": self._workspace_relative(quest_root, workspace_root),
                 "flow_type": "main_experiment",
@@ -2989,6 +3799,7 @@ class ArtifactService:
                     "breakthrough_level": progress_eval.get("breakthrough_level"),
                     "need_research_paper": delivery_policy.get("need_research_paper"),
                     "recommended_next_route": delivery_policy.get("recommended_next_route"),
+                    "auto_promoted_run_branch": auto_promoted_run_branch,
                     "changed_file_count": len(resolved_changed_files),
                     "evidence_count": len(resolved_evidence_paths),
                     "evaluation_summary": normalized_evaluation_summary,
@@ -3008,6 +3819,7 @@ class ArtifactService:
                 },
                 "progress_eval": progress_eval,
                 "evaluation_summary": normalized_evaluation_summary,
+                "metric_validation": metric_validation,
                 "files_changed": resolved_changed_files,
                 "evidence_paths": resolved_evidence_paths,
                 "verdict": verdict,
@@ -3049,6 +3861,22 @@ class ArtifactService:
             ],
         )
         self.quest_service.update_settings(self._quest_id(quest_root), active_anchor="decision")
+        research_state = self.quest_service.update_research_state(
+            quest_root,
+            active_idea_id=active_idea_id,
+            current_workspace_branch=branch_name,
+            current_workspace_root=str(workspace_root),
+            research_head_branch=branch_name,
+            research_head_worktree_root=str(workspace_root),
+            active_analysis_campaign_id=None,
+            analysis_parent_branch=None,
+            analysis_parent_worktree_root=None,
+            paper_parent_branch=None,
+            paper_parent_worktree_root=None,
+            paper_parent_run_id=None,
+            workspace_mode="run",
+            last_flow_type="main_experiment_recorded",
+        )
         return {
             "ok": True,
             "guidance": artifact.get("guidance"),
@@ -3058,10 +3886,14 @@ class ArtifactService:
             "suggested_artifact_calls": artifact.get("suggested_artifact_calls"),
             "next_instruction": artifact.get("next_instruction"),
             "run_id": run_identifier,
+            "branch": branch_name,
+            "parent_branch": parent_branch,
+            "auto_promoted_run_branch": auto_promoted_run_branch,
             "run_md_path": str(run_md_path),
             "result_json_path": str(result_json_path),
             "artifact": artifact,
             "interaction": interaction,
+            "research_state": research_state,
             "metrics_summary": normalized_metrics_summary,
             "baseline_comparisons": {
                 key: value for key, value in comparisons.items() if key != "primary"
@@ -3069,6 +3901,7 @@ class ArtifactService:
             "progress_eval": progress_eval,
             "evaluation_summary": normalized_evaluation_summary,
             "delivery_policy": delivery_policy,
+            "metric_validation": metric_validation,
         }
 
     def create_analysis_campaign(
@@ -3560,11 +4393,31 @@ class ArtifactService:
         if normalized_mode not in {"candidate", "select", "revise"}:
             raise ValueError("submit_paper_outline mode must be `candidate`, `select`, or `revise`.")
 
-        existing_selected = read_json(self._paper_selected_outline_path(quest_root), {})
+        paper_context = (
+            self._ensure_active_paper_workspace(quest_root)
+            if normalized_mode in {"select", "revise"}
+            else {
+                "worktree_root": str(self._workspace_root_for(quest_root)),
+                "branch": str(self.quest_service.read_research_state(quest_root).get("current_workspace_branch") or "").strip() or None,
+            }
+        )
+        workspace_root = Path(str(paper_context.get("worktree_root") or self._workspace_root_for(quest_root)))
+        paper_root = (
+            ensure_dir(workspace_root / "paper")
+            if normalized_mode in {"select", "revise"}
+            else self._paper_root(quest_root, workspace_root=workspace_root, create=True)
+        )
+        if normalized_mode in {"select", "revise"}:
+            selected_outline_path = paper_root / "selected_outline.json"
+        else:
+            selected_outline_path = self._paper_selected_outline_path(quest_root, workspace_root=workspace_root)
+        existing_selected = read_json(selected_outline_path, {})
+        if not isinstance(existing_selected, dict) or not existing_selected:
+            existing_selected = read_json(quest_root / "paper" / "selected_outline.json", {})
         existing_selected = existing_selected if isinstance(existing_selected, dict) else {}
         if normalized_mode == "candidate":
             resolved_outline_id = str(outline_id or self._next_paper_outline_id(quest_root)).strip()
-            candidate_path = self._paper_outline_candidates_root(quest_root) / f"{resolved_outline_id}.json"
+            candidate_path = self._paper_outline_candidates_root(quest_root, workspace_root=workspace_root) / f"{resolved_outline_id}.json"
             existing = read_json(candidate_path, {})
             existing = existing if isinstance(existing, dict) else {}
             record = self._normalize_paper_outline_record(
@@ -3599,7 +4452,7 @@ class ArtifactService:
                     },
                 },
                 checkpoint=False,
-                workspace_root=self._workspace_root_for(quest_root),
+                workspace_root=workspace_root,
             )
             return {
                 "ok": True,
@@ -3613,8 +4466,13 @@ class ArtifactService:
         source_outline_id = str(outline_id or existing_selected.get("outline_id") or "").strip()
         if not source_outline_id:
             raise ValueError("submit_paper_outline(select/revise) requires an existing `outline_id` or selected outline.")
-        source_candidate_path = self._paper_outline_candidates_root(quest_root) / f"{source_outline_id}.json"
+        source_candidate_path = paper_root / "outlines" / "candidates" / f"{source_outline_id}.json"
         source_record = read_json(source_candidate_path, {})
+        if not isinstance(source_record, dict) or not source_record:
+            fallback_candidate_path = quest_root / "paper" / "outlines" / "candidates" / f"{source_outline_id}.json"
+            source_record = read_json(fallback_candidate_path, {})
+            if isinstance(source_record, dict) and source_record:
+                source_candidate_path = fallback_candidate_path
         if not isinstance(source_record, dict) or not source_record:
             source_record = existing_selected if str(existing_selected.get("outline_id") or "").strip() == source_outline_id else {}
         if not source_record:
@@ -3632,7 +4490,6 @@ class ArtifactService:
             created_at=str(source_record.get("created_at") or "") or None,
         )
 
-        selected_outline_path = self._paper_selected_outline_path(quest_root)
         write_json(selected_outline_path, resolved_record)
         if source_candidate_path.exists():
             source_record["status"] = "selected" if normalized_mode == "select" else "revised"
@@ -3640,10 +4497,10 @@ class ArtifactService:
             write_json(source_candidate_path, source_record)
         revised_outline_path = None
         if normalized_mode == "revise":
-            revised_outline_path = self._paper_outline_revisions_root(quest_root) / f"{source_outline_id}.json"
+            revised_outline_path = ensure_dir(paper_root / "outlines" / "revisions") / f"{source_outline_id}.json"
             write_json(revised_outline_path, resolved_record)
 
-        outline_selection_path = self._paper_outline_selection_path(quest_root)
+        outline_selection_path = paper_root / "outline_selection.md"
         action_label = "selected" if normalized_mode == "select" else "revised"
         selection_lines = [
             f"# Outline {normalized_mode.capitalize()}",
@@ -3682,7 +4539,7 @@ class ArtifactService:
                 },
             },
             checkpoint=False,
-            workspace_root=self._workspace_root_for(quest_root),
+            workspace_root=workspace_root,
         )
         return {
             "ok": True,
@@ -3710,24 +4567,44 @@ class ArtifactService:
         pdf_path: str | None = None,
         latex_root_path: str | None = None,
     ) -> dict[str, Any]:
-        selected_outline_path = self._paper_selected_outline_path(quest_root)
+        paper_context = self._ensure_active_paper_workspace(quest_root)
+        workspace_root = Path(str(paper_context.get("worktree_root") or self._workspace_root_for(quest_root)))
+        paper_root = self._paper_root(quest_root, workspace_root=workspace_root, create=True)
+        selected_outline_path = self._paper_selected_outline_path(quest_root, workspace_root=workspace_root)
         selected_outline = read_json(selected_outline_path, {})
+        if not isinstance(selected_outline, dict) or not selected_outline:
+            fallback_selected_outline_path = quest_root / "paper" / "selected_outline.json"
+            selected_outline = read_json(fallback_selected_outline_path, {})
+            if isinstance(selected_outline, dict) and selected_outline:
+                selected_outline_path = fallback_selected_outline_path
         selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
         if not selected_outline and not str(outline_path or "").strip():
             raise ValueError("submit_paper_bundle requires a selected outline or explicit `outline_path`.")
 
-        manifest_path = self._paper_bundle_manifest_path(quest_root)
-        baseline_inventory = self._write_paper_baseline_inventory(quest_root)
-        baseline_inventory_path = self._paper_baseline_inventory_path(quest_root)
-        source_branch = (
-            str(self.quest_service.read_research_state(quest_root).get("current_workspace_branch") or "").strip()
-            or current_branch(self._workspace_root_for(quest_root))
-        )
+        manifest_path = self._paper_bundle_manifest_path(quest_root, workspace_root=workspace_root)
+        baseline_inventory = self._write_paper_baseline_inventory(quest_root, workspace_root=workspace_root)
+        baseline_inventory_path = self._paper_baseline_inventory_path(quest_root, workspace_root=workspace_root)
+        source_branch = str(paper_context.get("source_branch") or "").strip() or None
+        paper_branch = str(paper_context.get("branch") or "").strip() or current_branch(workspace_root)
+        source_run_id = str(paper_context.get("source_run_id") or "").strip() or None
+        source_idea_id = str(paper_context.get("source_idea_id") or "").strip() or None
+        paper_manifest_rel = self._workspace_relative(quest_root, manifest_path) or "paper/paper_bundle_manifest.json"
+        paper_inventory_rel = self._workspace_relative(quest_root, baseline_inventory_path) or "paper/baseline_inventory.json"
         open_source_manifest = self._ensure_open_source_prep(
             quest_root,
+            workspace_root=workspace_root,
             source_branch=source_branch,
-            source_bundle_manifest_path="paper/paper_bundle_manifest.json",
-            baseline_inventory_path="paper/baseline_inventory.json",
+            source_bundle_manifest_path=paper_manifest_rel,
+            baseline_inventory_path=paper_inventory_rel,
+        )
+        default_draft_path = self._workspace_relative(quest_root, paper_root / "draft.md") or "paper/draft.md"
+        default_writing_plan_path = self._workspace_relative(quest_root, paper_root / "writing_plan.md") or "paper/writing_plan.md"
+        default_references_path = self._workspace_relative(quest_root, paper_root / "references.bib") or "paper/references.bib"
+        default_claim_map_path = (
+            self._workspace_relative(quest_root, paper_root / "claim_evidence_map.json") or "paper/claim_evidence_map.json"
+        )
+        default_compile_report_path = (
+            self._workspace_relative(quest_root, paper_root / "build" / "compile_report.json") or "paper/build/compile_report.json"
         )
         manifest = {
             "schema_version": 1,
@@ -3740,15 +4617,23 @@ class ArtifactService:
             or "paper",
             "summary": str(summary or "").strip() or None,
             "outline_path": str(outline_path or selected_outline_path).strip() or None,
-            "draft_path": str(draft_path or "paper/draft.md").strip() or None,
-            "writing_plan_path": str(writing_plan_path or "paper/writing_plan.md").strip() or None,
-            "references_path": str(references_path or "paper/references.bib").strip() or None,
-            "claim_evidence_map_path": str(claim_evidence_map_path or "paper/claim_evidence_map.json").strip() or None,
-            "compile_report_path": str(compile_report_path or "paper/build/compile_report.json").strip() or None,
+            "paper_branch": paper_branch,
+            "source_branch": source_branch,
+            "source_run_id": source_run_id,
+            "source_idea_id": source_idea_id,
+            "draft_path": str(draft_path or default_draft_path).strip() or None,
+            "writing_plan_path": str(writing_plan_path or default_writing_plan_path).strip() or None,
+            "references_path": str(references_path or default_references_path).strip() or None,
+            "claim_evidence_map_path": str(claim_evidence_map_path or default_claim_map_path).strip() or None,
+            "compile_report_path": str(compile_report_path or default_compile_report_path).strip() or None,
             "pdf_path": str(pdf_path or "").strip() or None,
             "latex_root_path": str(latex_root_path or "").strip() or None,
-            "baseline_inventory_path": "paper/baseline_inventory.json",
-            "open_source_manifest_path": "release/open_source/manifest.json",
+            "baseline_inventory_path": paper_inventory_rel,
+            "open_source_manifest_path": self._workspace_relative(
+                quest_root,
+                self._open_source_manifest_path(quest_root, workspace_root=workspace_root),
+            )
+            or "release/open_source/manifest.json",
             "open_source_cleanup_plan_path": str(open_source_manifest.get("cleanup_plan_path") or "").strip()
             or "release/open_source/cleanup_plan.md",
             "selected_outline_ref": str(selected_outline.get("outline_id") or "").strip() or None,
@@ -3773,24 +4658,27 @@ class ArtifactService:
                     "draft_path": manifest.get("draft_path"),
                     "pdf_path": manifest.get("pdf_path"),
                     "baseline_inventory_path": str(baseline_inventory_path),
-                    "open_source_manifest_path": str(self._open_source_manifest_path(quest_root)),
+                    "open_source_manifest_path": str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root)),
                 },
                 "details": {
                     "title": manifest.get("title"),
                     "selected_outline_ref": manifest.get("selected_outline_ref"),
                     "baseline_inventory_count": len(baseline_inventory.get("supplementary_baselines") or []),
                     "open_source_status": open_source_manifest.get("status"),
+                    "paper_branch": paper_branch,
+                    "source_branch": source_branch,
+                    "source_run_id": source_run_id,
                 },
             },
             checkpoint=False,
-            workspace_root=self._workspace_root_for(quest_root),
+            workspace_root=workspace_root,
         )
         return {
             "ok": True,
             "manifest_path": str(manifest_path),
             "manifest": manifest,
             "baseline_inventory_path": str(baseline_inventory_path),
-            "open_source_manifest_path": str(self._open_source_manifest_path(quest_root)),
+            "open_source_manifest_path": str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root)),
             "artifact": artifact,
         }
 
@@ -4229,17 +5117,42 @@ class ArtifactService:
             message=f"analysis: summarize {campaign_id}",
         )
         restored_idea_id = self._latest_branch_idea_id(quest_root, parent_branch) or str(manifest.get("active_idea_id") or "").strip() or None
-        research_state = self.quest_service.update_research_state(
+        startup_contract = self._startup_contract(quest_root)
+        raw_need_research_paper = startup_contract.get("need_research_paper")
+        need_research_paper = raw_need_research_paper if isinstance(raw_need_research_paper, bool) else True
+        base_research_state = self.quest_service.update_research_state(
             quest_root,
             active_idea_id=restored_idea_id,
             active_analysis_campaign_id=None,
+            analysis_parent_branch=None,
+            analysis_parent_worktree_root=None,
+            paper_parent_branch=None,
+            paper_parent_worktree_root=None,
+            paper_parent_run_id=None,
             next_pending_slice_id=None,
             current_workspace_branch=parent_branch,
             current_workspace_root=str(parent_worktree_root),
-            workspace_mode="idea",
+            workspace_mode="run" if self._branch_kind_from_name(parent_branch) == "run" else "idea",
             last_flow_type="analysis_campaign_complete",
         )
-        self.quest_service.update_settings(self._quest_id(quest_root), active_anchor="decision")
+        writing_workspace: dict[str, Any] | None = None
+        if need_research_paper:
+            try:
+                writing_workspace = self._ensure_active_paper_workspace(
+                    quest_root,
+                    source_branch=parent_branch,
+                    source_run_id=str(manifest.get("parent_run_id") or "").strip() or None,
+                    source_idea_id=restored_idea_id,
+                )
+            except Exception:
+                writing_workspace = None
+
+        if writing_workspace:
+            research_state = self.quest_service.read_research_state(quest_root)
+            self.quest_service.update_settings(self._quest_id(quest_root), active_anchor="write")
+        else:
+            research_state = base_research_state
+            self.quest_service.update_settings(self._quest_id(quest_root), active_anchor="decision")
         interaction = self.interact(
             quest_root,
             kind="milestone",
@@ -4248,7 +5161,15 @@ class ArtifactService:
                 f"- Returned to parent branch: `{parent_branch}`\n"
                 f"- Parent worktree: `{parent_worktree_root}`\n"
                 f"- Analysis summary: `{summary_path}`\n"
-                "Use the completed analysis evidence to make the next durable route decision."
+                + (
+                    (
+                        f"- Writing branch: `{writing_workspace.get('branch')}`\n"
+                        f"- Writing worktree: `{writing_workspace.get('worktree_root')}`\n"
+                        "Writing is now active on the dedicated paper branch."
+                    )
+                    if writing_workspace
+                    else "Use the completed analysis evidence to make the next durable route decision."
+                )
             ),
             deliver_to_bound_conversations=True,
             include_recent_inbound_messages=False,
@@ -4259,6 +5180,8 @@ class ArtifactService:
                     "parent_branch": parent_branch,
                     "parent_worktree_root": str(parent_worktree_root),
                     "summary_path": str(summary_path),
+                    "writing_branch": writing_workspace.get("branch") if writing_workspace else None,
+                    "writing_worktree_root": writing_workspace.get("worktree_root") if writing_workspace else None,
                 }
             ],
         )
@@ -4284,6 +5207,8 @@ class ArtifactService:
             "completed": True,
             "returned_to_branch": parent_branch,
             "returned_to_worktree_root": str(parent_worktree_root),
+            "writing_branch": writing_workspace.get("branch") if writing_workspace else None,
+            "writing_worktree_root": writing_workspace.get("worktree_root") if writing_workspace else None,
         }
 
     def publish_baseline(self, quest_root: Path, payload: dict) -> dict:
@@ -4348,6 +5273,7 @@ class ArtifactService:
         metrics_summary: dict[str, Any] | None = None,
         primary_metric: dict[str, Any] | None = None,
         auto_advance: bool = True,
+        strict_metric_contract: bool = False,
     ) -> dict[str, Any]:
         resolved = self._resolve_baseline_path(quest_root, baseline_path, baseline_id=baseline_id)
         resolved_baseline_id = str(resolved["baseline_id"] or "").strip()
@@ -4438,6 +5364,72 @@ class ArtifactService:
                 or entry.get("default_variant_id")
                 or ""
             ).strip() or None
+
+        source_metrics_summary = (
+            selected_variant.get("metrics_summary")
+            if isinstance(selected_variant, dict) and selected_variant.get("metrics_summary") is not None
+            else entry.get("metrics_summary")
+        )
+        canonical_baseline = (
+            validate_baseline_metric_contract_submission(
+                metric_contract=entry.get("metric_contract"),
+                metrics_summary=source_metrics_summary,
+                primary_metric=entry.get("primary_metric"),
+            )
+            if strict_metric_contract
+            else canonicalize_baseline_submission(
+                metric_contract=entry.get("metric_contract"),
+                metrics_summary=source_metrics_summary,
+                primary_metric=entry.get("primary_metric"),
+            )
+        )
+        entry = {
+            **entry,
+            "metrics_summary": canonical_baseline["metrics_summary"],
+            "metric_contract": canonical_baseline["metric_contract"],
+            "metric_details": canonical_baseline["metric_details"],
+        }
+        if isinstance(selected_variant, dict):
+            selected_variant = {
+                **selected_variant,
+                "metrics_summary": canonical_baseline["metrics_summary"],
+            }
+        if isinstance(entry.get("baseline_variants"), list):
+            entry["baseline_variants"] = [
+                (
+                    {
+                        **variant,
+                        "metrics_summary": canonical_baseline["metrics_summary"],
+                    }
+                    if isinstance(variant, dict)
+                    and str(variant.get("variant_id") or "").strip() == str(resolved_variant_id or "").strip()
+                    else variant
+                )
+                for variant in entry.get("baseline_variants", [])
+            ]
+        primary_metric_id = str(
+            (entry.get("primary_metric") or {}).get("metric_id")
+            or (entry.get("primary_metric") or {}).get("name")
+            or (entry.get("primary_metric") or {}).get("id")
+            or (canonical_baseline["metric_contract"] or {}).get("primary_metric_id")
+            or ""
+        ).strip()
+        if primary_metric_id and primary_metric_id in canonical_baseline["metrics_summary"]:
+            primary_metric_meta = next(
+                (
+                    item
+                    for item in (canonical_baseline["metric_contract"] or {}).get("metrics", [])
+                    if isinstance(item, dict) and str(item.get("metric_id") or "").strip() == primary_metric_id
+                ),
+                {},
+            )
+            entry["primary_metric"] = {
+                **(dict(entry.get("primary_metric") or {}) if isinstance(entry.get("primary_metric"), dict) else {}),
+                "metric_id": primary_metric_id,
+                "value": canonical_baseline["metrics_summary"][primary_metric_id],
+                "direction": primary_metric_meta.get("direction")
+                or (entry.get("primary_metric") or {}).get("direction"),
+            }
 
         metric_contract_json = self._write_baseline_metric_contract_json(
             quest_root,
@@ -4540,6 +5532,7 @@ class ArtifactService:
             "artifact": artifact,
             "baseline_registry_entry": registry_entry,
             "snapshot": self.quest_service.snapshot(self._quest_id(quest_root)),
+            "metric_details": canonical_baseline["metric_details"],
             "legacy_guidance": "Baseline gate confirmed. Idea selection is now the default next anchor.",
         }
 
@@ -5159,6 +6152,8 @@ class ArtifactService:
             return f"idea/{quest_id}-{idea_id}"
         if branch_kind == "quest":
             return f"quest/{quest_id}"
+        if branch_kind == "paper":
+            return f"paper/{run_id or generate_id('paper')}"
         return f"run/{run_id or generate_id('run')}"
 
     def _bound_conversations(self, quest_root: Path) -> list[str]:
@@ -5187,7 +6182,14 @@ class ArtifactService:
         return targets
 
     def _connectors_config(self) -> dict[str, Any]:
-        return ConfigManager(self.home).load_named_normalized("connectors")
+        manager = ConfigManager(self.home)
+        connectors = manager.load_named_normalized("connectors")
+        for name, config in list(connectors.items()):
+            if str(name).startswith("_") or not isinstance(config, dict):
+                continue
+            if not manager.is_connector_system_enabled(str(name)):
+                config["enabled"] = False
+        return connectors
 
     @staticmethod
     def _delivery_policy(connectors: dict[str, Any]) -> str:

@@ -244,6 +244,78 @@ function renderPrepareBranch(resultRecord: Record<string, unknown> | null) {
   )
 }
 
+function renderActivateBranch(resultRecord: Record<string, unknown> | null) {
+  const branch = asString(resultRecord?.branch)
+  const worktreeRoot = asString(resultRecord?.worktree_root)
+  const ideaId = asString(resultRecord?.idea_id)
+  const latestMainRunId = asString(resultRecord?.latest_main_run_id)
+  const nextAnchor = asString(resultRecord?.next_anchor)
+  const workspaceMode = asString(resultRecord?.workspace_mode)
+  const promoteToHead = asBoolean(resultRecord?.promote_to_head)
+  const worktreeCreated = asBoolean(resultRecord?.worktree_created)
+  const artifactRecord = asRecord(asRecord(resultRecord?.artifact)?.record) ?? asRecord(resultRecord?.artifact)
+  const summary = asString(artifactRecord?.summary)
+  const reason = asString(artifactRecord?.reason)
+  const paths = extractPathEntries({
+    paths: {
+      worktree_root: worktreeRoot,
+      idea_md: asString(resultRecord?.idea_md_path),
+      idea_draft_md: asString(resultRecord?.idea_draft_path),
+    },
+  })
+
+  return (
+    <>
+      <DsToolSection title="Active workspace">
+        <div className="space-y-2.5 text-[12px] leading-6 text-[var(--text-secondary)]">
+          {branch ? (
+            <div className="flex items-center gap-2 text-[var(--text-primary)]">
+              <GitBranch className="h-4 w-4 text-[#7a7297]" />
+              <span className="font-medium">{branch}</span>
+            </div>
+          ) : null}
+          <div className="flex flex-wrap gap-1.5">
+            {workspaceMode ? <DsToolPill>{workspaceMode} workspace</DsToolPill> : null}
+            {nextAnchor ? <DsToolPill tone="muted">next: {nextAnchor}</DsToolPill> : null}
+            {promoteToHead != null ? (
+              <DsToolPill tone={promoteToHead ? 'success' : 'muted'}>
+                {promoteToHead ? 'promoted to head' : 'head unchanged'}
+              </DsToolPill>
+            ) : null}
+            {worktreeCreated != null ? (
+              <DsToolPill tone={worktreeCreated ? 'success' : 'muted'}>
+                {worktreeCreated ? 'created worktree' : 'reused worktree'}
+              </DsToolPill>
+            ) : null}
+          </div>
+          {summary ? <div className="text-[var(--text-primary)]">{summary}</div> : null}
+          {reason ? (
+            <div className="rounded-[12px] bg-[rgba(255,255,255,0.68)] px-3 py-3">
+              {reason}
+            </div>
+          ) : null}
+          {ideaId ? (
+            <div>
+              Active idea: <span className="font-medium text-[var(--text-primary)]">{ideaId}</span>
+            </div>
+          ) : null}
+          {latestMainRunId ? (
+            <div>
+              Latest main run: <span className="font-medium text-[var(--text-primary)]">{latestMainRunId}</span>
+            </div>
+          ) : null}
+          {worktreeRoot ? (
+            <div>
+              Worktree: <span className="break-all font-mono text-[11px] text-[var(--text-primary)]">{worktreeRoot}</span>
+            </div>
+          ) : null}
+        </div>
+      </DsToolSection>
+      {renderPathList(paths)}
+    </>
+  )
+}
+
 function renderAttachBaseline(resultRecord: Record<string, unknown> | null) {
   const attachment = asRecord(resultRecord?.attachment)
   if (!attachment) return null
@@ -359,6 +431,51 @@ function asArrayLikeCount(value: unknown) {
   return Array.isArray(value) ? value.length : undefined
 }
 
+function renderConnectorDelivery(resultRecord: Record<string, unknown> | null) {
+  const deliveryTargets = asStringArray(resultRecord?.delivery_targets)
+  const deliveryPolicy = asString(resultRecord?.delivery_policy)
+  const preferredConnector = asString(resultRecord?.preferred_connector)
+  const delivered = asBoolean(resultRecord?.delivered)
+  const openRequestCount = asNumber(resultRecord?.open_request_count)
+  const attachmentKinds = Array.isArray(resultRecord?.normalized_attachments)
+    ? resultRecord.normalized_attachments
+        .map((entry) => asRecord(entry))
+        .filter((entry): entry is NonNullable<ReturnType<typeof asRecord>> => Boolean(entry))
+        .map((entry) => asString(entry.kind))
+        .filter(Boolean)
+    : []
+
+  if (
+    deliveryTargets.length === 0 &&
+    !deliveryPolicy &&
+    !preferredConnector &&
+    delivered == null &&
+    openRequestCount == null &&
+    attachmentKinds.length === 0
+  ) {
+    return null
+  }
+
+  return (
+    <DsToolSection title="Connector delivery">
+      <div className="space-y-2 text-[12px] leading-6 text-[var(--text-secondary)]">
+        <div className="flex flex-wrap gap-1.5">
+          {delivered != null ? (
+            <DsToolPill tone={delivered ? 'success' : 'warning'}>
+              {delivered ? 'delivered' : 'not delivered'}
+            </DsToolPill>
+          ) : null}
+          {deliveryPolicy ? <DsToolPill tone="muted">{deliveryPolicy}</DsToolPill> : null}
+          {preferredConnector ? <DsToolPill tone="muted">{preferredConnector}</DsToolPill> : null}
+          {openRequestCount != null ? <DsToolPill tone="muted">{openRequestCount} open requests</DsToolPill> : null}
+        </div>
+        {deliveryTargets.length > 0 ? <div>Delivered to: {deliveryTargets.join(', ')}</div> : null}
+        {attachmentKinds.length > 0 ? <div>Attachments: {attachmentKinds.join(', ')}</div> : null}
+      </div>
+    </DsToolSection>
+  )
+}
+
 function renderInteract(resultRecord: Record<string, unknown> | null, args: Record<string, unknown>) {
   const message = asString(resultRecord?.agent_instruction) || asString(args.message)
   const replyMode = asString(resultRecord?.reply_mode) || asString(args.reply_mode)
@@ -442,6 +559,7 @@ export function McpArtifactToolView({ toolContent }: ToolViewProps) {
     record: active ? 'DeepScientist is recording artifact...' : 'DeepScientist recorded artifact.',
     checkpoint: active ? 'DeepScientist is creating checkpoint...' : 'DeepScientist created checkpoint.',
     prepare_branch: active ? 'DeepScientist is preparing branch...' : 'DeepScientist prepared branch.',
+    activate_branch: active ? 'DeepScientist is activating branch...' : 'DeepScientist activated branch.',
     publish_baseline: active ? 'DeepScientist is publishing baseline...' : 'DeepScientist published baseline.',
     attach_baseline: active ? 'DeepScientist is attaching baseline...' : 'DeepScientist attached baseline.',
     confirm_baseline: active ? 'DeepScientist is confirming baseline...' : 'DeepScientist confirmed baseline.',
@@ -468,11 +586,16 @@ export function McpArtifactToolView({ toolContent }: ToolViewProps) {
   const subtitleMap: Record<string, string> = {
     checkpoint: 'Git-backed checkpoints keep quest state durable and reviewable.',
     prepare_branch: 'Branches and worktrees isolate experiment routes without losing context.',
+    activate_branch: 'Returning to a durable research branch should also sync the active workspace and connector context.',
     render_git_graph: 'Graph exports make quest lineage visible across branches and runs.',
   }
 
   const toolLabel = tool || 'artifact'
-  const recordSummary = asString(resultRecord?.guidance) || asString((asRecord(resultRecord?.record) ?? resultRecord)?.summary)
+  const embeddedArtifact = asRecord(asRecord(resultRecord?.artifact)?.record) ?? asRecord(resultRecord?.artifact)
+  const recordSummary =
+    asString(resultRecord?.guidance) ||
+    asString((asRecord(resultRecord?.record) ?? embeddedArtifact ?? resultRecord)?.summary)
+  const nestedInteraction = toolLabel === 'interact' ? null : asRecord(resultRecord?.interaction)
 
   return (
     <div className="flex flex-col gap-3">
@@ -500,6 +623,7 @@ export function McpArtifactToolView({ toolContent }: ToolViewProps) {
         {tool === 'record' || tool === 'publish_baseline' ? renderArtifactRecord(tool, resultRecord, args) : null}
         {tool === 'checkpoint' ? renderCheckpoint(resultRecord, args) : null}
         {tool === 'prepare_branch' ? renderPrepareBranch(resultRecord) : null}
+        {tool === 'activate_branch' ? renderActivateBranch(resultRecord) : null}
         {tool === 'attach_baseline' ? renderAttachBaseline(resultRecord) : null}
         {tool === 'arxiv' ? renderArxiv(resultRecord, args) : null}
         {tool === 'refresh_summary' ? renderRefreshSummary(resultRecord, args) : null}
@@ -523,11 +647,13 @@ export function McpArtifactToolView({ toolContent }: ToolViewProps) {
           </DsToolSection>
         ) : null}
 
+        {nestedInteraction ? renderConnectorDelivery(nestedInteraction) : null}
+
         {tool === 'render_git_graph' && resultRecord?.guidance ? (
           <DsToolSection title="Why this helps" compact>
             <div className="flex items-start gap-2 text-[12px] leading-6 text-[var(--text-secondary)]">
               <Milestone className="mt-0.5 h-4 w-4 text-[#7a7297]" />
-              <span>{asString(resultRecord.guidance)}</span>
+              <span>{asString(resultRecord?.guidance)}</span>
             </div>
           </DsToolSection>
         ) : null}
@@ -536,7 +662,7 @@ export function McpArtifactToolView({ toolContent }: ToolViewProps) {
           <DsToolSection title="Next step" compact>
             <div className="flex items-start gap-2 text-[12px] leading-6 text-[var(--text-secondary)]">
               <Sparkles className="mt-0.5 h-4 w-4 text-[#7a7297]" />
-              <span>{asString(resultRecord.guidance)}</span>
+              <span>{asString(resultRecord?.guidance)}</span>
             </div>
           </DsToolSection>
         ) : null}

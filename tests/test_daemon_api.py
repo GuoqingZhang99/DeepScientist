@@ -19,10 +19,13 @@ from websockets.sync.client import connect as websocket_connect
 
 from deepscientist.artifact import ArtifactService
 from deepscientist.config import ConfigManager
+from deepscientist.connector_profiles import list_connector_profiles
+from deepscientist.connector_runtime import format_conversation_id
 from deepscientist.daemon.api.router import match_route
 from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout
 from deepscientist.mcp.context import McpContext
+from deepscientist.qq_profiles import list_qq_profiles
 from deepscientist.runners import RunResult
 from deepscientist.shared import append_jsonl, ensure_dir, generate_id, read_jsonl, read_yaml, utc_now, write_yaml
 
@@ -553,6 +556,9 @@ def test_quest_create_handler_auto_binds_recent_connector_to_newest_quest(
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["whatsapp"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
@@ -710,6 +716,41 @@ def test_quest_bindings_handler_detects_conflicts_and_forces_rebind(temp_home: P
     assert any(item["conversation_id"] == conversation_id and item["quest_id"] == second_id for item in bindings)
 
 
+def test_quest_create_handler_rebinds_requested_connector_target_by_default(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    older = app.quest_service.create("older binding quest")
+    older_id = older["quest_id"]
+    conversation_id = "qq:direct:OPENID_REBIND_DEFAULT"
+
+    initial = app.update_quest_binding(older_id, conversation_id, force=True)
+    assert isinstance(initial, dict)
+    assert initial["ok"] is True
+
+    payload = app.handlers.quest_create(
+        {
+            "goal": "new quest should inherit requested qq binding",
+            "source": "web",
+            "requested_connector_bindings": [
+                {
+                    "connector": "qq",
+                    "conversation_id": conversation_id,
+                }
+            ],
+        }
+    )
+
+    assert isinstance(payload, dict)
+    assert payload["ok"] is True
+    newest_id = payload["snapshot"]["quest_id"]
+    assert newest_id != older_id
+    bindings = app.list_connector_bindings("qq")
+    assert any(item["conversation_id"] == conversation_id and item["quest_id"] == newest_id for item in bindings)
+    assert conversation_id not in app.quest_service.binding_sources(older_id)
+    assert conversation_id in app.quest_service.binding_sources(newest_id)
+
+
 def test_quest_delete_handler_removes_repo_and_unbinds_connectors(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -758,7 +799,11 @@ def test_update_quest_binding_keeps_only_one_external_connector_per_quest(temp_h
 
 def test_update_quest_bindings_supports_per_connector_batch_selection(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
-    ConfigManager(temp_home).ensure_files()
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["telegram"] = True
+    write_yaml(manager.path_for("config"), config)
     app = DaemonApp(temp_home)
     quest = app.quest_service.create("batch connector binding quest")
     quest_id = quest["quest_id"]
@@ -1114,7 +1159,7 @@ def test_terminal_attach_websocket_smoke_supports_live_python_io(temp_home: Path
                 )
 
             websocket.send(json.dumps({"type": "input", "data": "python\n"}))
-            _read_until_contains(">>>")
+            _read_until_contains("Type \"help\"")
             websocket.send(json.dumps({"type": "input", "data": "print(123)\n"}))
             _read_until_contains("123")
             websocket.send(json.dumps({"type": "input", "data": "exit()\n"}))
@@ -1135,6 +1180,99 @@ def test_terminal_attach_websocket_smoke_supports_live_python_io(temp_home: Path
         try:
             if quest_root is not None:
                 app.bash_exec_service.request_stop(quest_root, "terminal-main", reason="pytest-stop")
+        except Exception:
+            pass
+        app._stop_terminal_attach_server()
+        app.bash_exec_service.shutdown()
+
+
+def test_exec_bash_session_attach_websocket_supports_live_input_and_output(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app._start_terminal_attach_server("127.0.0.1", 0)
+    quest_root: Path | None = None
+    bash_id: str | None = None
+    try:
+        quest = app.quest_service.create("exec attach smoke")
+        quest_id = quest["quest_id"]
+        quest_root = Path(quest["quest_root"])
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest_id,
+            quest_root=quest_root,
+            run_id="run-exec-attach",
+            active_anchor="experiment",
+            conversation_id=f"quest:{quest_id}:pytest",
+            agent_role="pi",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+
+        session = app.bash_exec_service.start_session(
+            context,
+            command="python -i",
+            mode="detach",
+        )
+        bash_id = session["bash_id"]
+
+        deadline = time.time() + 5
+        attach: dict | tuple[int, dict] | None = None
+        while time.time() < deadline:
+            attach = app.handlers.terminal_attach(quest_id, bash_id, {})
+            if isinstance(attach, dict) and attach.get("ok") is True:
+                break
+            time.sleep(0.1)
+        assert isinstance(attach, dict)
+        assert attach["ok"] is True
+        assert attach["session"]["kind"] == "exec"
+
+        ws_url = f"ws://127.0.0.1:{attach['port']}{attach['path']}?token={attach['token']}"
+        with websocket_connect(ws_url, open_timeout=5, close_timeout=2, max_size=None) as websocket:
+            ready = json.loads(websocket.recv())
+            assert ready["type"] == "ready"
+            assert ready["bash_id"] == bash_id
+
+            def _read_until_contains(needle: str, *, timeout: float = 10.0) -> str:
+                deadline = time.time() + timeout
+                chunks: list[str] = []
+                while time.time() < deadline:
+                    try:
+                        message = websocket.recv(timeout=1)
+                    except TimeoutError:
+                        continue
+                    if isinstance(message, bytes):
+                        chunks.append(message.decode("utf-8", errors="replace"))
+                    else:
+                        try:
+                            payload = json.loads(message)
+                        except Exception:
+                            chunks.append(str(message))
+                            if needle in "".join(chunks):
+                                return "".join(chunks)
+                            continue
+                        if payload.get("type") == "exit":
+                            break
+                        continue
+                    joined = "".join(chunks)
+                    if needle in joined:
+                        return joined
+                raise AssertionError(
+                    f"Timed out waiting for exec attach output containing {needle!r}. Collected: {''.join(chunks)!r}"
+                )
+
+            _read_until_contains("Type \"help\"")
+            websocket.send(json.dumps({"type": "input", "data": "print(123)\n"}))
+            _read_until_contains("123")
+            websocket.send(json.dumps({"type": "input", "data": "exit()\n"}))
+
+        final = app.bash_exec_service.wait_for_session(quest_root, bash_id, timeout_seconds=10)
+        assert final["status"] == "completed"
+    finally:
+        try:
+            if quest_root is not None and bash_id:
+                app.bash_exec_service.request_stop(quest_root, bash_id, reason="pytest-stop")
         except Exception:
             pass
         app._stop_terminal_attach_server()
@@ -1324,8 +1462,21 @@ def test_chat_endpoint_relays_assistant_reply_to_bound_connector(temp_home: Path
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["telegram"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["qq"]["enabled"] = True
+    connectors["qq"]["profiles"] = [
+        {
+            "profile_id": "qq-1903299925",
+            "enabled": True,
+            "app_id": "1903299925",
+            "app_secret": "qq-secret",
+            "bot_name": "DeepScientist",
+            "main_chat_id": "CF8D2D559AA956B48751539ADFB98865",
+        }
+    ]
     write_yaml(manager.path_for("connectors"), connectors)
 
     app = DaemonApp(temp_home)
@@ -1377,6 +1528,52 @@ def test_chat_endpoint_relays_assistant_reply_to_bound_connector(temp_home: Path
     assert outbound["conversation_id"] == "qq:direct:UserABC123"
     assert outbound["kind"] == "assistant"
     assert outbound["message"] == "Assistant relay payload."
+
+
+def test_run_create_allows_explicit_none_reasoning_effort(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    runners = manager.load_named("runners")
+    runners["codex"]["model_reasoning_effort"] = "xhigh"
+    write_yaml(manager.path_for("runners"), runners)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("run create none reasoning effort quest")
+    quest_id = quest["quest_id"]
+    captured: dict[str, object] = {}
+
+    class FakeRunner:
+        binary = ""
+
+        def run(self, request):
+            captured["reasoning_effort"] = request.reasoning_effort
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=True,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="Handled explicit none reasoning effort.",
+                exit_code=0,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    app.runners["codex"] = FakeRunner()
+
+    payload = app.handlers.run_create(
+        quest_id,
+        {
+            "message": "Run once.",
+            "skill_id": "decision",
+            "model_reasoning_effort": "",
+        },
+    )
+
+    assert payload["ok"] is True
+    assert captured["reasoning_effort"] is None
 
 
 def test_connector_outbound_events_are_persisted_to_quest_stream(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1434,6 +1631,16 @@ def test_qq_inbound_reply_auto_links_to_latest_threaded_interaction(
     manager.ensure_files()
     connectors = manager.load_named("connectors")
     connectors["qq"]["enabled"] = True
+    connectors["qq"]["profiles"] = [
+        {
+            "profile_id": "qq-1903299925",
+            "enabled": True,
+            "app_id": "1903299925",
+            "app_secret": "qq-secret",
+            "bot_name": "DeepScientist",
+            "main_chat_id": "CF8D2D559AA956B48751539ADFB98865",
+        }
+    ]
     write_yaml(manager.path_for("connectors"), connectors)
 
     deliveries: list[dict] = []
@@ -2717,3 +2924,107 @@ def test_stop_cancels_queued_mailbox_messages_and_preserves_audit(temp_home: Pat
         raise AssertionError("fresh post-stop turn was not started")
 
     assert runner.seen_messages == ["Run the primary task.", "Continue cleanly."]
+
+
+def test_delete_qq_connector_profile_removes_profile_and_unbinds_related_quest(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["profiles"] = [
+        {
+            "profile_id": "qq-alpha",
+            "bot_name": "DeepScientist",
+            "app_id": "1903299925",
+            "app_secret": "qq-secret",
+            "main_chat_id": "OPENID-ALPHA",
+        }
+    ]
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("qq profile delete quest")
+    result = app.update_quest_connector_binding(quest["quest_id"], "qq", "qq:direct:OPENID-ALPHA")
+    assert not isinstance(result, tuple)
+
+    profile_root = temp_home / "logs" / "connectors" / "qq" / "profiles" / "qq-alpha"
+    profile_root.mkdir(parents=True, exist_ok=True)
+    (profile_root / "gateway.json").write_text('{"last_conversation_id":"qq:direct:OPENID-ALPHA"}', encoding="utf-8")
+    (temp_home / "logs" / "connectors" / "qq" / "state.json").write_text(
+        json.dumps(
+            {
+                "last_conversation_id": "qq:direct:OPENID-ALPHA",
+                "recent_conversations": [
+                    {
+                        "conversation_id": "qq:direct:OPENID-ALPHA",
+                        "profile_id": "qq-alpha",
+                    }
+                ],
+                "known_targets": [
+                    {
+                        "conversation_id": "qq:direct:OPENID-ALPHA",
+                        "profile_id": "qq-alpha",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    deleted = app.delete_connector_profile("qq", "qq-alpha")
+    assert not isinstance(deleted, tuple)
+    assert deleted["ok"] is True
+    assert deleted["deleted"] is True
+    assert deleted["deleted_bound_conversations"] == ["qq:direct:OPENID-ALPHA"]
+
+    connectors_after = manager.load_named_normalized("connectors")
+    assert list_qq_profiles(connectors_after["qq"]) == []
+    assert connectors_after["qq"]["enabled"] is False
+    assert app.list_connector_bindings("qq") == []
+    assert app.quest_service.binding_sources(quest["quest_id"]) == ["local:default"]
+    assert not profile_root.exists()
+
+
+def test_delete_generic_connector_profile_keeps_other_profiles_and_cleans_bindings(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["telegram"]["enabled"] = True
+    connectors["telegram"]["profiles"] = [
+        {
+            "profile_id": "telegram-alpha",
+            "bot_name": "Alpha",
+            "bot_token": "token-alpha",
+        },
+        {
+            "profile_id": "telegram-beta",
+            "bot_name": "Beta",
+            "bot_token": "token-beta",
+        },
+    ]
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("telegram profile delete quest")
+    conversation_id = format_conversation_id("telegram", "direct", "123456", profile_id="telegram-beta")
+    result = app.update_quest_connector_binding(quest["quest_id"], "telegram", conversation_id)
+    assert not isinstance(result, tuple)
+
+    profile_root = temp_home / "logs" / "connectors" / "telegram" / "profiles" / "telegram-beta"
+    profile_root.mkdir(parents=True, exist_ok=True)
+    (profile_root / "runtime.json").write_text(f'{{"last_conversation_id":"{conversation_id}"}}', encoding="utf-8")
+
+    deleted = app.delete_connector_profile("telegram", "telegram-beta")
+    assert not isinstance(deleted, tuple)
+    assert deleted["ok"] is True
+    assert deleted["remaining_profile_count"] == 1
+
+    connectors_after = manager.load_named_normalized("connectors")
+    profiles_after = list_connector_profiles("telegram", connectors_after["telegram"])
+    assert [str(item.get("profile_id")) for item in profiles_after] == ["telegram-alpha"]
+    assert connectors_after["telegram"]["enabled"] is True
+    assert app.list_connector_bindings("telegram") == []
+    assert app.quest_service.binding_sources(quest["quest_id"]) == ["local:default"]
+    assert not profile_root.exists()

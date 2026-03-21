@@ -4,6 +4,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from ..artifact.metrics import extract_latest_metric
 from ..shared import read_json, run_command
 from .service import branch_exists, current_branch, head_commit
 
@@ -308,16 +309,9 @@ def _collect_branch_state(repo: Path) -> dict[str, dict[str, Any]]:
             state["parent_branch"] = record.get("parent_branch")
         if record.get("worktree_root"):
             state["worktree_root"] = record.get("worktree_root")
-        if isinstance(record.get("metrics_summary"), dict) and record["metrics_summary"]:
-            key = next(iter(record["metrics_summary"]))
-            state["latest_metric"] = {
-                "key": ((record.get("progress_eval") or {}).get("primary_metric_id")) or key,
-                "value": record["metrics_summary"].get(
-                    ((record.get("progress_eval") or {}).get("primary_metric_id")) or key,
-                    record["metrics_summary"].get(key),
-                ),
-                "delta_vs_baseline": ((record.get("progress_eval") or {}).get("delta_vs_baseline")),
-            }
+        latest_metric = extract_latest_metric(record)
+        if latest_metric is not None:
+            state["latest_metric"] = latest_metric
         if record.get("kind") == "run":
             state["latest_result"] = {
                 "run_id": record.get("run_id"),
@@ -365,6 +359,8 @@ def _classify_ref(ref: str, state: dict[str, Any]) -> dict[str, str]:
         return {"branch_kind": "quest", "tier": "major", "mode": "ideas"}
     if ref.startswith("idea/"):
         return {"branch_kind": "idea", "tier": "major", "mode": "ideas"}
+    if ref.startswith("paper/"):
+        return {"branch_kind": "paper", "tier": "major", "mode": "ideas"}
     if ref.startswith("analysis/") or run_id.startswith("analysis") or run_kind == "analysis-campaign":
         return {"branch_kind": "analysis", "tier": "minor", "mode": "analysis"}
     return {"branch_kind": "implementation", "tier": "major", "mode": "ideas"}

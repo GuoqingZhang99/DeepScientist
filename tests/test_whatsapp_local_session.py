@@ -14,6 +14,9 @@ def test_whatsapp_local_session_drains_inbox_and_updates_runtime_state(temp_home
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["whatsapp"] = True
+    write_yaml(manager.path_for("config"), config)
     session_dir = temp_home / "whatsapp-session"
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
@@ -56,6 +59,9 @@ def test_whatsapp_local_session_delivery_queues_sidecar_outbox(temp_home: Path) 
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["whatsapp"] = True
+    write_yaml(manager.path_for("config"), config)
     session_dir = temp_home / "whatsapp-session"
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True

@@ -16,7 +16,6 @@ import {
   Terminal,
 } from 'lucide-react'
 import {
-  CartesianGrid,
   Line,
   LineChart,
   ReferenceLine,
@@ -41,7 +40,6 @@ import { useOpenFile } from '@/hooks/useOpenFile'
 import { useBashLogStream } from '@/lib/hooks/useBashLogStream'
 import { useBashSessionStream } from '@/lib/hooks/useBashSessionStream'
 import { EnhancedTerminal } from '@/lib/plugins/cli/components/EnhancedTerminal'
-import { McpBashExecView } from '@/components/chat/toolViews/McpBashExecView'
 import LabQuestGraphCanvas from '@/lib/plugins/lab/components/LabQuestGraphCanvas'
 import { useLabCopilotStore } from '@/lib/stores/lab-copilot'
 import { useLabGraphSelectionStore } from '@/lib/stores/lab-graph-selection'
@@ -50,10 +48,10 @@ import { getProgressPercent } from '@/lib/utils/bash-progress'
 import { QuestSettingsSurface } from '@/components/workspace/QuestSettingsSurface'
 import { QuestMemorySurface } from '@/components/workspace/QuestMemorySurface'
 import { QuestStageSurface } from '@/components/workspace/QuestStageSurface'
-import type { ToolEventData } from '@/lib/types/chat-events'
 import type { BashLogEntry, BashProgress, BashSession } from '@/lib/types/bash'
 import {
   isBashProgressMarker,
+  parseBashProgressMarker,
   parseBashStatusMarker,
   splitBashLogLine,
 } from '@/lib/utils/bash-log'
@@ -229,43 +227,6 @@ function summarizeBashComment(comment?: BashSession['comment']) {
   return null
 }
 
-function buildWorkspaceBashToolContent(session: BashSession): ToolEventData {
-  return {
-    event_id: `workspace-bash:${session.bash_id}`,
-    timestamp: Date.parse(session.started_at) || Date.now(),
-    tool_call_id: session.bash_id,
-    name: 'bash_exec',
-    function: 'bash_exec',
-    status: isActiveBashSession(session.status) ? 'calling' : 'called',
-    args: {
-      command: session.command,
-      workdir: session.workdir,
-      mode: session.mode,
-    },
-    content: {
-      result: {
-        bash_id: session.bash_id,
-        status: session.status,
-        exit_code: session.exit_code,
-        stop_reason: session.stop_reason,
-        last_progress: session.last_progress,
-        comment: session.comment,
-      },
-    },
-    metadata: {
-      session_id: session.chat_session_id ?? undefined,
-      cli_server_id: session.cli_server_id,
-      agent_id: session.agent_id,
-      agent_instance_id: session.agent_instance_id ?? undefined,
-      bash_id: session.bash_id,
-      bash_status: session.status,
-      bash_mode: session.mode,
-      bash_command: session.command,
-      bash_workdir: session.workdir,
-    },
-  }
-}
-
 function RunningTag({ label = 'Running' }: { label?: string }) {
   return (
     <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-700 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-200">
@@ -387,6 +348,127 @@ function formatMetricValue(
   return String(value)
 }
 
+type MetricTimelineChartDatum = {
+  slotIndex: number
+  slotKey: string
+  seq?: number | null
+  value?: number | null
+  delta?: number | null
+  breakthrough?: boolean
+  isBaselineSlot?: boolean
+  beatsBaseline?: boolean
+}
+
+type MetricTimelineDotProps = {
+  cx?: number
+  cy?: number
+  payload?: MetricTimelineChartDatum
+}
+
+function normalizeTimelineDirection(value?: string | null): 'maximize' | 'minimize' {
+  const text = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[- ]+/g, '_')
+  if (text === 'lower' || text === 'minimize' || text === 'lower_better' || text === 'less_is_better') {
+    return 'minimize'
+  }
+  return 'maximize'
+}
+
+function metricBeatsBaseline({
+  value,
+  baselineValue,
+  delta,
+  direction,
+}: {
+  value?: number | null
+  baselineValue?: number | null
+  delta?: number | null
+  direction: 'maximize' | 'minimize'
+}) {
+  if (typeof value === 'number' && Number.isFinite(value) && typeof baselineValue === 'number' && Number.isFinite(baselineValue)) {
+    return direction === 'minimize' ? value < baselineValue : value > baselineValue
+  }
+  if (typeof delta === 'number' && Number.isFinite(delta)) {
+    return direction === 'minimize' ? delta < 0 : delta > 0
+  }
+  return false
+}
+
+function buildStarPoints(cx: number, cy: number, outerRadius: number, innerRadius: number) {
+  const points: string[] = []
+  for (let index = 0; index < 10; index += 1) {
+    const angle = -Math.PI / 2 + (index * Math.PI) / 5
+    const radius = index % 2 === 0 ? outerRadius : innerRadius
+    const x = cx + Math.cos(angle) * radius
+    const y = cy + Math.sin(angle) * radius
+    points.push(`${x.toFixed(2)},${y.toFixed(2)}`)
+  }
+  return points.join(' ')
+}
+
+function formatMetricTimelineSlotLabel(slotKey?: string | null) {
+  if (slotKey === 'baseline') return 'Baseline'
+  const match = /^run-(\d+)$/.exec(String(slotKey || ''))
+  return match ? match[1] : String(slotKey || '')
+}
+
+function formatMetricTimelineTickLabel(slotIndex?: number | string | null) {
+  if (typeof slotIndex === 'number') {
+    if (slotIndex === 0) return 'Baseline'
+    return String(slotIndex)
+  }
+  return formatMetricTimelineSlotLabel(typeof slotIndex === 'string' ? slotIndex : null)
+}
+
+function formatMetricTimelineTooltipLabel(slotKey?: string | null) {
+  if (slotKey === 'baseline') return 'Baseline'
+  const match = /^run-(\d+)$/.exec(String(slotKey || ''))
+  return match ? `Run #${match[1]}` : String(slotKey || '')
+}
+
+function MetricTimelinePointDot({
+  cx,
+  cy,
+  payload,
+  active = false,
+}: MetricTimelineDotProps & { active?: boolean }) {
+  if (
+    typeof cx !== 'number' ||
+    typeof cy !== 'number' ||
+    !payload ||
+    typeof payload.value !== 'number' ||
+    !Number.isFinite(payload.value)
+  ) {
+    return null
+  }
+
+  if (payload.beatsBaseline) {
+    const outerRadius = active ? 8.2 : 6.8
+    const innerRadius = active ? 3.9 : 3.1
+    return (
+      <polygon
+        points={buildStarPoints(cx, cy, outerRadius, innerRadius)}
+        fill="#D0B26E"
+        stroke="#B99654"
+        strokeWidth={active ? 1.6 : 1.3}
+      />
+    )
+  }
+
+  return (
+    <circle
+      cx={cx}
+      cy={cy}
+      r={active ? 5.4 : 4.2}
+      fill="#445F7D"
+      stroke="rgba(255,255,255,0.96)"
+      strokeWidth={active ? 1.9 : 1.5}
+    />
+  )
+}
+
 function MetricTimelineCard({
   series,
   primaryMetricId,
@@ -394,22 +476,52 @@ function MetricTimelineCard({
   series: MetricTimelineSeries
   primaryMetricId?: string | null
 }) {
-  const chartData = React.useMemo(
+  const baseline = React.useMemo(
     () =>
-      (series.points || []).map((point) => ({
-        seq: point.seq,
+      (series.baselines || []).find(
+        (item) => item.selected && typeof item.value === 'number' && Number.isFinite(item.value)
+      ) ||
+      (series.baselines || []).find((item) => typeof item.value === 'number' && Number.isFinite(item.value)) ||
+      null,
+    [series.baselines]
+  )
+  const baselineValue = typeof baseline?.value === 'number' && Number.isFinite(baseline.value) ? baseline.value : null
+  const metricDirection = React.useMemo(() => normalizeTimelineDirection(series.direction), [series.direction])
+  const chartData = React.useMemo(
+    () => [
+      {
+        slotIndex: 0,
+        slotKey: 'baseline',
+        seq: null,
+        value: baselineValue,
+        delta: null,
+        breakthrough: false,
+        isBaselineSlot: true,
+        beatsBaseline: false,
+      },
+      ...(series.points || []).map((point, index) => ({
+        slotIndex: index + 1,
+        slotKey: `run-${point.seq ?? index + 1}`,
+        seq: point.seq ?? index + 1,
         value: point.value,
-        runId: point.run_id,
         delta: point.delta_vs_baseline,
         breakthrough: point.breakthrough,
+        isBaselineSlot: false,
+        beatsBaseline: metricBeatsBaseline({
+          value: point.value,
+          baselineValue,
+          delta: point.delta_vs_baseline,
+          direction: metricDirection,
+        }),
       })),
-    [series.points]
+    ],
+    [baselineValue, metricDirection, series.points]
   )
   const yValues = [
-    ...chartData.map((item) => item.value).filter((item): item is number => typeof item === 'number'),
-    ...(series.baselines || [])
+    ...chartData
       .map((item) => item.value)
-      .filter((item): item is number => typeof item === 'number'),
+      .filter((item): item is number => typeof item === 'number' && Number.isFinite(item)),
+    ...(typeof baselineValue === 'number' ? [baselineValue] : []),
   ]
   const minValue = yValues.length ? Math.min(...yValues) : undefined
   const maxValue = yValues.length ? Math.max(...yValues) : undefined
@@ -417,6 +529,9 @@ function MetricTimelineCard({
     typeof minValue === 'number' && typeof maxValue === 'number'
       ? [minValue === maxValue ? minValue - 1 : minValue, minValue === maxValue ? maxValue + 1 : maxValue]
       : ['auto', 'auto']
+  const lastSlotIndex = chartData[chartData.length - 1]?.slotIndex ?? 0
+  const xDomain: [number, number] = [-0.55, lastSlotIndex + 0.7]
+  const latestPoint = series.points?.length ? series.points[series.points.length - 1] : null
 
   return (
     <div className="overflow-hidden rounded-[26px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.86),rgba(244,239,233,0.94))] p-4 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))]">
@@ -441,12 +556,15 @@ function MetricTimelineCard({
 
       <div className="mt-4 h-[220px] w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="4 6" stroke="rgba(120,120,120,0.18)" />
+          <LineChart data={chartData} margin={{ top: 8, right: 12, left: 18, bottom: 0 }}>
             <XAxis
-              dataKey="seq"
+              dataKey="slotIndex"
+              type="number"
+              domain={xDomain}
+              ticks={chartData.map((item) => item.slotIndex)}
               tickLine={false}
               axisLine={false}
+              tickFormatter={formatMetricTimelineTickLabel}
               tick={{ fill: 'currentColor', fontSize: 11 }}
             />
             <YAxis
@@ -463,26 +581,30 @@ function MetricTimelineCard({
                 boxShadow: '0 18px 42px -34px rgba(17,24,39,0.18)',
               }}
               formatter={(value: number | string | null | undefined) => formatMetricValue(value, series.decimals)}
-              labelFormatter={(label) => `Run #${label}`}
+              labelFormatter={(_, payload) => {
+                const item = Array.isArray(payload) && payload[0]?.payload ? (payload[0].payload as MetricTimelineChartDatum) : null
+                return formatMetricTimelineTooltipLabel(item?.slotKey)
+              }}
             />
-            {(series.baselines || []).map((baseline) =>
-              typeof baseline.value === 'number' ? (
-                <ReferenceLine
-                  key={`${baseline.label}:${baseline.value}`}
-                  y={baseline.value}
-                  stroke={baseline.selected ? 'rgba(148,118,66,0.8)' : 'rgba(143,163,184,0.64)'}
-                  strokeDasharray="6 6"
-                  ifOverflow="extendDomain"
-                />
-              ) : null
-            )}
+            {typeof baselineValue === 'number' ? (
+              <ReferenceLine
+                segment={[
+                  { x: 0, y: baselineValue },
+                  { x: lastSlotIndex, y: baselineValue },
+                ]}
+                stroke="rgba(194,161,92,0.82)"
+                strokeDasharray="7 6"
+                strokeWidth={1.8}
+                ifOverflow="extendDomain"
+              />
+            ) : null}
             <Line
               type="monotone"
               dataKey="value"
-              stroke="rgba(91,112,131,0.96)"
+              stroke="rgba(91,112,131,0.78)"
               strokeWidth={2.4}
-              dot={{ r: 3, fill: 'rgba(91,112,131,0.96)' }}
-              activeDot={{ r: 5 }}
+              dot={(props) => <MetricTimelinePointDot {...(props as MetricTimelineDotProps)} />}
+              activeDot={(props) => <MetricTimelinePointDot {...(props as MetricTimelineDotProps)} active />}
               connectNulls
             />
           </LineChart>
@@ -490,10 +612,10 @@ function MetricTimelineCard({
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-        <span>{chartData.length} runs</span>
-        {chartData.length ? (
+        <span>{series.points?.length || 0} runs</span>
+        {latestPoint ? (
           <span>
-            latest {formatMetricValue(chartData[chartData.length - 1]?.value, series.decimals)}
+            latest {formatMetricValue(latestPoint.value, series.decimals)}
           </span>
         ) : (
           <span>No points yet</span>
@@ -1843,6 +1965,9 @@ function QuestDeepScientistBashPane({
 }) {
   const [selectedSessionId, setSelectedSessionId] = React.useState<string | null>(null)
   const [stopPending, setStopPending] = React.useState(false)
+  const [logsLoading, setLogsLoading] = React.useState(false)
+  const [logsError, setLogsError] = React.useState<string | null>(null)
+  const [liveConnected, setLiveConnected] = React.useState(false)
   const [liveStatus, setLiveStatus] = React.useState<string | null>(null)
   const [liveExitCode, setLiveExitCode] = React.useState<number | null>(null)
   const [liveStopReason, setLiveStopReason] = React.useState<string | null>(null)
@@ -1866,20 +1991,360 @@ function QuestDeepScientistBashPane({
   }, [execSessions, selectedSessionId])
 
   React.useEffect(() => {
+    setLogsLoading(false)
+    setLogsError(null)
+    setLiveConnected(false)
     setLiveStatus(null)
     setLiveExitCode(null)
     setLiveStopReason(null)
     setLiveProgress(null)
   }, [selectedSession?.bash_id])
 
-  const selectedToolContent = React.useMemo<ToolEventData | null>(() => {
-    if (!selectedSession) return null
-    return buildWorkspaceBashToolContent(selectedSession)
-  }, [selectedSession])
+  type TerminalHandlers = {
+    write: (data: string, onComplete?: () => void) => void
+    clear: () => void
+    scrollToBottom: () => void
+    focus: () => void
+    isScrolledToBottom?: (thresholdPx?: number) => boolean
+  }
+
+  const terminalHandlersRef = React.useRef<TerminalHandlers | null>(null)
+  const pendingOutputRef = React.useRef('')
+  const restoreRequestRef = React.useRef(0)
+  const liveConnectRequestRef = React.useRef(0)
+  const liveSocketRef = React.useRef<WebSocket | null>(null)
+  const liveSocketSessionIdRef = React.useRef<string | null>(null)
+  const liveReadyRef = React.useRef(false)
+  const intentionalDetachRef = React.useRef(false)
+  const pendingLiveMessagesRef = React.useRef<string[]>([])
+
+  const appendToTerminal = React.useCallback((text: string) => {
+    const handlers = terminalHandlersRef.current
+    if (!handlers) {
+      pendingOutputRef.current += text
+      return
+    }
+    const shouldAutoScroll = handlers.isScrolledToBottom?.() ?? true
+    handlers.write(text, () => {
+      if (shouldAutoScroll) {
+        handlers.scrollToBottom()
+      }
+    })
+  }, [])
+
+  const resetTerminal = React.useCallback(() => {
+    pendingOutputRef.current = ''
+    terminalHandlersRef.current?.clear()
+  }, [])
+
+  const writeSessionPrelude = React.useCallback(
+    (session: BashSession | null) => {
+      if (!session) return
+      const workdirLabel = String(session.workdir || '').trim() || '~'
+      const commandLabel = String(session.command || '').trim() || 'bash_exec'
+      appendToTerminal(`${workdirLabel}$ ${commandLabel}\r\n\r\n`)
+    },
+    [appendToTerminal]
+  )
+
+  const flushPendingLiveMessages = React.useCallback(() => {
+    const ws = liveSocketRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN || !liveReadyRef.current) {
+      return
+    }
+    while (pendingLiveMessagesRef.current.length) {
+      const next = pendingLiveMessagesRef.current.shift()
+      if (!next) continue
+      ws.send(next)
+    }
+  }, [])
+
+  const detachLiveSocket = React.useCallback((reason = 'detach') => {
+    const ws = liveSocketRef.current
+    liveSocketRef.current = null
+    liveSocketSessionIdRef.current = null
+    liveReadyRef.current = false
+    pendingLiveMessagesRef.current = []
+    setLiveConnected(false)
+    if (!ws) return
+    intentionalDetachRef.current = true
+    try {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'detach', reason }))
+      }
+    } catch {
+      // Ignore detach send errors.
+    }
+    try {
+      ws.close()
+    } catch {
+      // Ignore close errors.
+    }
+  }, [])
+
+  React.useEffect(() => {
+    return () => {
+      detachLiveSocket('unmount')
+    }
+  }, [detachLiveSocket])
+
+  const replayExecLogEntry = React.useCallback(
+    (entry: { line?: string | null; stream?: string | null }) => {
+      const rawLine = entry.line ?? ''
+      const stream = String(entry.stream || '')
+      if (isBashProgressMarker(rawLine)) {
+        const nextProgress = parseBashProgressMarker(rawLine)
+        if (nextProgress) {
+          setLiveProgress(nextProgress as BashProgress)
+        }
+        return
+      }
+      const marker = parseBashStatusMarker(rawLine)
+      if (marker) {
+        setLiveStatus(marker.status)
+        setLiveExitCode(marker.exitCode)
+        setLiveStopReason(marker.reason)
+        return
+      }
+      if (!rawLine && stream !== 'carriage') {
+        appendToTerminal('\n')
+        return
+      }
+      const parsed = splitBashLogLine(rawLine)
+      if (parsed.kind === 'carriage') {
+        appendToTerminal(`\r\x1b[K${parsed.text}`)
+        return
+      }
+      if (stream === 'prompt' || stream === 'partial') {
+        appendToTerminal(parsed.text)
+        return
+      }
+      if (stream === 'system' && !parsed.text.trim()) {
+        return
+      }
+      appendToTerminal(`${parsed.text}\n`)
+    },
+    [appendToTerminal]
+  )
+
+  const reloadSelectedLogs = React.useCallback(
+    async (session: BashSession) => {
+      const requestId = restoreRequestRef.current + 1
+      restoreRequestRef.current = requestId
+      setLogsLoading(true)
+      setLogsError(null)
+      try {
+        const payload = await restoreTerminalSession(questId, session.bash_id, {
+          commands: 10,
+          output: 1000,
+        })
+        if (restoreRequestRef.current !== requestId) return
+        resetTerminal()
+        writeSessionPrelude(session)
+        payload.tail.forEach((entry) => {
+          replayExecLogEntry({ line: entry.line ?? '', stream: entry.stream })
+        })
+        setLiveStatus(payload.session?.status ?? payload.status ?? null)
+        setLiveExitCode(payload.session?.exit_code ?? null)
+        setLiveStopReason(payload.session?.stop_reason ?? null)
+        setLiveProgress(payload.session?.last_progress ?? null)
+      } catch (error) {
+        if (restoreRequestRef.current !== requestId) return
+        setLogsError(
+          error instanceof Error ? error.message : 'Failed to load bash session output.'
+        )
+        resetTerminal()
+        writeSessionPrelude(session)
+      } finally {
+        if (restoreRequestRef.current === requestId) {
+          setLogsLoading(false)
+        }
+      }
+    },
+    [questId, replayExecLogEntry, resetTerminal, writeSessionPrelude]
+  )
+
+  const sendLiveEnvelope = React.useCallback(
+    (payload: Record<string, unknown>) => {
+      const encoded = JSON.stringify(payload)
+      const ws = liveSocketRef.current
+      if (!selectedSession?.bash_id) {
+        return false
+      }
+      if (!ws || liveSocketSessionIdRef.current !== selectedSession.bash_id) {
+        pendingLiveMessagesRef.current.push(encoded)
+        return true
+      }
+      if (ws.readyState !== WebSocket.OPEN || !liveReadyRef.current) {
+        pendingLiveMessagesRef.current.push(encoded)
+        return true
+      }
+      ws.send(encoded)
+      return true
+    },
+    [selectedSession?.bash_id]
+  )
+
+  const openLiveSession = React.useCallback(
+    async (session: BashSession) => {
+      const requestId = liveConnectRequestRef.current + 1
+      liveConnectRequestRef.current = requestId
+      detachLiveSocket('switch')
+      resetTerminal()
+      writeSessionPrelude(session)
+      setLogsLoading(true)
+      setLogsError(null)
+      try {
+        const payload = await attachTerminalSession(questId, session.bash_id)
+        if (liveConnectRequestRef.current !== requestId) return
+        const locationUrl =
+          typeof window !== 'undefined'
+            ? new URL(window.location.href)
+            : new URL('http://127.0.0.1:20999')
+        const protocol = locationUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+        const socketUrl = `${protocol}//${locationUrl.hostname}:${payload.port}${payload.path}?token=${encodeURIComponent(payload.token)}`
+        const ws = new WebSocket(socketUrl)
+        ws.binaryType = 'arraybuffer'
+        intentionalDetachRef.current = false
+        liveReadyRef.current = false
+        liveSocketRef.current = ws
+        liveSocketSessionIdRef.current = session.bash_id
+        setLiveStatus(payload.session?.status ?? null)
+        setLiveExitCode(payload.session?.exit_code ?? null)
+        setLiveStopReason(payload.session?.stop_reason ?? null)
+        setLiveProgress(payload.session?.last_progress ?? null)
+
+        ws.onmessage = (event) => {
+          if (liveConnectRequestRef.current !== requestId) return
+          if (typeof event.data === 'string') {
+            try {
+              const control = JSON.parse(event.data) as Record<string, unknown>
+              const eventType = String(control.type || '')
+              if (eventType === 'ready') {
+                liveReadyRef.current = true
+                setLiveConnected(true)
+                setLogsLoading(false)
+                setLogsError(null)
+                setLiveStatus(String(control.status || payload.session?.status || 'running'))
+                flushPendingLiveMessages()
+                return
+              }
+              if (eventType === 'exit') {
+                setLiveConnected(false)
+                setLogsLoading(false)
+                setLiveStatus(String(control.status || 'completed'))
+                setLiveExitCode(typeof control.exit_code === 'number' ? control.exit_code : null)
+                setLiveStopReason(typeof control.stop_reason === 'string' ? control.stop_reason : null)
+                void Promise.allSettled([reloadSessions(), onRefresh()])
+                return
+              }
+              if (eventType === 'error') {
+                setLogsLoading(false)
+                setLogsError(String(control.message || 'Bash live connection failed.'))
+                return
+              }
+              if (eventType === 'pong') {
+                return
+              }
+            } catch {
+              appendToTerminal(event.data)
+              return
+            }
+            appendToTerminal(event.data)
+            return
+          }
+          if (event.data instanceof ArrayBuffer) {
+            const text = new TextDecoder('utf-8').decode(new Uint8Array(event.data))
+            appendToTerminal(text)
+            return
+          }
+          if (event.data instanceof Blob) {
+            void event.data.arrayBuffer().then((buffer) => {
+              if (liveConnectRequestRef.current !== requestId) return
+              const text = new TextDecoder('utf-8').decode(new Uint8Array(buffer))
+              appendToTerminal(text)
+            })
+          }
+        }
+
+        ws.onerror = () => {
+          if (liveConnectRequestRef.current !== requestId) return
+          setLogsError('Bash live connection failed.')
+        }
+
+        ws.onclose = () => {
+          if (liveSocketRef.current === ws) {
+            liveSocketRef.current = null
+            liveSocketSessionIdRef.current = null
+          }
+          liveReadyRef.current = false
+          setLiveConnected(false)
+          if (intentionalDetachRef.current) {
+            intentionalDetachRef.current = false
+            return
+          }
+          if (liveConnectRequestRef.current !== requestId) return
+          setLogsLoading(false)
+          void Promise.allSettled([reloadSessions(), onRefresh()])
+        }
+      } catch (error) {
+        if (liveConnectRequestRef.current !== requestId) return
+        setLiveConnected(false)
+        pendingLiveMessagesRef.current = []
+        const message =
+          error instanceof Error ? error.message : 'Unable to attach to bash session.'
+        setLogsError(message)
+        await reloadSelectedLogs(session)
+      }
+    },
+    [
+      appendToTerminal,
+      detachLiveSocket,
+      flushPendingLiveMessages,
+      onRefresh,
+      questId,
+      reloadSelectedLogs,
+      reloadSessions,
+      resetTerminal,
+      writeSessionPrelude,
+    ]
+  )
+
+  React.useEffect(() => {
+    restoreRequestRef.current += 1
+    liveConnectRequestRef.current += 1
+    detachLiveSocket('session-change')
+    if (!selectedSession?.bash_id) {
+      setLogsError(null)
+      setLogsLoading(false)
+      setLiveConnected(false)
+      resetTerminal()
+      return
+    }
+    setLogsError(null)
+    setLogsLoading(true)
+    if (isActiveBashSession(selectedSession.status)) {
+      void openLiveSession(selectedSession)
+      return
+    }
+    void reloadSelectedLogs(selectedSession)
+  }, [
+    detachLiveSocket,
+    openLiveSession,
+    reloadSelectedLogs,
+    resetTerminal,
+    selectedSession,
+  ])
 
   const handleRefresh = React.useCallback(async () => {
     await Promise.allSettled([reloadSessions(), onRefresh()])
-  }, [onRefresh, reloadSessions])
+    if (!selectedSession?.bash_id) return
+    if (isActiveBashSession(selectedSession.status)) {
+      await openLiveSession(selectedSession)
+      return
+    }
+    await reloadSelectedLogs(selectedSession)
+  }, [onRefresh, openLiveSession, reloadSelectedLogs, reloadSessions, selectedSession])
 
   const handleStop = React.useCallback(async () => {
     if (!selectedSession) return
@@ -1894,16 +2359,51 @@ function QuestDeepScientistBashPane({
     }
   }, [onRefresh, questId, reloadSessions, selectedSession])
 
+  const handleTerminalInput = React.useCallback(
+    (data: string) => {
+      if (!data || !selectedSession) return
+      if (!isActiveBashSession(selectedSession.status)) {
+        return
+      }
+      sendLiveEnvelope({ type: 'input', data })
+    },
+    [selectedSession, sendLiveEnvelope]
+  )
+
+  const handleTerminalBinaryInput = React.useCallback(
+    (data: string) => {
+      if (!data || !selectedSession) return
+      if (!isActiveBashSession(selectedSession.status)) {
+        return
+      }
+      sendLiveEnvelope({ type: 'binary_input', data: btoa(data) })
+    },
+    [selectedSession, sendLiveEnvelope]
+  )
+
+  const handleTerminalResize = React.useCallback(
+    (cols: number, rows: number) => {
+      if (!selectedSession) return
+      if (!isActiveBashSession(selectedSession.status)) {
+        return
+      }
+      sendLiveEnvelope({ type: 'resize', cols, rows })
+    },
+    [selectedSession, sendLiveEnvelope]
+  )
+
   const effectiveStatus = liveStatus ?? selectedSession?.status ?? null
   const effectiveExitCode = liveExitCode ?? selectedSession?.exit_code ?? null
   const effectiveStopReason = liveStopReason ?? selectedSession?.stop_reason ?? null
   const effectiveProgress = liveProgress ?? selectedSession?.last_progress ?? null
+  const effectiveProgressPercent =
+    getProgressPercent(effectiveProgress) ?? effectiveProgress?.percent ?? null
   const commentSummary = summarizeBashComment(selectedSession?.comment)
 
   return (
     <div className="h-full min-h-0 overflow-hidden">
       <div className="flex h-full min-h-0 overflow-hidden">
-        <div className="w-[360px] shrink-0 border-r border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.86),rgba(244,239,233,0.94))] p-3 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))]">
+        <div className="w-[320px] shrink-0 border-r border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.86),rgba(244,239,233,0.94))] p-3 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))]">
           <div className="flex items-center justify-between gap-3 px-1 pb-3">
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -1986,123 +2486,99 @@ function QuestDeepScientistBashPane({
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+          <div className="flex min-h-0 flex-1 flex-col p-3">
             {selectedSession ? (
               <>
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.04] text-foreground dark:bg-white/[0.06]">
-                        <Sparkles className="h-4 w-4" />
-                      </div>
-                      <div className="break-words text-lg font-semibold text-foreground">
-                        {summarizeBashCommand(selectedSession.command, 160)}
-                      </div>
-                      {isActiveBashSession(effectiveStatus) ? <RunningTag /> : null}
-                    </div>
-                    <div className="mt-2 break-all text-xs text-muted-foreground">
-                      {selectedSession.workdir || 'project root'}
-                    </div>
-                    {commentSummary ? (
-                      <div className="mt-2 max-w-3xl text-sm text-muted-foreground">
-                        {commentSummary}
-                      </div>
-                    ) : null}
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      <StatusPill>{formatBashSessionStatus(effectiveStatus)}</StatusPill>
+                <div className="min-h-0 flex-1 overflow-hidden rounded-[24px] border border-black/[0.10] bg-[#0f1115] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] dark:border-white/[0.10]">
+                  <div className="h-full min-h-0 p-2">
+                    <EnhancedTerminal
+                      onInput={handleTerminalInput}
+                      onBinary={handleTerminalBinaryInput}
+                      onResize={handleTerminalResize}
+                      onReady={(handlers) => {
+                        terminalHandlersRef.current = handlers
+                        if (pendingOutputRef.current) {
+                          const payload = pendingOutputRef.current
+                          pendingOutputRef.current = ''
+                          handlers.write(payload, () => {
+                            handlers.scrollToBottom()
+                          })
+                        }
+                        window.setTimeout(() => handlers.focus(), 60)
+                      }}
+                      searchOpen={false}
+                      onSearchOpenChange={() => {}}
+                      appearance="terminal"
+                      autoFocus={false}
+                      showHeader={false}
+                      scrollback={20000}
+                      convertEol={false}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-start justify-between gap-3 border-t border-black/[0.08] px-1 pb-1 pt-3 text-xs text-muted-foreground dark:border-white/[0.10]">
+                  <div className="flex min-w-0 flex-1 flex-col gap-2">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <StatusPill>
+                        {liveConnected ? 'live' : formatBashSessionStatus(effectiveStatus ?? 'idle')}
+                      </StatusPill>
                       <StatusPill mono>{selectedSession.bash_id}</StatusPill>
-                      <StatusPill>{selectedSession.mode}</StatusPill>
+                      {selectedSession.workdir ? (
+                        <StatusPill mono>{selectedSession.workdir}</StatusPill>
+                      ) : null}
+                      <StatusPill>{`started ${formatRelativeTime(selectedSession.started_at)}`}</StatusPill>
+                      {typeof selectedSession.run_age_seconds === 'number' ? (
+                        <StatusPill>{formatCompactDurationSeconds(selectedSession.run_age_seconds)}</StatusPill>
+                      ) : null}
+                      {typeof effectiveProgressPercent === 'number' ? (
+                        <StatusPill>{`${effectiveProgressPercent.toFixed(0)}%`}</StatusPill>
+                      ) : null}
                       {effectiveExitCode != null ? <StatusPill>exit {effectiveExitCode}</StatusPill> : null}
+                      <StatusPill>{selectedSession.mode}</StatusPill>
                       {selectedSession.agent_instance_id ? (
                         <StatusPill mono>{selectedSession.agent_instance_id}</StatusPill>
                       ) : null}
                     </div>
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-5 text-muted-foreground">
+                      <span className="max-w-full truncate">
+                        {summarizeBashCommand(selectedSession.command, 200)}
+                      </span>
+                      {commentSummary ? (
+                        <span className="max-w-full truncate">{commentSummary}</span>
+                      ) : null}
+                      {effectiveProgress?.desc ? (
+                        <span className="max-w-full truncate">
+                          {clampText(String(effectiveProgress.desc), 140)}
+                        </span>
+                      ) : null}
+                      {effectiveStopReason ? (
+                        <span className="max-w-full truncate text-[#b42318] dark:text-[#ffb4b4]">
+                          {effectiveStopReason}
+                        </span>
+                      ) : null}
+                      {logsLoading ? <span>loading…</span> : null}
+                      {logsError ? (
+                        <span className="max-w-full truncate text-[#b42318] dark:text-[#ffb4b4]">
+                          {logsError}
+                        </span>
+                      ) : null}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {isActiveBashSession(effectiveStatus) ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          void handleStop()
-                        }}
-                        disabled={stopPending}
-                        className="h-9 rounded-full border-black/[0.08] bg-white/[0.84] px-3 text-[11px] shadow-sm backdrop-blur hover:bg-white dark:border-white/[0.10] dark:bg-[rgba(18,18,18,0.72)] dark:hover:bg-[rgba(24,24,24,0.9)]"
-                      >
-                        <Square className="mr-1.5 h-3.5 w-3.5" />
-                        {stopPending ? 'Stopping…' : 'Stop'}
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="grid gap-x-10 gap-y-6 sm:grid-cols-2 xl:grid-cols-4">
-                  <OverviewMetric
-                    icon={<Activity className="h-4 w-4" />}
-                    label="State"
-                    value={formatBashSessionStatus(effectiveStatus)}
-                    hint={connection.status === 'open' ? 'streaming live' : connection.error || connection.status}
-                  />
-                  <OverviewMetric
-                    icon={<Clock3 className="h-4 w-4" />}
-                    label="Started"
-                    value={formatRelativeTime(selectedSession.started_at)}
-                    hint={
-                      typeof selectedSession.run_age_seconds === 'number'
-                        ? `Running ${formatCompactDurationSeconds(selectedSession.run_age_seconds)}`
-                        : selectedSession.finished_at
-                          ? `Finished ${formatRelativeTime(selectedSession.finished_at)}`
-                          : 'Waiting for duration'
-                    }
-                  />
-                  <OverviewMetric
-                    icon={<FlaskConical className="h-4 w-4" />}
-                    label="Progress"
-                    value={
-                      effectiveProgress && (getProgressPercent(effectiveProgress) ?? effectiveProgress.percent) != null
-                        ? `${(getProgressPercent(effectiveProgress) ?? effectiveProgress.percent ?? 0).toFixed(0)}%`
-                        : '—'
-                    }
-                    hint={effectiveProgress?.desc || effectiveProgress?.phase || effectiveStopReason || null}
-                  />
-                  <OverviewMetric
-                    icon={<FileCode2 className="h-4 w-4" />}
-                    label="Watch"
-                    value={
-                      typeof selectedSession.silent_seconds === 'number'
-                        ? `silent ${formatCompactDurationSeconds(selectedSession.silent_seconds)}`
-                        : selectedSession.watchdog_overdue
-                          ? 'overdue'
-                          : 'active'
-                    }
-                    hint={
-                      selectedSession.watchdog_overdue
-                        ? 'Watchdog window exceeded'
-                        : typeof selectedSession.progress_age_seconds === 'number'
-                          ? `progress ${formatCompactDurationSeconds(selectedSession.progress_age_seconds)} ago`
-                          : selectedSession.log_path
-                    }
-                  />
-                </div>
-
-                <div className="min-h-0 flex-1 overflow-hidden rounded-[24px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.86),rgba(244,239,233,0.94))] p-4 shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))]">
-                  {selectedToolContent ? (
-                    <McpBashExecView
-                      key={selectedSession.bash_id}
-                      toolContent={selectedToolContent}
-                      live={isActiveBashSession(effectiveStatus)}
-                      projectId={questId}
-                      readOnly={false}
-                      panelMode="terminal"
-                      chrome="default"
-                      onLiveStateChange={(state) => {
-                        setLiveStatus(state.status)
-                        setLiveExitCode(state.exitCode)
-                        setLiveStopReason(state.stopReason || null)
-                        setLiveProgress(state.progress)
+                  {isActiveBashSession(effectiveStatus) ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        void handleStop()
                       }}
-                    />
+                      disabled={stopPending}
+                      className="h-9 rounded-full border-black/[0.08] bg-white/[0.84] px-3 text-[11px] shadow-sm backdrop-blur hover:bg-white dark:border-white/[0.10] dark:bg-[rgba(18,18,18,0.72)] dark:hover:bg-[rgba(24,24,24,0.9)]"
+                    >
+                      <Square className="mr-1.5 h-3.5 w-3.5" />
+                      {stopPending ? 'Stopping…' : 'Stop'}
+                    </Button>
                   ) : null}
                 </div>
               </>
@@ -2433,8 +2909,13 @@ function QuestDetails({
             <StatusPill mono>{questId}</StatusPill>
           </div>
 
-          <div className="mt-4 break-words text-[28px] font-semibold tracking-[-0.03em] text-foreground">
-            {snapshot?.title || questId}
+          <div className="mt-4">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+              Title
+            </div>
+            <div className="mt-2 whitespace-normal break-words text-lg font-medium leading-7 tracking-[-0.01em] text-foreground [overflow-wrap:anywhere]">
+              {snapshot?.title || questId}
+            </div>
           </div>
 
           <div className="mt-6 grid gap-x-10 gap-y-6 sm:grid-cols-2 xl:grid-cols-3">

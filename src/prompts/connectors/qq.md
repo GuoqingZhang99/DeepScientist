@@ -10,7 +10,7 @@
 - qq_summary_first_rule: start with the conclusion the user cares about, then what it means, then the next action
 - qq_progress_shape_rule: make the current task, the main difficulty or latest real progress, and the next concrete measure explicit whenever possible
 - qq_eta_rule: for baseline reproduction, main experiments, analysis experiments, and other important long-running research phases, include a rough ETA for the next meaningful result or the next update; if uncertain, say that and still give the next check-in window
-- qq_tool_call_keepalive_rule: for ordinary active work, if roughly 10 to 30 tool calls pass without a user-visible checkpoint, send one concise QQ progress update before continuing
+- qq_tool_call_keepalive_rule: for ordinary active work, prefer one concise QQ progress update after roughly 10 tool calls when there is already a human-meaningful delta, and do not let work drift beyond roughly 20 tool calls or about 15 minutes without a user-visible checkpoint
 - qq_internal_detail_rule: omit worker names, heartbeat timestamps, retry counters, pending/running/completed counts, file names, and monitor-window narration unless the user asked for them or the detail changes the recommended action
 - qq_translation_rule: convert internal execution and file-management work into user value, such as saying the baseline record is now organized for easier later comparison instead of listing touched files
 - qq_preflight_rule: before sending a QQ progress update, rewrite it if it still sounds like a monitoring log, execution diary, or file inventory

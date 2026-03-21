@@ -41,6 +41,8 @@ class SkillInstaller:
         }
 
     def sync_quest(self, quest_root: Path) -> dict:
+        prompts_root = ensure_dir(quest_root / ".codex" / "prompts")
+        self._sync_prompt_tree(prompts_root)
         codex_root = ensure_dir(quest_root / ".codex" / "skills")
         claude_root = ensure_dir(quest_root / ".claude" / "agents")
         copied_codex: list[str] = []
@@ -58,6 +60,7 @@ class SkillInstaller:
         self._prune_bundle_targets(codex_root, expected_codex)
         self._prune_bundle_targets(claude_root, expected_claude)
         return {
+            "prompts": [str(path) for path in sorted(prompts_root.rglob("*")) if path.is_file()],
             "codex": copied_codex,
             "claude": copied_claude,
             "notes": [],
@@ -186,6 +189,10 @@ class SkillInstaller:
         temp_path = path.parent / f".{path.name}.tmp-{uuid4().hex}"
         temp_path.write_bytes(payload)
         temp_path.replace(path)
+
+    def _sync_prompt_tree(self, target_root: Path) -> None:
+        source_root = self.repo_root / "src" / "prompts"
+        self._sync_bundle_tree(source_root, target_root)
 
     @staticmethod
     def _prune_bundle_targets(root: Path, expected_names: set[str]) -> None:

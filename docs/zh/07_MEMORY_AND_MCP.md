@@ -192,7 +192,44 @@ updated_at: 2026-03-11T18:00:00+00:00
 不要用 memory 代替实验 artifact。
 不要用 artifact 代替可复用知识卡。
 
-## 4. Bash exec 的基本用法
+## 4. Artifact 指标契约规则
+
+baseline 与主实验的正式指标提交，应以 `artifact` 为唯一权威入口。
+
+### `artifact.confirm_baseline(...)`
+
+对于已确认的 baseline：
+
+- canonical metric contract 应保存在 `<baseline_root>/json/metric_contract.json`
+- canonical `metrics_summary` 应是顶层扁平字典，key 直接使用论文面对比时的 metric id
+- 如果原始评测输出是嵌套结构，应在 `metric_contract.metrics` 中为每个必需 canonical metric 提供显式 `origin_path`，而不是直接提交嵌套 blob
+- 每个 canonical baseline metric 都应说明数值来源，至少包含：
+  - `description`
+  - `derivation` 或 `origin_path`
+  - `source_ref`
+- `primary_metric` 只是 headline metric，不能借此删掉其他论文面对比所需指标
+
+### `artifact.record_main_experiment(...)`
+
+对于基于已确认 baseline 的主实验：
+
+- 默认以已确认 baseline 的 metric-contract JSON 作为 canonical comparison contract
+- 主实验提交时必须覆盖 baseline 的全部必需 metric id
+- 可以多报额外指标，但不能缺少 baseline 的必需指标
+- canonical baseline metrics 应继续使用原有评测代码和指标定义
+- 如果确实需要额外评测器，应把它作为 supplementary evidence 记录，而不是替换 canonical comparator
+
+### 校验失败与临时记录
+
+- 当 MCP 工具开启严格校验时，失败会返回结构化错误字段，例如：
+  - `missing_metric_ids`
+  - `baseline_metric_ids`
+  - `baseline_metric_details`
+  - `evaluation_protocol_mismatch`
+- `Result/metric.md` 只可作为工作过程中的临时草稿/记忆文件，不是必需文件，也不是权威来源
+- 如果存在 `Result/metric.md`，请在调用 artifact 提交前用它核对最终 baseline 或主实验提交内容，避免遗漏或写错
+
+## 5. Bash exec 的基本用法
 
 用于可监控命令：
 
@@ -209,7 +246,7 @@ bash_exec.bash_exec(mode="read", id="<bash_id>")
 
 只有在确实需要停止时才使用 `kill`。
 
-## 5. Prompt 级纪律（建议）
+## 6. Prompt 级纪律（建议）
 
 通常推荐遵循：
 
@@ -220,7 +257,7 @@ bash_exec.bash_exec(mode="read", id="<bash_id>")
 5. 长任务 shell 用 `bash_exec`
 6. 有真正的可复用发现才 `memory.write(...)`
 
-## 6. UI 期望
+## 7. UI 期望
 
 在 `/projects/{id}` 的 Studio trace 中：
 

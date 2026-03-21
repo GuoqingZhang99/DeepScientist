@@ -21,6 +21,8 @@ export type WorkspaceTabBadgeToken =
   | 'cli'
   | 'rendered'
   | 'source'
+  | 'snapshot'
+  | 'diff'
   | 'quote'
   | 'readonly'
   | 'compiling'
@@ -44,14 +46,40 @@ export function getWorkspaceResourceExtension(value?: string | null) {
   return path.slice(dotIndex + 1)
 }
 
-function detectKindByExtension(extension: string): WorkspaceContentKind | null {
+export function detectWorkspaceContentKindByExtension(extension: string): WorkspaceContentKind | null {
   if (!extension) return null
   if (extension === 'pdf') return 'pdf'
+  if (extension === 'ipynb' || extension === 'dsnb' || extension === 'notebook' || extension === 'ds') {
+    return 'notebook'
+  }
   if (extension === 'mdx') return 'mdx'
   if (extension === 'md' || extension === 'markdown') return 'markdown'
   if (extension === 'html' || extension === 'htm') return 'html'
   if (extension === 'tex' || extension === 'bib') return 'latex'
   return 'code'
+}
+
+export function inferWorkspaceContentKindFromMetadata(input: {
+  mimeType?: string | null
+  resourceName?: string | null
+  resourcePath?: string | null
+}): WorkspaceContentKind | null {
+  const mime = String(input.mimeType || '').toLowerCase()
+  if (mime.includes('pdf')) return 'pdf'
+  if (mime.includes('html')) return 'html'
+  if (mime.includes('markdown')) return 'markdown'
+  if (mime.includes('tex') || mime.includes('bibtex')) return 'latex'
+  if (
+    mime.includes('ipynb') ||
+    mime.includes('blocksuite-notebook') ||
+    mime.includes('jupyter') ||
+    mime.includes('notebook')
+  ) {
+    return 'notebook'
+  }
+
+  const extension = getWorkspaceResourceExtension(input.resourceName || input.resourcePath || '')
+  return detectWorkspaceContentKindByExtension(extension)
 }
 
 export function getWorkspaceContentKind(
@@ -68,16 +96,13 @@ export function getWorkspaceContentKind(
   if (tab.pluginId === BUILTIN_PLUGINS.LAB) return 'lab'
   if (tab.pluginId === BUILTIN_PLUGINS.CLI) return 'cli'
 
-  const mime = String(tab.context.mimeType || '').toLowerCase()
-  if (mime.includes('pdf')) return 'pdf'
-  if (mime.includes('html')) return 'html'
-  if (mime.includes('markdown')) return 'markdown'
-  if (mime.includes('tex') || mime.includes('bibtex')) return 'latex'
-
-  const extension = getWorkspaceResourceExtension(
-    tab.context.resourceName || tab.context.resourcePath || ''
+  return (
+    inferWorkspaceContentKindFromMetadata({
+      mimeType: tab.context.mimeType,
+      resourceName: tab.context.resourceName,
+      resourcePath: tab.context.resourcePath,
+    }) || 'file'
   )
-  return detectKindByExtension(extension) || 'file'
 }
 
 export function getWorkspaceBadgeTokens(
@@ -98,6 +123,8 @@ export function getWorkspaceBadgeTokens(
 
   if (viewState?.documentMode === 'rendered') tokens.push('rendered')
   if (viewState?.documentMode === 'source') tokens.push('source')
+  if (viewState?.documentMode === 'snapshot') tokens.push('snapshot')
+  if (viewState?.documentMode === 'diff') tokens.push('diff')
   if ((viewState?.selectionCount || 0) > 0) tokens.push('quote')
   if (viewState?.isReadOnly) tokens.push('readonly')
   if (viewState?.compileState === 'compiling') tokens.push('compiling')
@@ -156,6 +183,10 @@ export function getWorkspaceBadgeLabel(
       return t('tab_badge_rendered')
     case 'source':
       return t('tab_badge_source')
+    case 'snapshot':
+      return t('tab_badge_snapshot', undefined, 'Snapshot')
+    case 'diff':
+      return t('tab_badge_diff', undefined, 'Diff')
     case 'quote':
       return t('tab_badge_quote')
     case 'readonly':

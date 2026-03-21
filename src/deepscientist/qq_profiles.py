@@ -7,16 +7,13 @@ from .shared import slugify
 
 
 QQ_PROFILE_ID_PREFIX = "qq-profile"
-QQ_DEFAULT_SECRET_ENV = "QQ_APP_SECRET"
-
-
 def default_qq_profile() -> dict[str, Any]:
     return {
         "profile_id": None,
         "enabled": True,
         "app_id": None,
         "app_secret": None,
-        "app_secret_env": QQ_DEFAULT_SECRET_ENV,
+        "app_secret_env": None,
         "bot_name": "DeepScientist",
         "main_chat_id": None,
     }
@@ -25,6 +22,13 @@ def default_qq_profile() -> dict[str, Any]:
 def _as_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _normalize_secret_pair(payload: dict[str, Any], direct_key: str, env_key: str) -> None:
+    direct = _as_text(payload.get(direct_key))
+    env_name = _as_text(payload.get(env_key))
+    payload[direct_key] = direct
+    payload[env_key] = None if direct else env_name
 
 
 def _profile_id_seed(*, profile_id: Any, app_id: Any, bot_name: Any, index: int) -> str:
@@ -77,12 +81,14 @@ def merge_qq_profile_config(shared_config: dict[str, Any] | None, profile: dict[
     normalized = normalize_qq_connector_config(shared_config)
     merged = deepcopy(normalized)
     merged.pop("profiles", None)
+    app_secret = _as_text(profile.get("app_secret"))
+    app_secret_env = _as_text(profile.get("app_secret_env"))
     merged.update(
         {
             "profile_id": str(profile.get("profile_id") or "").strip() or None,
             "app_id": _as_text(profile.get("app_id")),
-            "app_secret": _as_text(profile.get("app_secret")),
-            "app_secret_env": _as_text(profile.get("app_secret_env")) or QQ_DEFAULT_SECRET_ENV,
+            "app_secret": app_secret,
+            "app_secret_env": None if app_secret else app_secret_env,
             "bot_name": _as_text(profile.get("bot_name")) or str(normalized.get("bot_name") or "DeepScientist"),
             "main_chat_id": _as_text(profile.get("main_chat_id")),
             "enabled": bool(normalized.get("enabled", False)) and bool(profile.get("enabled", True)),
@@ -113,7 +119,7 @@ def normalize_qq_connector_config(config: dict[str, Any] | None) -> dict[str, An
         "transport": "gateway_direct",
         "app_id": None,
         "app_secret": None,
-        "app_secret_env": QQ_DEFAULT_SECRET_ENV,
+        "app_secret_env": None,
         "bot_name": "DeepScientist",
         "command_prefix": "/",
         "main_chat_id": None,
@@ -132,7 +138,7 @@ def normalize_qq_connector_config(config: dict[str, Any] | None) -> dict[str, An
     shared["transport"] = "gateway_direct"
     shared["command_prefix"] = _as_text(shared.get("command_prefix")) or "/"
     shared["bot_name"] = _as_text(shared.get("bot_name")) or "DeepScientist"
-    shared["app_secret_env"] = _as_text(shared.get("app_secret_env")) or QQ_DEFAULT_SECRET_ENV
+    _normalize_secret_pair(shared, "app_secret", "app_secret_env")
 
     raw_profiles = payload.get("profiles")
     items = list(raw_profiles) if isinstance(raw_profiles, list) else []
@@ -144,7 +150,9 @@ def normalize_qq_connector_config(config: dict[str, Any] | None) -> dict[str, An
         "main_chat_id": payload.get("main_chat_id"),
     }
     if not items:
-        if any(_as_text(legacy_profile_seed.get(key)) for key in ("app_id", "app_secret", "main_chat_id", "bot_name")):
+        has_direct_profile_seed = any(_as_text(legacy_profile_seed.get(key)) for key in ("app_id", "app_secret", "main_chat_id"))
+        has_env_profile_seed = bool(payload.get("enabled")) and bool(_as_text(legacy_profile_seed.get("app_secret_env")))
+        if has_direct_profile_seed or has_env_profile_seed:
             items = [legacy_profile_seed]
 
     profiles: list[dict[str, Any]] = []
@@ -157,6 +165,7 @@ def normalize_qq_connector_config(config: dict[str, Any] | None) -> dict[str, An
         current["app_id"] = _as_text(current.get("app_id"))
         current["app_secret"] = _as_text(current.get("app_secret"))
         current["app_secret_env"] = _as_text(current.get("app_secret_env")) or shared["app_secret_env"]
+        _normalize_secret_pair(current, "app_secret", "app_secret_env")
         current["bot_name"] = _as_text(current.get("bot_name")) or shared["bot_name"]
         current["main_chat_id"] = _as_text(current.get("main_chat_id"))
         current["profile_id"] = _unique_profile_id(
@@ -181,6 +190,7 @@ def normalize_qq_connector_config(config: dict[str, Any] | None) -> dict[str, An
     else:
         shared["app_id"] = None
         shared["app_secret"] = None
+        shared["app_secret_env"] = None
         shared["main_chat_id"] = None
 
     return shared

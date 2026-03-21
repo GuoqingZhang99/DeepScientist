@@ -22,6 +22,7 @@ def test_backend_routes_cover_shared_web_and_tui_surface() -> None:
         ("POST", "/api/quests", "quest_create"),
         ("GET", "/api/connectors", "connectors"),
         ("GET", "/api/connectors/availability", "connectors_availability"),
+        ("DELETE", "/api/connectors/qq/profiles/qq-alpha", "connector_profile_delete"),
         ("POST", "/api/quests/q-001/baseline-binding", "quest_baseline_binding"),
         ("DELETE", "/api/quests/q-001/baseline-binding", "quest_baseline_unbind"),
         ("PATCH", "/api/quests/q-001/settings", "quest_settings"),
@@ -50,6 +51,7 @@ def test_backend_routes_cover_shared_web_and_tui_surface() -> None:
         ("GET", "/api/quests/q-001/git/commit", "git_commit"),
         ("GET", "/api/quests/q-001/git/diff-file", "git_diff_file"),
         ("GET", "/api/quests/q-001/git/commit-file", "git_commit_file"),
+        ("GET", "/api/quests/q-001/operations/file-change-diff", "file_change_diff"),
         ("GET", "/api/quests/q-001/memory", "quest_memory"),
         ("GET", "/api/quests/q-001/documents", "documents"),
         ("GET", "/api/quests/q-001/explorer", "explorer"),
@@ -92,6 +94,7 @@ def test_web_client_uses_acp_and_git_surface_expected_by_backend() -> None:
         "/api/quests/${questId}/session",
         "/api/quest-id/next",
         "/api/connectors/availability",
+        "/api/connectors/${encodeURIComponent(connectorName)}/profiles/${encodeURIComponent(profileId)}",
         "/api/quests/${questId}/settings",
         "/api/quests/${questId}/bindings",
         "/api/quests/${questId}`",
@@ -112,6 +115,7 @@ def test_web_client_uses_acp_and_git_surface_expected_by_backend() -> None:
         "/api/quests/${questId}/git/commit",
         "/api/quests/${questId}/git/diff-file",
         "/api/quests/${questId}/git/commit-file",
+        "/api/quests/${questId}/operations/file-change-diff",
         "/api/quests/${questId}/documents/open",
         "/api/quests/${questId}/documents/assets",
         "/api/quests/${questId}/chat",
@@ -362,6 +366,20 @@ def test_workspace_studio_uses_direct_timeline_surface() -> None:
     assert "runner.tool_result" in acp_bridge_source
     assert "artifact.recorded" in acp_bridge_source
     assert "deriveMcpIdentity" in mcp_identity_source
+
+
+def test_artifact_tool_views_render_activate_branch_and_delivery_context() -> None:
+    studio_tool_cards_source = _read("src/ui/src/components/workspace/StudioToolCards.tsx")
+    artifact_tool_view_source = _read("src/ui/src/components/chat/toolViews/McpArtifactToolView.tsx")
+
+    assert "activate_branch: active ? 'Activating branch' : 'Activated branch'" in studio_tool_cards_source
+    assert "connector notified" in studio_tool_cards_source
+    assert "latestMainRunId" in studio_tool_cards_source
+
+    assert "function renderActivateBranch" in artifact_tool_view_source
+    assert "function renderConnectorDelivery" in artifact_tool_view_source
+    assert "activate_branch: active ? 'DeepScientist is activating branch...' : 'DeepScientist activated branch.'" in artifact_tool_view_source
+    assert "Returning to a durable research branch should also sync the active workspace and connector context." in artifact_tool_view_source
 
 
 def test_runner_settings_surface_exposes_reasoning_and_retry_controls() -> None:

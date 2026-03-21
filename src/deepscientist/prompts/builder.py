@@ -91,10 +91,16 @@ class PromptBuilder:
         quest_root = Path(snapshot["quest_root"])
         active_anchor = str(snapshot.get("active_anchor") or skill_id)
         default_locale = str(runtime_config.get("default_locale") or "en-US")
-        system_block = self._prompt_fragment("src/prompts/system.md")
+        system_block = self._prompt_fragment("system.md", quest_root=quest_root)
+        shared_interaction_block = self._prompt_fragment(
+            Path("contracts") / "shared_interaction.md",
+            quest_root=quest_root,
+        )
         connector_contract_block = self._connector_contract_block(quest_id=quest_id, snapshot=snapshot)
         sections = [
             system_block,
+            "",
+            shared_interaction_block,
             "",
             "## Runtime Context",
             f"ds_home: {self.home.resolve()}",
@@ -332,7 +338,8 @@ class PromptBuilder:
         connector = self._active_external_connector_name(quest_id=quest_id, snapshot=snapshot)
         if connector is None:
             return ""
-        path = self.repo_root / "src" / "prompts" / "connectors" / f"{connector}.md"
+        quest_root = Path(snapshot["quest_root"])
+        path = self._prompt_path(Path("connectors") / f"{connector}.md", quest_root=quest_root)
         if not path.exists():
             return ""
         return self._markdown_body(path)
@@ -601,9 +608,17 @@ class PromptBuilder:
 
         return "\n".join(lines)
 
-    def _prompt_fragment(self, relative_path: str) -> str:
-        path = self.repo_root / relative_path
+    def _prompt_fragment(self, relative_path: str | Path, *, quest_root: Path | None = None) -> str:
+        path = self._prompt_path(relative_path, quest_root=quest_root)
         return self._markdown_body(path)
+
+    def _prompt_path(self, relative_path: str | Path, *, quest_root: Path | None = None) -> Path:
+        normalized = Path(relative_path)
+        if quest_root is not None:
+            quest_path = quest_root / ".codex" / "prompts" / normalized
+            if quest_path.exists():
+                return quest_path
+        return self.repo_root / "src" / "prompts" / normalized
 
     def _latest_user_message(self, quest_id: str) -> dict | None:
         for item in reversed(self.quest_service.history(quest_id, limit=80)):
@@ -709,6 +724,11 @@ class PromptBuilder:
                 [
                     "- delivery_goal: the quest should normally continue until at least one paper-like deliverable exists.",
                     "- main_result_rule: a strong main experiment is evidence, not the endpoint; usually continue into the necessary analysis, writing, or further strengthening work.",
+                    "- main_run_branch_rule: every durable main experiment should live on its own dedicated `run/*` branch/worktree so the result becomes a stable Canvas node instead of mutating the idea branch in place.",
+                    "- main_run_branch_rule_2: if the current workspace is still an idea branch when `artifact.record_main_experiment(...)` runs, the runtime will materialize a child `run/*` branch before durable recording; still prefer planning and implementation with that dedicated run branch in mind from the start.",
+                    "- paper_branch_rule: after the required analysis for a strong main result is complete, writing should continue on a dedicated `paper/*` branch/worktree derived from that run branch rather than on the quest root or on the evidence branch itself.",
+                    "- paper_branch_rule_2: treat the paper branch as the writing surface and the parent run branch as the evidence source; do not record new main experiments from the paper branch.",
+                    "- paper_template_rule: once paper writing starts, choose a real venue template from the `write` skill's `templates/` folder, copy it into `paper/latex/`, and default to `templates/iclr2026/` for general ML unless the user or venue contract clearly points elsewhere.",
                     "- writing_rule: when the evidence becomes strong enough, analysis and paper writing remain in scope by default.",
                     "- review_gate_rule: before declaring a substantial paper/draft task done, open `review` for an independent skeptical audit; if that audit finds serious gaps, route to `analysis-campaign`, `baseline`, `scout`, or `write` instead of stopping.",
                     "- stop_rule: do not stop with only an improved algorithm or isolated run logs unless the user explicitly narrows scope.",
@@ -746,15 +766,17 @@ class PromptBuilder:
             "- interaction_protocol: first message may be plain conversation; after that, treat artifact.interact threads and mailbox polls as the main continuity spine across TUI, web, and connectors",
             "- mailbox_protocol: artifact.interact(include_recent_inbound_messages=True) is the queued human-message mailbox; when it returns user text, treat that input as higher priority than background subtasks until it has been acknowledged",
             "- acknowledgment_protocol: after artifact.interact returns any human message, immediately send one substantive artifact.interact(...) follow-up; if the active connector runtime already emitted a transport-level receipt acknowledgement, do not send a redundant receipt-only message; if answerable, answer directly, otherwise state the short plan, nearest checkpoint, and that the current background subtask is paused",
-            "- progress_protocol: emit artifact.interact(kind='progress', reply_mode='threaded', ...) at real human-meaningful checkpoints; if no natural checkpoint appears during active user-relevant work, send a concise keepalive before you drift beyond roughly 10 to 30 tool calls without a user-visible update",
+            "- progress_protocol: emit artifact.interact(kind='progress', reply_mode='threaded', ...) at real human-meaningful checkpoints; if no natural checkpoint appears during active user-relevant work, prefer a concise keepalive once work has crossed roughly 10 tool calls with a human-meaningful delta, and do not drift beyond roughly 20 tool calls or about 15 minutes without a user-visible update",
             "- smoke_then_detach_protocol: for baseline reproduction, main experiments, and analysis experiments, first validate the command path with a bounded smoke test; once the smoke test passes, launch the real long run with bash_exec(mode='detach', ...) and usually leave timeout_seconds unset rather than guessing a fake deadline",
             "- progress_first_monitoring_protocol: when supervising a long-running bash_exec session, judge health by forward progress rather than by whether the final artifact has already appeared within a short window",
             "- delta_monitoring_protocol: compare deltas such as new sample counters, new task counters, new saved files, new last_output_seq values, or changed last_progress payloads; if any of these move forward, treat the run as alive and keep observing",
-            "- long_run_reporting_protocol: for long-running bash_exec monitoring loops, inspect real logs or status after each completed sleep/await cycle and at least once every 30 minutes at worst, but only send a user-visible update when there is a human-meaningful delta or when the 30-minute visibility bound would otherwise be exceeded",
+            "- long_run_reporting_protocol: for long-running bash_exec monitoring loops, inspect real logs or status after each completed sleep/await cycle and at least once every 30 minutes at worst, but only send a user-visible update when there is a human-meaningful delta or when the 30-minute visibility bound would otherwise be exceeded; those updates should report the current status, the latest concrete evidence of progress or failure, and the next checkpoint",
             "- long_run_watchdog_protocol: for baseline reproduction, baseline-running stages, main experiments, and other important detached runs, do not let more than 30 minutes pass without a real progress inspection and, if the run is still active, a user-visible artifact.interact progress update",
             "- intervention_threshold_protocol: do not kill or restart a run merely because a short watch window passed without final completion; intervene only on explicit failure, clear invalidity, process exit, or no meaningful delta across a sufficiently long observation window",
             "- slow_model_patience_protocol: if the user says the model, endpoint, or workload is expected to be slow, widen the observation window before intervention and avoid repeated no-change updates",
-            "- tail_monitoring_protocol: when monitoring a detached run, prefer bash_exec(mode='read', id=..., tail_limit=..., order='desc') so you inspect the newest evidence first instead of re-reading full logs every time",
+            "- saved_log_read_protocol: bash_exec(mode='read', id=...) returns the full saved rendered log when it is 2000 lines or fewer; for longer logs it returns a preview with the first 500 lines plus the last 1500 lines and tells you to use start/tail for omitted middle windows",
+            "- log_window_protocol: when you need a specific omitted middle region from a long saved log, use bash_exec(mode='read', id=..., start=..., tail=...) to read a forward rendered-line window",
+            "- tail_monitoring_protocol: when monitoring a detached run, prefer bash_exec(mode='read', id=..., tail_limit=..., order='desc') so you inspect the newest seq-based evidence first instead of re-reading full logs every time",
             "- managed_recovery_protocol: if a detached baseline, main-experiment, or analysis run is clearly invalid, wedged, or superseded, stop it with bash_exec(mode='kill', id=...), document the reason, fix the issue, and relaunch cleanly instead of letting a bad run linger",
             "- timeout_protocol: before using bash_exec(mode='await', ...), estimate whether the command can finish within the selected wait window; if runtime is uncertain or likely longer, use bash_exec(mode='detach', ...) and monitor, or set timeout_seconds intentionally",
             "- blocking_protocol: use reply_mode='blocking' only for true unresolved user decisions; ordinary progress updates should stay threaded and non-blocking",
@@ -765,9 +787,18 @@ class PromptBuilder:
             "- respect_protocol: write user-facing updates as natural, respectful, easy-to-follow chat; do not sound like a formal status report or internal tool log",
             "- omission_protocol: for ordinary user-facing updates, omit file paths, artifact ids, branch/worktree ids, session ids, raw commands, raw logs, and internal tool names unless the user asked for them or needs them to act",
             "- compaction_protocol: ordinary artifact.interact progress updates should usually fit in 2 to 4 short sentences and should not read like a monitoring transcript or execution diary",
-            "- tool_call_keepalive_protocol: for active multi-step work outside long detached experiment waits, if you have spent roughly 10 to 30 tool calls without a user-visible checkpoint, send one concise artifact.interact progress update before continuing",
+            "- tool_call_keepalive_protocol: for active multi-step work outside long detached experiment waits, prefer sending one concise artifact.interact progress update after roughly 10 tool calls when there is already a human-meaningful delta, and do not exceed roughly 20 tool calls or about 15 minutes without a user-visible checkpoint",
             "- human_progress_shape_protocol: ordinary progress updates should usually make three things explicit in human language: the current task, the main difficulty or latest real progress, and the concrete next measure you will take",
+            "- milestone_graduation_protocol: keep ordinary subtask completions concise; upgrade to a richer milestone report only when a stage-significant deliverable or route-changing checkpoint becomes durably true",
             "- eta_visibility_protocol: for baseline reproduction, main experiments, analysis experiments, and other important long-running phases, progress updates should also make the expected time to the next meaningful result, next milestone, or next user-visible update explicit; use roughly 10 to 30 minutes as the normal update window, and if the ETA is unreliable, say that and give a realistic next check-in window instead",
+            "- stage_plan_protocol: for `baseline`, `experiment`, and `analysis-campaign`, do not jump straight into substantial setup, code changes, or real runs; first create or update quest-visible `PLAN.md` and `CHECKLIST.md`, then keep them aligned with the actual route",
+            "- baseline_plan_protocol: in `baseline`, read the source paper and source repo first when they exist, then make `PLAN.md` cover the route, source package, code touchpoints, smoke path, real-run path, fallback options, monitoring rules, and verification targets before substantial work continues",
+            "- experiment_plan_protocol: in `experiment`, make `PLAN.md` start with the selected idea summarized in 1 to 2 sentences and then map the idea into code touchpoints, comparability rules, smoke / pilot path, full-run path, fallback options, monitoring rules, and revision notes",
+            "- analysis_plan_protocol: in `analysis-campaign`, treat `PLAN.md` as the campaign charter and make it cover the slice list, comparability boundary, asset and comparator plan, smoke / full-run policy, reporting plan, and revision log before real slices launch",
+            "- checklist_maintenance_protocol: for those same stages, treat `CHECKLIST.md` as the living execution surface and update it during reading, setup, coding, smoke tests, real runs, validation, aggregation, and route changes instead of letting progress live only in chat",
+            "- plan_revision_protocol: if the route, comparability contract, source package, execution strategy, slice ordering, or campaign interpretation changes materially, revise `PLAN.md` before continuing",
+            "- plan_execution_stability_protocol: once `baseline` or `experiment` has a concrete `PLAN.md` route, implement that plan cleanly instead of repeatedly reshaping code and commands mid-flight; the normal default is one bounded smoke or pilot validation and then one real run, and extra retries should happen only after concrete failure, invalidity, or genuinely new evidence justifies them",
+            "- stage_milestone_summary_protocol: for accepted baseline, selected idea, completed main experiment, and completed analysis-campaign milestones, usually open with 1 to 2 sentences that say what happened, what it means, and the exact next step before expanding into more detail",
             "- idea_milestone_protocol: immediately after a successful accepted artifact.submit_idea(...), send a threaded milestone that explains the idea in plain language and explicitly states whether it currently looks valid, research-worthy, and insight-bearing, plus the main risk and exact next experiment",
             "- idea_divergence_protocol: in the idea stage, separate divergence from convergence; unless strong durable evidence already narrows the route to one obvious serious option, do not collapse onto the first plausible route before generating a small but meaningfully diverse candidate slate",
             "- idea_lens_protocol: when idea candidates cluster around one mechanism family, deliberately switch ideation lenses such as problem-first vs solution-first, tension hunting, analogy transfer, inversion, or adjacent-possible reasoning before final selection",
@@ -776,6 +807,8 @@ class PromptBuilder:
             "- idea_balance_protocol: when the search space is not tiny, carry at least one conservative route and one higher-upside route into the final comparison",
             "- idea_pitch_protocol: before artifact.submit_idea(...), make the winner pass a two-sentence pitch, a strongest-objection check, and a concrete why-now statement",
             "- experiment_milestone_protocol: immediately after artifact.record_main_experiment(...) writes the durable result, send a threaded milestone that explains what was run, the main result, whether primary performance improved / worsened / stayed mixed versus the active baseline or best prior anchor, whether the route still looks promising, and the exact next step",
+            "- analysis_milestone_protocol: immediately after a meaningful completed analysis-campaign synthesis or route-significant campaign checkpoint, send a threaded milestone that explains which campaign question or slice set just closed, whether the claim boundary became stronger / weaker / mixed, the main caveat, and the exact next route",
+            "- paper_milestone_protocol: immediately after a meaningful paper or draft milestone such as selected outline, evidence-complete draft, major revision package, or bundle-ready paper, send a threaded milestone that explains what document milestone is now complete, which claims are now supportable, what still needs strengthening, and the exact next revision or execution route",
             "- asset_grounded_analysis_protocol: before artifact.create_analysis_campaign(...), reuse current quest and user-provided assets first and only plan slices that are executable with the current assets, runtime/tooling, and available credentials",
             "- infeasible_slice_protocol: if an analysis slice cannot actually be executed after bounded recovery, do not fake completion; record the slice with a non-success status, report the blocker explicitly, and do not pretend the system can do it",
             "- explicit_improvement_protocol: never make the user infer performance improvement only from raw metrics; say plainly whether performance improved, worsened, or stayed mixed",
@@ -1060,7 +1093,13 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _paper_and_evidence_block(self, snapshot: dict, quest_root: Path) -> str:
-        paper_root = quest_root / "paper"
+        workspace_root = Path(str(snapshot.get("active_workspace_root") or quest_root))
+        paper_root = workspace_root / "paper"
+        if not paper_root.exists():
+            paper_root = quest_root / "paper"
+        open_source_root = workspace_root / "release" / "open_source"
+        if not open_source_root.exists():
+            open_source_root = quest_root / "release" / "open_source"
         selected_outline = read_json(paper_root / "selected_outline.json", {})
         selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
         detailed_outline = (
@@ -1076,8 +1115,18 @@ class PromptBuilder:
         claim_evidence_map = claim_evidence_map if isinstance(claim_evidence_map, dict) else {}
         compile_report = read_json(paper_root / "build" / "compile_report.json", {})
         compile_report = compile_report if isinstance(compile_report, dict) else {}
-        open_source_manifest = read_json(quest_root / "release" / "open_source" / "manifest.json", {})
+        open_source_manifest = read_json(open_source_root / "manifest.json", {})
         open_source_manifest = open_source_manifest if isinstance(open_source_manifest, dict) else {}
+        default_paper_prefix = (
+            paper_root.relative_to(quest_root).as_posix()
+            if paper_root.is_relative_to(quest_root)
+            else "paper"
+        )
+        default_release_prefix = (
+            open_source_root.relative_to(quest_root).as_posix()
+            if open_source_root.is_relative_to(quest_root)
+            else "release/open_source"
+        )
 
         selected_outline_ref = str(
             selected_outline.get("outline_id") or bundle_manifest.get("selected_outline_ref") or ""
@@ -1114,14 +1163,14 @@ class PromptBuilder:
 
         lines.extend(
             [
-                f"- writing_plan_status: {_path_status(bundle_manifest.get('writing_plan_path'), fallback='paper/writing_plan.md')}",
-                f"- draft_status: {_path_status(bundle_manifest.get('draft_path'), fallback='paper/draft.md')}",
-                f"- references_status: {_path_status(bundle_manifest.get('references_path'), fallback='paper/references.bib')}",
-                f"- claim_evidence_map_status: {_path_status(bundle_manifest.get('claim_evidence_map_path'), fallback='paper/claim_evidence_map.json')}",
-                f"- baseline_inventory_status: {_path_status(bundle_manifest.get('baseline_inventory_path'), fallback='paper/baseline_inventory.json')}",
-                f"- review_status: {'paper/review/review.md [exists]' if (paper_root / 'review' / 'review.md').exists() else 'paper/review/review.md [missing]'}",
-                f"- proofing_report_status: {'paper/proofing/proofing_report.md [exists]' if (paper_root / 'proofing' / 'proofing_report.md').exists() else 'paper/proofing/proofing_report.md [missing]'}",
-                f"- page_images_manifest_status: {'paper/proofing/page_images_manifest.json [exists]' if (paper_root / 'proofing' / 'page_images_manifest.json').exists() else 'paper/proofing/page_images_manifest.json [missing]'}",
+                f"- writing_plan_status: {_path_status(bundle_manifest.get('writing_plan_path'), fallback=f'{default_paper_prefix}/writing_plan.md')}",
+                f"- draft_status: {_path_status(bundle_manifest.get('draft_path'), fallback=f'{default_paper_prefix}/draft.md')}",
+                f"- references_status: {_path_status(bundle_manifest.get('references_path'), fallback=f'{default_paper_prefix}/references.bib')}",
+                f"- claim_evidence_map_status: {_path_status(bundle_manifest.get('claim_evidence_map_path'), fallback=f'{default_paper_prefix}/claim_evidence_map.json')}",
+                f"- baseline_inventory_status: {_path_status(bundle_manifest.get('baseline_inventory_path'), fallback=f'{default_paper_prefix}/baseline_inventory.json')}",
+                f"- review_status: {f'{default_paper_prefix}/review/review.md [exists]' if (paper_root / 'review' / 'review.md').exists() else f'{default_paper_prefix}/review/review.md [missing]'}",
+                f"- proofing_report_status: {f'{default_paper_prefix}/proofing/proofing_report.md [exists]' if (paper_root / 'proofing' / 'proofing_report.md').exists() else f'{default_paper_prefix}/proofing/proofing_report.md [missing]'}",
+                f"- page_images_manifest_status: {f'{default_paper_prefix}/proofing/page_images_manifest.json [exists]' if (paper_root / 'proofing' / 'page_images_manifest.json').exists() else f'{default_paper_prefix}/proofing/page_images_manifest.json [missing]'}",
             ]
         )
 
@@ -1132,11 +1181,11 @@ class PromptBuilder:
             lines.extend(
                 [
                     "- paper_bundle_manifest_present: True",
-                    f"- bundle_pdf_status: {_path_status(pdf_rel_path, fallback='paper/paper.pdf')}",
-                    f"- bundle_compile_report_status: {_path_status(compile_rel_path, fallback='paper/build/compile_report.json')}",
+                    f"- bundle_pdf_status: {_path_status(pdf_rel_path, fallback=f'{default_paper_prefix}/paper.pdf')}",
+                    f"- bundle_compile_report_status: {_path_status(compile_rel_path, fallback=f'{default_paper_prefix}/build/compile_report.json')}",
                     f"- bundle_latex_root: {latex_root_path or 'none'}",
-                    f"- open_source_manifest_status: {_path_status(bundle_manifest.get('open_source_manifest_path'), fallback='release/open_source/manifest.json')}",
-                    f"- open_source_cleanup_plan_status: {_path_status(bundle_manifest.get('open_source_cleanup_plan_path'), fallback='release/open_source/cleanup_plan.md')}",
+                    f"- open_source_manifest_status: {_path_status(bundle_manifest.get('open_source_manifest_path'), fallback=f'{default_release_prefix}/manifest.json')}",
+                    f"- open_source_cleanup_plan_status: {_path_status(bundle_manifest.get('open_source_cleanup_plan_path'), fallback=f'{default_release_prefix}/cleanup_plan.md')}",
                 ]
             )
         else:

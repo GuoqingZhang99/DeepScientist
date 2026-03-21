@@ -17,7 +17,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from ..artifact.metrics import build_metrics_timeline, normalize_metrics_summary
+from ..artifact.metrics import build_metrics_timeline, extract_latest_metric
 from ..config import ConfigManager
 from ..connector_runtime import conversation_identity_key, normalize_conversation_id
 from ..gitops import current_branch, export_git_graph, head_commit, init_repo
@@ -129,6 +129,9 @@ class QuestService:
             "active_analysis_campaign_id": None,
             "analysis_parent_branch": None,
             "analysis_parent_worktree_root": None,
+            "paper_parent_branch": None,
+            "paper_parent_worktree_root": None,
+            "paper_parent_run_id": None,
             "next_pending_slice_id": None,
             "workspace_mode": "quest",
             "last_flow_type": None,
@@ -151,6 +154,9 @@ class QuestService:
         parent_root = str(merged.get("analysis_parent_worktree_root") or "").strip()
         if parent_root and not Path(parent_root).exists():
             merged["analysis_parent_worktree_root"] = None
+        paper_parent_root = str(merged.get("paper_parent_worktree_root") or "").strip()
+        if paper_parent_root and not Path(paper_parent_root).exists():
+            merged["paper_parent_worktree_root"] = None
         return merged
 
     def write_research_state(self, quest_root: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -206,9 +212,37 @@ class QuestService:
     def _artifact_roots(self, quest_root: Path) -> list[Path]:
         return [root for root in self.workspace_roots(quest_root) if (root / "artifacts").exists()]
 
+    @staticmethod
+    def _artifact_item_identity(path: Path, payload: dict[str, Any], *, kind: str) -> str:
+        normalized_kind = str(kind or payload.get("kind") or path.parent.name or "artifact").strip() or "artifact"
+        artifact_id = str(payload.get("artifact_id") or payload.get("id") or "").strip()
+        if artifact_id:
+            return f"{normalized_kind}:artifact:{artifact_id}"
+        branch_name = str(payload.get("branch") or "").strip()
+        run_id = str(payload.get("run_id") or "").strip()
+        if normalized_kind == "runs" and run_id and branch_name:
+            return f"{normalized_kind}:branch_run:{branch_name}:{run_id}"
+        if normalized_kind == "runs" and run_id:
+            return f"{normalized_kind}:run:{run_id}"
+        idea_id = str(payload.get("idea_id") or "").strip()
+        if normalized_kind == "ideas" and idea_id and branch_name:
+            return f"{normalized_kind}:branch_idea:{branch_name}:{idea_id}"
+        if normalized_kind == "ideas" and idea_id:
+            return f"{normalized_kind}:idea:{idea_id}"
+        return f"path:{path.resolve()}"
+
+    @staticmethod
+    def _artifact_item_rank(payload: dict[str, Any], *, path: Path, mtime_ns: int) -> tuple[str, str, int, int, str]:
+        return (
+            str(payload.get("updated_at") or ""),
+            str(payload.get("created_at") or ""),
+            len(payload),
+            mtime_ns,
+            str(path),
+        )
+
     def _collect_artifacts(self, quest_root: Path) -> list[dict[str, Any]]:
-        artifacts: list[dict[str, Any]] = []
-        seen_paths: set[str] = set()
+        artifacts_by_identity: dict[str, dict[str, Any]] = {}
         for root in self._artifact_roots(quest_root):
             artifacts_root = root / "artifacts"
             if not artifacts_root.exists():
@@ -217,19 +251,37 @@ class QuestService:
                 if not folder.is_dir():
                     continue
                 for path in sorted(folder.glob("*.json")):
-                    resolved_key = str(path.resolve())
-                    if resolved_key in seen_paths:
-                        continue
-                    seen_paths.add(resolved_key)
                     item = self._read_cached_json(path, {})
-                    artifacts.append(
-                        {
-                            "kind": folder.name,
-                            "path": str(path),
-                            "payload": item,
-                            "workspace_root": str(root),
-                        }
-                    )
+                    payload = item if isinstance(item, dict) else {}
+                    try:
+                        mtime_ns = path.stat().st_mtime_ns
+                    except OSError:
+                        mtime_ns = 0
+                    artifact = {
+                        "kind": folder.name,
+                        "path": str(path),
+                        "payload": item,
+                        "workspace_root": str(root),
+                    }
+                    identity = self._artifact_item_identity(path, payload, kind=folder.name)
+                    existing = artifacts_by_identity.get(identity)
+                    existing_payload = existing.get("payload") if isinstance((existing or {}).get("payload"), dict) else {}
+                    existing_path = Path(str((existing or {}).get("path") or path))
+                    try:
+                        existing_mtime_ns = existing_path.stat().st_mtime_ns if existing else 0
+                    except OSError:
+                        existing_mtime_ns = 0
+                    if existing is None or self._artifact_item_rank(
+                        payload,
+                        path=path,
+                        mtime_ns=mtime_ns,
+                    ) >= self._artifact_item_rank(
+                        existing_payload,
+                        path=existing_path,
+                        mtime_ns=existing_mtime_ns,
+                    ):
+                        artifacts_by_identity[identity] = artifact
+        artifacts = list(artifacts_by_identity.values())
         artifacts.sort(
             key=lambda item: str(
                 ((item.get("payload") or {}).get("updated_at"))
@@ -267,22 +319,7 @@ class QuestService:
 
     @staticmethod
     def _latest_metric_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-        metrics_summary = normalize_metrics_summary(payload.get("metrics_summary"))
-        if not metrics_summary:
-            return None
-        progress_eval = payload.get("progress_eval") if isinstance(payload.get("progress_eval"), dict) else {}
-        comparisons = payload.get("baseline_comparisons") if isinstance(payload.get("baseline_comparisons"), dict) else {}
-        primary_metric_id = (
-            str(progress_eval.get("primary_metric_id") or comparisons.get("primary_metric_id") or "").strip()
-            or next(iter(metrics_summary.keys()))
-        )
-        result = {
-            "key": primary_metric_id,
-            "value": metrics_summary.get(primary_metric_id),
-        }
-        if progress_eval.get("delta_vs_baseline") is not None:
-            result["delta_vs_baseline"] = progress_eval.get("delta_vs_baseline")
-        return result
+        return extract_latest_metric(payload)
 
     @staticmethod
     def _parse_numeric_quest_id(value: str | None) -> int | None:
@@ -980,6 +1017,9 @@ class QuestService:
             "active_analysis_campaign_id": research_state.get("active_analysis_campaign_id"),
             "analysis_parent_branch": research_state.get("analysis_parent_branch"),
             "analysis_parent_worktree_root": research_state.get("analysis_parent_worktree_root"),
+            "paper_parent_branch": research_state.get("paper_parent_branch"),
+            "paper_parent_worktree_root": research_state.get("paper_parent_worktree_root"),
+            "paper_parent_run_id": research_state.get("paper_parent_run_id"),
             "next_pending_slice_id": research_state.get("next_pending_slice_id"),
             "workspace_mode": research_state.get("workspace_mode") or "quest",
             "active_baseline_id": active_baseline_id,
@@ -1981,7 +2021,11 @@ class QuestService:
                 },
             }
 
-        resolution_root = quest_root if document_id.startswith("questpath::") else workspace_root
+        resolution_root = (
+            quest_root
+            if document_id.startswith(("questpath::", "memory::"))
+            else workspace_root
+        )
         path, writable, scope, source_kind = self._resolve_document(resolution_root, document_id)
         renderer_hint, mime_type = self._renderer_hint_for(path)
         is_text = self._is_text_document(path, mime_type, renderer_hint)
@@ -2162,11 +2206,16 @@ class QuestService:
         asset_name = f"{safe_stem}-{generate_id('asset').split('-', 1)[1]}{asset_suffix}"
         asset_relative_dir = self._markdown_asset_directory(base_relative)
         asset_relative = (asset_relative_dir / asset_name).as_posix()
-        asset_root = quest_root if document_id.startswith("questpath::") else workspace_root
+        asset_root = (
+            quest_root
+            if document_id.startswith(("questpath::", "memory::"))
+            else workspace_root
+        )
         asset_path = resolve_within(asset_root, asset_relative)
         ensure_dir(asset_path.parent)
         asset_path.write_bytes(content)
-        asset_document_id = f"{'questpath' if document_id.startswith('questpath::') else 'path'}::{asset_relative}"
+        asset_document_scope = "questpath" if document_id.startswith(("questpath::", "memory::")) else "path"
+        asset_document_id = f"{asset_document_scope}::{asset_relative}"
         relative_markdown_path = self._relative_path_from_base(base_relative, asset_relative)
         return {
             "ok": True,

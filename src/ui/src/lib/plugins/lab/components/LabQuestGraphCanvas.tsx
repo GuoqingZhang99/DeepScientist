@@ -50,6 +50,7 @@ import { useOpenFile } from '@/hooks/useOpenFile'
 import { useFileTreeStore } from '@/lib/stores/file-tree'
 import { useI18n } from '@/lib/i18n/useI18n'
 import { useLabGraphSelectionStore } from '@/lib/stores/lab-graph-selection'
+import { useThemeStore } from '@/lib/stores/theme'
 import {
   LAB_CANVAS_SEMANTIC_TONE_META,
   resolveLabCanvasViewSemantic,
@@ -144,6 +145,14 @@ type QuestNodeData = {
   retireState?: string | null
   claimEvidenceState?: string | null
   baselineGate?: string | null
+  displayMode?: 'summary' | 'metric'
+  metricKey?: string | null
+  metricLabel?: string | null
+  metricValueLabel?: string | null
+  metricDeltaLabel?: string | null
+  metricDirection?: 'higher' | 'lower' | null
+  metricTone?: 'good' | 'bad' | 'neutral' | null
+  metricEmptyReason?: string | null
 }
 
 type AgentNodeData = {
@@ -281,6 +290,184 @@ const pickMetricValue = (metrics?: Record<string, unknown> | null, metricKey?: s
 }
 
 const formatMetricLabel = (key: string, value: number) => `${key}: ${value.toFixed(3)}`
+
+type NodeMetricMeta = {
+  key: string
+  label: string
+  direction: 'higher' | 'lower' | null
+  unit?: string | null
+  decimals?: number | null
+}
+
+type NodeMetricSnapshot = {
+  metrics: Record<string, number>
+  deltas: Record<string, number>
+  meta: Map<string, NodeMetricMeta>
+}
+
+const normalizeMetricDirection = (value: unknown): 'higher' | 'lower' | null => {
+  const text = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[- ]+/g, '_')
+  if (text === 'higher' || text === 'maximize' || text === 'higher_better' || text === 'more_is_better') {
+    return 'higher'
+  }
+  if (text === 'lower' || text === 'minimize' || text === 'lower_better' || text === 'less_is_better') {
+    return 'lower'
+  }
+  return null
+}
+
+const buildNodeMetricSnapshot = (node: LabQuestGraphNode): NodeMetricSnapshot => {
+  const metrics: Record<string, number> = {}
+  const deltas: Record<string, number> = {}
+  const meta = new Map<string, NodeMetricMeta>()
+
+  const upsertMeta = (
+    key: string,
+    patch: Partial<NodeMetricMeta> & {
+      label?: string | null
+      direction?: 'higher' | 'lower' | null
+      unit?: string | null
+      decimals?: number | null
+    }
+  ) => {
+    if (!key) return
+    const current = meta.get(key)
+    meta.set(key, {
+      key,
+      label: patch.label || current?.label || key,
+      direction: patch.direction ?? current?.direction ?? null,
+      unit: patch.unit ?? current?.unit ?? null,
+      decimals: patch.decimals ?? current?.decimals ?? null,
+    })
+  }
+
+  ;(node.latest_result?.metric_contract?.metrics ?? []).forEach((item) => {
+    if (!item?.metric_id) return
+    const key = String(item.metric_id).trim()
+    if (!key) return
+    upsertMeta(key, {
+      label: String(item.label || key).trim() || key,
+      direction: normalizeMetricDirection(item.direction),
+      unit: item.unit ?? null,
+      decimals: typeof item.decimals === 'number' ? item.decimals : null,
+    })
+  })
+
+  ;(node.latest_result?.baseline_comparisons?.items ?? []).forEach((item) => {
+    if (!item?.metric_id) return
+    const key = String(item.metric_id).trim()
+    if (!key) return
+    upsertMeta(key, {
+      label: String(item.label || key).trim() || key,
+      direction: normalizeMetricDirection(item.direction),
+      unit: item.unit ?? null,
+      decimals: typeof item.decimals === 'number' ? item.decimals : null,
+    })
+    if (typeof item.delta === 'number' && Number.isFinite(item.delta)) {
+      deltas[key] = Number(item.delta)
+    }
+  })
+
+  ;(node.latest_result?.metric_rows ?? []).forEach((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return
+    const record = row as Record<string, unknown>
+    const key = String(record.metric_id || record.name || record.metric || '').trim()
+    const numeric =
+      typeof record.numeric_value === 'number' && Number.isFinite(record.numeric_value)
+        ? Number(record.numeric_value)
+        : typeof record.value === 'number' && Number.isFinite(record.value)
+          ? Number(record.value)
+          : null
+    if (!key) return
+    upsertMeta(key, {
+      label: String(record.label || record.name || key).trim() || key,
+      direction: normalizeMetricDirection(record.direction),
+      unit: typeof record.unit === 'string' ? record.unit : null,
+      decimals: typeof record.decimals === 'number' ? record.decimals : null,
+    })
+    if (numeric !== null) {
+      metrics[key] = numeric
+    }
+    if (!(key in deltas) && typeof record.delta === 'number' && Number.isFinite(record.delta)) {
+      deltas[key] = Number(record.delta)
+    }
+  })
+
+  Object.entries(node.metrics_json ?? {}).forEach(([key, value]) => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      metrics[key] = Number(value)
+      upsertMeta(key, {})
+    }
+  })
+
+  Object.entries((node.node_summary?.metrics_delta as Record<string, unknown> | null) ?? {}).forEach(([key, value]) => {
+    if (key in deltas) return
+    if (typeof value !== 'number' || !Number.isFinite(value)) return
+    deltas[key] = Number(value)
+  })
+
+  return { metrics, deltas, meta }
+}
+
+const buildBaselineMetricSnapshot = (nodes: LabQuestGraphNode[]): NodeMetricSnapshot => {
+  const baselineNode = nodes.find((node) => node.node_kind === 'baseline_root')
+  const fromNode = baselineNode ? buildNodeMetricSnapshot(baselineNode) : null
+  if (fromNode && Object.keys(fromNode.metrics).length) return fromNode
+
+  const metrics: Record<string, number> = {}
+  const deltas: Record<string, number> = {}
+  const meta = new Map<string, NodeMetricMeta>()
+  nodes.forEach((node) => {
+    ;(node.latest_result?.baseline_comparisons?.items ?? []).forEach((item) => {
+      if (!item?.metric_id || typeof item.baseline_value !== 'number' || !Number.isFinite(item.baseline_value)) return
+      metrics[item.metric_id] = Number(item.baseline_value)
+      const current = meta.get(item.metric_id)
+      meta.set(item.metric_id, {
+        key: item.metric_id,
+        label: String(item.label || current?.label || item.metric_id).trim() || item.metric_id,
+        direction: normalizeMetricDirection(item.direction) || current?.direction || null,
+        unit: item.unit ?? current?.unit ?? null,
+        decimals: typeof item.decimals === 'number' ? item.decimals : current?.decimals ?? null,
+      })
+    })
+  })
+  return { metrics, deltas, meta }
+}
+
+const formatMetricValueDisplay = (value: number, meta?: NodeMetricMeta | null) => {
+  const decimals =
+    typeof meta?.decimals === 'number'
+      ? meta.decimals
+      : Math.abs(value) < 1
+        ? 4
+        : Math.abs(value) < 10
+          ? 3
+          : 2
+  const rendered = value.toFixed(Math.max(0, Math.min(6, decimals)))
+  return meta?.unit ? `${rendered} ${meta.unit}` : rendered
+}
+
+const resolveMetricTone = (
+  delta: number | null | undefined,
+  direction: 'higher' | 'lower' | null | undefined
+): 'good' | 'bad' | 'neutral' => {
+  if (typeof delta !== 'number' || !Number.isFinite(delta) || delta === 0) return 'neutral'
+  if (direction === 'lower') {
+    return delta < 0 ? 'good' : 'bad'
+  }
+  if (direction === 'higher') {
+    return delta > 0 ? 'good' : 'bad'
+  }
+  return delta > 0 ? 'good' : 'bad'
+}
+
+const formatMetricDeltaDisplay = (delta: number, meta?: NodeMetricMeta | null) => {
+  const sign = delta >= 0 ? '+' : ''
+  return `Δ ${sign}${formatMetricValueDisplay(delta, meta)} vs baseline`
+}
 
 const clampCanvasText = (value?: string | null, limit = 84) => {
   const text = String(value || '')
@@ -788,24 +975,45 @@ const isActiveAgentStatus = (status?: string | null) => {
   return raw.includes('running') || raw.includes('waiting') || raw.includes('busy') || raw.includes('active')
 }
 
-const resolveEdgeStyle = (edgeType?: string | null) => {
+type LabEdgePalette = {
+  defaultStroke: string
+  stageStroke: string
+  agentStroke: string
+}
+
+const resolveEdgePalette = (resolvedTheme: 'light' | 'dark'): LabEdgePalette => {
+  if (resolvedTheme === 'dark') {
+    return {
+      defaultStroke: 'rgba(241, 233, 222, 0.42)',
+      stageStroke: '#e0bf88',
+      agentStroke: 'rgba(241, 233, 222, 0.54)',
+    }
+  }
+  return {
+    defaultStroke: 'rgba(71, 63, 52, 0.38)',
+    stageStroke: '#b48d4f',
+    agentStroke: 'rgba(71, 63, 52, 0.48)',
+  }
+}
+
+const resolveEdgeStyle = (edgeType: string | null | undefined, palette: LabEdgePalette) => {
   const normalized = String(edgeType || '').toLowerCase()
   if (normalized === 'sequence') {
     return {
-      stroke: 'var(--lab-border-strong)',
-      strokeWidth: 1.3,
+      stroke: palette.defaultStroke,
+      strokeWidth: 1.7,
       strokeDasharray: '5 4',
     }
   }
   if (normalized === 'stage') {
     return {
-      stroke: 'var(--lab-accent-strong)',
-      strokeWidth: 1.8,
+      stroke: palette.stageStroke,
+      strokeWidth: 2.2,
     }
   }
   return {
-    stroke: 'var(--lab-border-strong)',
-    strokeWidth: 1.4,
+    stroke: palette.defaultStroke,
+    strokeWidth: 1.85,
   }
 }
 
@@ -1389,7 +1597,9 @@ const MetricCurveChart = ({
 const QuestGraphNode = ({ data }: NodeProps) => {
   const { t } = useI18n('lab')
   const nodeData = data as QuestNodeData
+  const isMetricMode = nodeData.displayMode === 'metric' && !nodeData.isEvent
   const positive =
+    nodeData.metricTone === 'good' ||
     isPositiveDeltaLabel(nodeData.deltaLabel) ||
     ['good', 'support', 'go'].includes(String(nodeData.verdict || '').toLowerCase())
   const compactSummary =
@@ -1403,8 +1613,13 @@ const QuestGraphNode = ({ data }: NodeProps) => {
     null
   const compactMeta = [
     nodeData.branchNo ? `#${nodeData.branchNo}` : null,
-    nodeData.deltaLabel,
-    nodeData.metric,
+    isMetricMode ? nodeData.metricDeltaLabel : nodeData.deltaLabel,
+    !isMetricMode ? nodeData.metric : null,
+    isMetricMode && nodeData.metricDirection
+      ? nodeData.metricDirection === 'lower'
+        ? t('quest_curve_direction_lower', undefined, 'lower is better')
+        : t('quest_curve_direction_higher', undefined, 'higher is better')
+      : null,
     nodeData.branchClass ? formatStateLabel(nodeData.branchClass) : null,
     nodeData.runtimeState ? formatStateLabel(nodeData.runtimeState) : null,
     nodeData.proofState && nodeData.proofState !== 'not_applicable'
@@ -1474,7 +1689,27 @@ const QuestGraphNode = ({ data }: NodeProps) => {
           </span>
         ))}
       </div>
-      {compactSummary ? (
+      {isMetricMode ? (
+        <div
+          className={cn(
+            'lab-quest-graph-node__metric-block',
+            nodeData.metricTone === 'good' && 'is-good',
+            nodeData.metricTone === 'bad' && 'is-bad'
+          )}
+        >
+          <div className="lab-quest-graph-node__metric-label">
+            {nodeData.metricLabel || t('quest_curve_metric_label', undefined, 'Focus metric')}
+          </div>
+          <div className="lab-quest-graph-node__metric-value">
+            {nodeData.metricValueLabel || nodeData.metricEmptyReason || t('quest_metric_empty', undefined, 'No metric available')}
+          </div>
+          {nodeData.metricDeltaLabel ? (
+            <div className="lab-quest-graph-node__metric-delta">{nodeData.metricDeltaLabel}</div>
+          ) : nodeData.metricEmptyReason && nodeData.metricValueLabel ? (
+            <div className="lab-quest-graph-node__metric-delta">{nodeData.metricEmptyReason}</div>
+          ) : null}
+        </div>
+      ) : compactSummary ? (
         <div className="lab-quest-graph-node__summary">{truncateGraphText(compactSummary, 88)}</div>
       ) : null}
       {showMemoryHint ? (
@@ -1863,6 +2098,7 @@ const GraphViewport = React.memo(function GraphViewport({
   isLoading,
   isError,
   hoverCard,
+  toolbar,
   minimalChrome,
 }: {
   nodes: Node<QuestFlowNodeData>[]
@@ -1880,6 +2116,7 @@ const GraphViewport = React.memo(function GraphViewport({
   isLoading: boolean
   isError: boolean
   hoverCard: GraphHoverCardState | null
+  toolbar?: React.ReactNode
   minimalChrome?: boolean
 }) {
   return (
@@ -1923,6 +2160,7 @@ const GraphViewport = React.memo(function GraphViewport({
           <MiniMap zoomable pannable className="lab-quest-minimap" />
         ) : null}
       </ReactFlow>
+      {toolbar ? <div className="lab-quest-graph-toolbar">{toolbar}</div> : null}
       {isLoading ? (
         <div className="lab-quest-graph-overlay" aria-label="Loading graph">
           <Skeleton className="h-6 w-48" />
@@ -2130,6 +2368,8 @@ function LabQuestGraphCanvasInner({
   const graphFetcher = fetchGraph ?? getLabQuestGraph
   const eventFetcher = fetchEvents ?? listLabQuestEvents
   const { t } = useI18n('lab')
+  const resolvedTheme = useThemeStore((state) => state.resolvedTheme)
+  const edgePalette = React.useMemo(() => resolveEdgePalette(resolvedTheme), [resolvedTheme])
   const interactionLocked = Boolean(readOnly || atEventId)
   const setSelectionStore = useLabGraphSelectionStore((state) => state.setSelection)
   const flow = useReactFlow()
@@ -2143,6 +2383,7 @@ function LabQuestGraphCanvasInner({
   const [eventTraceMode, setEventTraceMode] = React.useState<'compact' | 'detailed'>('compact')
   const [curveMode, setCurveMode] = React.useState<'sota' | 'full'>('sota')
   const [curveMetric, setCurveMetric] = React.useState<string>('')
+  const [nodeDisplayMode, setNodeDisplayMode] = React.useState<'summary' | 'metric'>('summary')
   const [search, setSearch] = React.useState('')
   const [timeRange, setTimeRange] = React.useState<'all' | '7d' | '30d' | '90d'>('all')
   const [showAnalysis, setShowAnalysis] = React.useState(false)
@@ -2395,25 +2636,78 @@ function LabQuestGraphCanvasInner({
 
   const branchGraphData = viewMode === 'branch' ? graphQuery.data : branchGraphQuery.data
   const branchDataIsLoading = viewMode === 'branch' ? graphQuery.isLoading : branchGraphQuery.isLoading
+  const baselineMetricSnapshot = React.useMemo(
+    () => buildBaselineMetricSnapshot(branchGraphData?.nodes ?? EMPTY_GRAPH_NODES),
+    [branchGraphData?.nodes]
+  )
 
   const metricCatalog = React.useMemo(() => {
     const explicit = normalizeMetricCatalog(graphQuery.data?.metric_catalog ?? branchGraphData?.metric_catalog)
     if (explicit.length) return explicit
-    const keys = new Set<string>()
-    ;(branchGraphData?.nodes ?? []).forEach((node) => {
-      const metrics = asRecord(node.metrics_json)
-      Object.entries(metrics || {}).forEach(([key, value]) => {
-        if (typeof value === 'number' && Number.isFinite(value)) {
-          keys.add(key)
-        }
+    const catalog = new Map<string, LabMetricObjective>()
+    const upsert = (entry: LabMetricObjective) => {
+      if (!entry.key) return
+      const current = catalog.get(entry.key)
+      catalog.set(entry.key, {
+        key: entry.key,
+        label: entry.label || current?.label || entry.key,
+        direction: entry.direction || current?.direction || null,
+        importance: entry.importance ?? current?.importance ?? null,
+        unit: entry.unit ?? current?.unit ?? null,
+        target: entry.target ?? current?.target ?? null,
       })
+    }
+    ;(branchGraphData?.nodes ?? []).forEach((node) => {
+      const snapshot = buildNodeMetricSnapshot(node)
+      snapshot.meta.forEach((entry) =>
+        upsert({
+          key: entry.key,
+          label: entry.label,
+          direction: entry.direction,
+          importance: null,
+          unit: entry.unit ?? null,
+          target: null,
+        })
+      )
+      Object.keys(snapshot.metrics).forEach((key) =>
+        upsert({
+          key,
+          label: snapshot.meta.get(key)?.label || key,
+          direction: snapshot.meta.get(key)?.direction || null,
+          importance: null,
+          unit: snapshot.meta.get(key)?.unit ?? null,
+          target: null,
+        })
+      )
       const curves = resolveNodeMetricCurves(node)
-      Object.keys(curves || {}).forEach((key) => keys.add(key))
+      Object.keys(curves || {}).forEach((key) =>
+        upsert({
+          key,
+          label: snapshot.meta.get(key)?.label || key,
+          direction: snapshot.meta.get(key)?.direction || null,
+          importance: null,
+          unit: snapshot.meta.get(key)?.unit ?? null,
+          target: null,
+        })
+      )
     })
-    return [...keys]
-      .sort((a, b) => a.localeCompare(b))
-      .map((key) => ({ key, label: key, direction: 'higher' as const, importance: 1 }))
-  }, [branchGraphData?.metric_catalog, branchGraphData?.nodes, graphQuery.data?.metric_catalog])
+    baselineMetricSnapshot.meta.forEach((entry) =>
+      upsert({
+        key: entry.key,
+        label: entry.label,
+        direction: entry.direction,
+        importance: null,
+        unit: entry.unit ?? null,
+        target: null,
+      })
+    )
+    return [...catalog.values()].sort((left, right) => {
+      const leftImportance = typeof left.importance === 'number' ? left.importance : -1
+      const rightImportance = typeof right.importance === 'number' ? right.importance : -1
+      if (leftImportance !== rightImportance) return rightImportance - leftImportance
+      return left.key.localeCompare(right.key)
+    })
+  }, [baselineMetricSnapshot, branchGraphData?.metric_catalog, branchGraphData?.nodes, graphQuery.data?.metric_catalog])
 
   React.useEffect(() => {
     if (!metricCatalog.length) {
@@ -2834,13 +3128,44 @@ function LabQuestGraphCanvasInner({
   const computedQuestNodes: QuestFlowNode[] = React.useMemo(
     () =>
       viewNodes.map((node) => {
-        const selectedMetric = pickMetricValue(
-          node.metrics_json as Record<string, unknown> | null,
-          curveMetric || null
-        )
+        const nodeMetricSnapshot =
+          viewMode === 'branch' && node.node_kind === 'baseline_root'
+            ? baselineMetricSnapshot
+            : buildNodeMetricSnapshot(node)
+        const metricSource =
+          Object.keys(nodeMetricSnapshot.metrics).length > 0
+            ? nodeMetricSnapshot.metrics
+            : ((node.metrics_json as Record<string, unknown> | null) ?? null)
+        const selectedMetric = pickMetricValue(metricSource, curveMetric || null)
+        const objective = selectedMetric ? metricObjectiveMap.get(selectedMetric.key) ?? null : null
+        const snapshotMeta = selectedMetric ? nodeMetricSnapshot.meta.get(selectedMetric.key) ?? null : null
+        const metricMeta = selectedMetric
+          ? {
+              key: selectedMetric.key,
+              label: snapshotMeta?.label || objective?.label || selectedMetric.key,
+              direction: snapshotMeta?.direction || objective?.direction || null,
+              unit: snapshotMeta?.unit || objective?.unit || null,
+              decimals: snapshotMeta?.decimals ?? null,
+            }
+          : null
         const metric = selectedMetric
           ? formatMetricLabel(selectedMetric.key, selectedMetric.value)
-          : pickPrimaryMetric(node.metrics_json as Record<string, unknown> | null)
+          : pickPrimaryMetric(metricSource)
+        const metricDelta =
+          selectedMetric && typeof nodeMetricSnapshot.deltas[selectedMetric.key] === 'number'
+            ? nodeMetricSnapshot.deltas[selectedMetric.key]
+            : null
+        const metricValueLabel =
+          selectedMetric && metricMeta
+            ? formatMetricValueDisplay(selectedMetric.value, metricMeta)
+            : selectedMetric
+              ? formatMetricValueDisplay(selectedMetric.value)
+              : null
+        const metricDeltaLabel =
+          selectedMetric && typeof metricDelta === 'number'
+            ? formatMetricDeltaDisplay(metricDelta, metricMeta)
+            : null
+        const metricTone = resolveMetricTone(metricDelta, metricMeta?.direction)
         const fallbackSummary =
           clampCanvasText(node.node_summary?.last_error, 96) ||
           clampCanvasText(node.node_summary?.last_reply, 96) ||
@@ -2908,6 +3233,8 @@ function LabQuestGraphCanvasInner({
           id: node.node_id,
           type: 'questNode',
           position: layoutMap[node.node_id] ?? { x: 0, y: 0 },
+          sourcePosition: FlowPosition.Right,
+          targetPosition: FlowPosition.Left,
           data: {
             label: label || 'node',
             subtitle,
@@ -2924,6 +3251,21 @@ function LabQuestGraphCanvasInner({
               normalizeOutcomeVerdictValue(node.verdict),
             summary: viewMode === 'branch' ? null : fallbackSummary,
             deltaLabel,
+            displayMode: viewMode === 'branch' ? nodeDisplayMode : 'summary',
+            metricKey: selectedMetric?.key ?? null,
+            metricLabel: metricMeta?.label ?? null,
+            metricValueLabel,
+            metricDeltaLabel,
+            metricDirection: metricMeta?.direction ?? null,
+            metricTone,
+            metricEmptyReason:
+              viewMode !== 'branch'
+                ? null
+                : node.node_kind === 'baseline_root'
+                  ? t('quest_metric_baseline_reference', undefined, 'Baseline reference')
+                  : selectedMetric
+                    ? null
+                    : t('quest_metric_empty', undefined, 'No metric available'),
             trend,
             isHead: viewMode === 'branch' && Boolean(headBranch && node.branch_name === headBranch),
             isRoot: viewMode === 'branch' && isBaselineRoot,
@@ -2985,6 +3327,7 @@ function LabQuestGraphCanvasInner({
       }),
     [
       activeBranch,
+      baselineMetricSnapshot,
       branchInsights,
       curveMetric,
       curveMode,
@@ -2993,9 +3336,12 @@ function LabQuestGraphCanvasInner({
       interactionLocked,
       layoutMap,
       memoryByBranch,
+      metricObjectiveMap,
+      nodeDisplayMode,
       viewMode,
       viewNodes,
       decisionPayloads,
+      t,
     ]
   )
 
@@ -3056,6 +3402,8 @@ function LabQuestGraphCanvasInner({
         id: agentNodeId,
         type: 'agentNode',
         position,
+        sourcePosition: FlowPosition.Right,
+        targetPosition: FlowPosition.Left,
         data: {
           label: displayName,
           subtitle: subtitle || undefined,
@@ -3067,8 +3415,8 @@ function LabQuestGraphCanvasInner({
         draggable: false,
       })
       if (anchorId && anchorIdSet.has(anchorId)) {
-        const edgeStroke = isPiAgent ? 'var(--lab-accent-strong)' : 'var(--lab-border-strong)'
-        const edgeWidth = isPiAgent ? 2.2 : 1.2
+        const edgeStroke = isPiAgent ? edgePalette.stageStroke : edgePalette.agentStroke
+        const edgeWidth = isPiAgent ? 2.4 : 1.5
         edges.push({
           id: `${anchorId}-${agentNodeId}`,
           source: anchorId,
@@ -3096,18 +3444,18 @@ function LabQuestGraphCanvasInner({
           source: piAgentNodeId!,
           target: agentNodeId,
           type: 'smoothstep',
-          style: { stroke: 'var(--lab-accent-strong)', strokeWidth: 2.4 },
+          style: { stroke: edgePalette.stageStroke, strokeWidth: 2.5 },
           markerEnd: {
             type: MarkerType.ArrowClosed,
             width: 14,
             height: 14,
-            color: 'var(--lab-accent-strong)',
+            color: edgePalette.stageStroke,
           },
         })
       }
     })
     return { nodes, edges }
-  }, [atEventId, branchLayoutMap, branchNodeByName, headBranch, layoutMap, questAgents, runtimeOverlayEnabled, viewMode, viewNodeIds])
+  }, [atEventId, branchLayoutMap, branchNodeByName, edgePalette.agentStroke, edgePalette.stageStroke, headBranch, layoutMap, questAgents, runtimeOverlayEnabled, viewMode, viewNodeIds])
 
   const overlayGraph = React.useMemo(() => {
     return { nodes: [] as QuestFlowNode[], edges: [] as Edge[] }
@@ -3120,7 +3468,7 @@ function LabQuestGraphCanvasInner({
 
   const computedEdges: Edge[] = React.useMemo(() => {
     const questEdges = viewEdges.map((edge, index) => {
-      const baseStyle = resolveEdgeStyle(edge.edge_type)
+      const baseStyle = resolveEdgeStyle(edge.edge_type, edgePalette)
       const isHighlighted = highlightIds.has(edge.source) && highlightIds.has(edge.target)
       const style = isHighlighted
         ? {
@@ -3152,7 +3500,7 @@ function LabQuestGraphCanvasInner({
       }
     })
     return [...questEdges, ...agentGraph.edges, ...overlayGraph.edges]
-  }, [agentGraph.edges, highlightIds, overlayGraph.edges, viewEdges])
+  }, [agentGraph.edges, edgePalette, highlightIds, overlayGraph.edges, viewEdges])
 
   React.useEffect(() => {
     const forceLayout = viewModeRef.current !== viewMode
@@ -4141,6 +4489,53 @@ function LabQuestGraphCanvasInner({
     curveMode === 'sota'
       ? t('quest_curve_mode_sota', undefined, 'SoTA only')
       : t('quest_curve_mode_full', undefined, 'Full trace')
+  const graphToolbar =
+    viewMode === 'branch' ? (
+      <div className="lab-quest-graph-toolbar__group nowheel nopan">
+        <div className="lab-quest-graph-toolbar__segmented" aria-label="Canvas node display mode">
+          <Button
+            type="button"
+            size="sm"
+            variant={nodeDisplayMode === 'summary' ? 'secondary' : 'ghost'}
+            onClick={() => setNodeDisplayMode('summary')}
+          >
+            {t('quest_node_display_summary', undefined, 'Summary')}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={nodeDisplayMode === 'metric' ? 'secondary' : 'ghost'}
+            onClick={() => setNodeDisplayMode('metric')}
+          >
+            {t('quest_node_display_metric', undefined, 'Metric')}
+          </Button>
+        </div>
+        {nodeDisplayMode === 'metric' ? (
+          <div className="lab-quest-graph-toolbar__controls">
+            <span className="lab-quest-graph-toolbar__caption">
+              {t('quest_curve_metric_label', undefined, 'Focus metric')}
+            </span>
+            <select
+              className="lab-quest-time-filter"
+              value={curveMetric}
+              onChange={(event) => setCurveMetric(event.target.value)}
+            >
+              {!metricCatalog.length ? (
+                <option value="">
+                  {t('quest_curve_metric_unavailable', undefined, 'No metric available')}
+                </option>
+              ) : null}
+              {metricCatalog.map((metric) => (
+                <option key={metric.key} value={metric.key}>
+                  {metric.label || metric.key}
+                </option>
+              ))}
+            </select>
+            <span className="lab-quest-graph-toolbar__caption">{curveModeLabel}</span>
+          </div>
+        ) : null}
+      </div>
+    ) : null
 
   return (
     <div
@@ -4163,6 +4558,7 @@ function LabQuestGraphCanvasInner({
         isLoading={graphQuery.isLoading}
         isError={graphQuery.isError}
         hoverCard={hoverCard}
+        toolbar={graphToolbar}
         minimalChrome={minimalChrome}
       />
 

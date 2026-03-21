@@ -85,6 +85,18 @@ function normalizeMetadata(value: unknown) {
   return value as Record<string, unknown>
 }
 
+function buildOperationIdentity(args: { runId?: string | null; toolCallId?: string | null; fallbackId?: string }) {
+  const runId = String(args.runId || '').trim()
+  const toolCallId = String(args.toolCallId || '').trim()
+  if (runId && toolCallId) {
+    return `tool:${runId}:${toolCallId}`
+  }
+  if (toolCallId) {
+    return `tool:${toolCallId}`
+  }
+  return args.fallbackId || ''
+}
+
 function normalizeUpdate(raw: Record<string, unknown>): FeedItem {
   const eventType = String(raw.event_type ?? '')
   const data = (raw.data ?? {}) as Record<string, unknown>
@@ -110,9 +122,13 @@ function normalizeUpdate(raw: Record<string, unknown>): FeedItem {
     const subject = extractToolSubject(toolName, args, output)
     const comment = extractOperationComment({ args, output, metadata })
     const monitorFields = extractOperationMonitorFields({ metadata, comment })
+    const eventId = String(raw.event_id ?? '').trim() || undefined
+    const runId = String((raw.run_id ?? data.run_id ?? metadata?.agent_instance_id ?? '') || '').trim() || null
     return {
       id: buildId('operation', String(raw.event_id ?? raw.created_at ?? safeRandomUUID())),
       type: 'operation',
+      eventId,
+      runId,
       label: toolLabel,
       content: buildToolOperationContent(toolLabel, toolName, args, output),
       toolName,
@@ -462,12 +478,18 @@ function findReplyTargetId(feed: FeedItem[]) {
 function countActiveToolCalls(feed: FeedItem[]) {
   const pending = new Set<string>()
   for (const item of feed) {
-    if (item.type !== 'operation' || !item.toolCallId) continue
+    if (item.type !== 'operation') continue
+    const identity = buildOperationIdentity({
+      runId: item.runId,
+      toolCallId: item.toolCallId,
+      fallbackId: item.id,
+    })
+    if (!identity) continue
     if (item.label === 'tool_call') {
-      pending.add(item.toolCallId)
+      pending.add(identity)
       continue
     }
-    pending.delete(item.toolCallId)
+    pending.delete(identity)
   }
   return pending.size
 }

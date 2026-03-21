@@ -30,12 +30,14 @@ from ..qq_profiles import (
     qq_profile_label,
 )
 from ..network import urlopen_with_proxy as urlopen
+from ..runners.runtime_overrides import apply_codex_runtime_overrides, apply_runners_runtime_overrides
 from ..shared import read_json, read_text, read_yaml, resolve_runner_binary, run_command, sha256_text, utc_now, which, write_text, write_yaml
 from .models import (
     CONFIG_NAMES,
     OPTIONAL_CONFIG_NAMES,
     REQUIRED_CONFIG_NAMES,
     ConfigFileInfo,
+    SYSTEM_CONNECTOR_NAMES,
     config_filename,
     default_payload,
 )
@@ -90,6 +92,36 @@ class ConfigManager:
 
     def load_named_normalized(self, name: str, create_optional: bool = False) -> dict:
         return self._normalize_named_payload(name, self.load_named(name, create_optional=create_optional))
+
+    def load_runners_config(self) -> dict:
+        return apply_runners_runtime_overrides(self.load_named_normalized("runners"))
+
+    def load_runtime_config(self) -> dict:
+        return self.load_named_normalized("config")
+
+    def system_connector_gates(self) -> dict[str, bool]:
+        config = self.load_runtime_config()
+        connectors = config.get("connectors") if isinstance(config.get("connectors"), dict) else {}
+        system_enabled = connectors.get("system_enabled") if isinstance(connectors.get("system_enabled"), dict) else {}
+        return {
+            name: self._coerce_bool(system_enabled.get(name), default=name == "qq")
+            for name in SYSTEM_CONNECTOR_NAMES
+        }
+
+    def system_enabled_connector_names(self) -> list[str]:
+        gates = self.system_connector_gates()
+        return [name for name in SYSTEM_CONNECTOR_NAMES if gates.get(name, False)]
+
+    def is_connector_system_enabled(self, name: str) -> bool:
+        normalized = str(name or "").strip().lower()
+        if not normalized:
+            return False
+        if normalized == "local":
+            return True
+        gates = self.system_connector_gates()
+        if normalized in gates:
+            return gates[normalized]
+        return True
 
     def load_named_text(self, name: str, create_optional: bool = False) -> str:
         path = self.path_for(name)
@@ -1039,9 +1071,16 @@ Use **Test** when the file exposes runtime dependencies.
         )
 
     def _probe_codex_runner(self, config: dict) -> dict:
+        config = apply_codex_runtime_overrides(config)
         checked_at = utc_now()
         binary = str(config.get("binary") or "codex").strip() or "codex"
         resolved_binary = resolve_runner_binary(binary, runner_name="codex")
+        raw_reasoning_effort = config.get("model_reasoning_effort")
+        reasoning_effort = (
+            str(raw_reasoning_effort).strip()
+            if raw_reasoning_effort is not None and str(raw_reasoning_effort).strip()
+            else ("xhigh" if raw_reasoning_effort is None else None)
+        )
         details: dict[str, object] = {
             "binary": binary,
             "resolved_binary": resolved_binary,
@@ -1049,7 +1088,7 @@ Use **Test** when the file exposes runtime dependencies.
             "model": str(config.get("model") or "gpt-5.4"),
             "approval_policy": str(config.get("approval_policy") or "on-request"),
             "sandbox_mode": str(config.get("sandbox_mode") or "workspace-write"),
-            "reasoning_effort": str(config.get("model_reasoning_effort") or "xhigh"),
+            "reasoning_effort": reasoning_effort,
             "checked_at": checked_at,
         }
         if not resolved_binary:
@@ -1082,7 +1121,6 @@ Use **Test** when the file exposes runtime dependencies.
         approval_policy = str(config.get("approval_policy") or "on-request").strip()
         if approval_policy:
             command.extend(["-c", f'approval_policy="{approval_policy}"'])
-        reasoning_effort = str(config.get("model_reasoning_effort") or "xhigh").strip()
         if reasoning_effort:
             command.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
         sandbox_mode = str(config.get("sandbox_mode") or "workspace-write").strip()
@@ -1373,6 +1411,8 @@ Use **Test** when the file exposes runtime dependencies.
         normalized = self._deep_merge(defaults, payload)
         bootstrap = normalized.get("bootstrap") if isinstance(normalized.get("bootstrap"), dict) else {}
         raw_bootstrap = payload.get("bootstrap") if isinstance(payload.get("bootstrap"), dict) else {}
+        connectors = normalized.get("connectors") if isinstance(normalized.get("connectors"), dict) else {}
+        raw_connectors = payload.get("connectors") if isinstance(payload.get("connectors"), dict) else {}
         default_locale = str(defaults.get("default_locale") or "").strip()
         current_locale = str(normalized.get("default_locale") or "").strip()
         locale_source = str(raw_bootstrap.get("locale_source") or "").strip().lower()
@@ -1396,6 +1436,25 @@ Use **Test** when the file exposes runtime dependencies.
         bootstrap["locale_initialized_at"] = bootstrap.get("locale_initialized_at")
         bootstrap["locale_initialized_browser_locale"] = bootstrap.get("locale_initialized_browser_locale")
         normalized["bootstrap"] = bootstrap
+        raw_system_enabled = raw_connectors.get("system_enabled") if isinstance(raw_connectors.get("system_enabled"), dict) else {}
+        default_system_enabled = (
+            defaults.get("connectors", {}).get("system_enabled")
+            if isinstance(defaults.get("connectors"), dict)
+            else {}
+        )
+        current_system_enabled = (
+            connectors.get("system_enabled")
+            if isinstance(connectors.get("system_enabled"), dict)
+            else {}
+        )
+        connectors["system_enabled"] = {
+            name: self._coerce_bool(
+                raw_system_enabled.get(name, current_system_enabled.get(name)),
+                default=bool(default_system_enabled.get(name, False)),
+            )
+            for name in SYSTEM_CONNECTOR_NAMES
+        }
+        normalized["connectors"] = connectors
         return normalized
 
     @staticmethod
@@ -1407,6 +1466,20 @@ Use **Test** when the file exposes runtime dependencies.
         except (TypeError, ValueError):
             return False
         return abs(initial - 1.0) < 1e-9 and abs(multiplier - 2.0) < 1e-9 and abs(max_backoff - 8.0) < 1e-9
+
+    @staticmethod
+    def _coerce_bool(value: object, *, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "y"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "n", ""}:
+                return False
+        return bool(value)
 
     def _normalize_plugins_payload(self, payload: dict) -> dict:
         normalized = deepcopy(payload)

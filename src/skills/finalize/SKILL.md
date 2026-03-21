@@ -9,15 +9,9 @@ Use this skill to close or pause a quest responsibly.
 
 ## Interaction discipline
 
-- Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before closing or pausing the quest.
-- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` when there is real user-visible progress: the first meaningful signal of long work, a meaningful checkpoint, or a concise keepalive if active work has drifted beyond roughly 10 to 30 tool calls without a user-visible update.
-- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
-- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
+- Follow the shared interaction contract injected by the system prompt.
+- For ordinary active work, prefer a concise progress update once work has crossed roughly 10 tool calls with a human-meaningful delta, and do not drift beyond roughly 20 tool calls or about 15 minutes without a user-visible update.
 - If the runtime starts an auto-continue turn with no new user message, keep finalizing from the durable quest state and active requirements instead of replaying the previous user turn.
-- Use `reply_mode='blocking'` only for real user decisions that cannot be resolved from local evidence.
-- For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, and wait up to 1 day when feasible. If the blocker is a missing external credential or secret that only the user can provide, keep the quest waiting, ask the user to supply it or choose an alternative, and do not self-resolve; if resumed without that credential and no other work is possible, a long low-frequency wait such as `bash_exec(command='sleep 3600', mode='await', timeout_seconds=3700)` is acceptable. Otherwise choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest finalize progress update before assuming the task changed completely.
 - When finalize reaches a real closure state, pause-ready packet, or route-back decision, send one threaded `artifact.interact(kind='milestone', ...)` update that names the recommendation, why it is the right call, and any reopen condition that still matters.
 - True quest completion still requires explicit user approval through the runtime completion flow before calling `artifact.complete_quest(...)`.
@@ -119,6 +113,7 @@ Say clearly what exists and why it matters. Name concrete paths or artifact ids 
 When a paper bundle exists, verify the manifest inventory explicitly, including:
 
 - `paper/paper_bundle_manifest.json`
+- the recorded `paper_branch` and source evidence branch / run fields in that manifest
 - referenced `outline_path`
 - referenced `draft_path`
 - referenced `writing_plan_path`

@@ -12,6 +12,18 @@ from deepscientist.shared import write_yaml
 from deepscientist.skills import SkillInstaller
 
 
+def _enable_system_connectors(home: Path, *names: str) -> None:
+    manager = ConfigManager(home)
+    config = manager.load_named("config")
+    connectors = config.get("connectors") if isinstance(config.get("connectors"), dict) else {}
+    system_enabled = connectors.get("system_enabled") if isinstance(connectors.get("system_enabled"), dict) else {}
+    for name in names:
+        system_enabled[str(name).strip().lower()] = True
+    connectors["system_enabled"] = system_enabled
+    config["connectors"] = connectors
+    write_yaml(manager.path_for("config"), config)
+
+
 def test_default_connectors_include_feishu_whatsapp_and_lingzhu(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
@@ -41,6 +53,7 @@ def test_generic_new_command_replies_with_bound_quest_and_restore_hint(
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    _enable_system_connectors(temp_home, connector_name)
     connectors = manager.load_named("connectors")
     connectors[connector_name]["enabled"] = True
     connectors[connector_name]["auto_bind_dm_to_active_quest"] = True
@@ -88,6 +101,7 @@ def test_generic_new_command_uses_previous_bound_quest_id_in_restore_hint(
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    _enable_system_connectors(temp_home, connector_name)
     connectors = manager.load_named("connectors")
     connectors[connector_name]["enabled"] = True
     connectors[connector_name]["auto_bind_dm_to_active_quest"] = True
@@ -128,6 +142,7 @@ def test_generic_connector_auto_binds_to_latest_existing_quest_and_rebinds_to_ne
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    _enable_system_connectors(temp_home, "whatsapp")
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
@@ -181,7 +196,7 @@ def test_generic_connector_auto_binds_to_latest_existing_quest_and_rebinds_to_ne
 
     connector_statuses = {item["name"]: item for item in app.handlers.connectors()}
     assert "whatsapp" in connector_statuses
-    assert "feishu" in connector_statuses
+    assert "feishu" not in connector_statuses
     assert connector_statuses["whatsapp"]["last_conversation_id"] == "whatsapp:direct:+15550001111"
     assert connector_statuses["whatsapp"]["transport"] == "local_session"
     assert connector_statuses["whatsapp"]["connection_state"] in {"configured", "ready"}
@@ -216,10 +231,33 @@ def test_connector_availability_summary_prefers_enabled_bound_connector(temp_hom
     assert summary["preferred_conversation_id"] == "qq:direct:user-1"
 
 
+def test_system_disabled_connectors_are_hidden_from_statuses_and_availability(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["telegram"]["enabled"] = True
+    connectors["telegram"]["bot_token"] = "telegram-token"
+    connectors["lingzhu"]["enabled"] = True
+    connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    app = DaemonApp(temp_home)
+    connector_statuses = {item["name"]: item for item in app.handlers.connectors()}
+    availability_names = {item["name"] for item in app.handlers.connectors_availability()["available_connectors"]}
+
+    assert "qq" in connector_statuses
+    assert "telegram" not in connector_statuses
+    assert "lingzhu" not in connector_statuses
+    assert "telegram" not in availability_names
+    assert "lingzhu" not in availability_names
+
+
 def test_handlers_connectors_include_lingzhu_snapshot(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    _enable_system_connectors(temp_home, "lingzhu")
     connectors = manager.load_named("connectors")
     connectors["lingzhu"]["enabled"] = True
     connectors["lingzhu"]["auth_ak"] = "abcd1234-abcd-abcd-abcd-abcdefghijkl"
@@ -245,6 +283,7 @@ def test_generic_connector_persists_multiple_recent_conversations_for_latest_que
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    _enable_system_connectors(temp_home, "whatsapp")
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
@@ -282,6 +321,7 @@ def test_create_quest_with_preferred_connector_conversation_binds_only_selected_
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    _enable_system_connectors(temp_home, "whatsapp", "telegram")
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
@@ -331,6 +371,7 @@ def test_create_quest_with_requested_connector_bindings_binds_selected_targets_p
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    _enable_system_connectors(temp_home, "whatsapp", "telegram")
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["telegram"]["enabled"] = True
@@ -374,17 +415,20 @@ def test_create_quest_with_requested_connector_bindings_binds_selected_targets_p
             {"connector": "whatsapp", "conversation_id": "whatsapp:direct:+15550003333"},
             {"connector": "telegram", "conversation_id": "telegram:direct:tg-user-1"},
         ],
-        force_connector_rebind=True,
     )
     latest_sources = app.quest_service.binding_sources(latest["quest_id"])
+    older_sources = app.quest_service.binding_sources(older_quest["quest_id"])
     assert "whatsapp:direct:+15550003333" in latest_sources
     assert "telegram:direct:tg-user-1" in latest_sources
+    assert "whatsapp:direct:+15550003333" not in older_sources
+    assert "telegram:direct:tg-user-1" not in older_sources
 
 
 def test_generic_connector_supports_terminal_command_and_restore(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    _enable_system_connectors(temp_home, "whatsapp")
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["whatsapp"]["auto_bind_dm_to_active_quest"] = True
@@ -428,6 +472,7 @@ def test_generic_connector_supports_terminal_command_and_restore(temp_home: Path
 def test_generic_connector_supports_delete_command_with_confirmation(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
+    _enable_system_connectors(temp_home, "whatsapp")
     quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
     first = quest_service.create("connector delete quest one")
     second = quest_service.create("connector delete quest two")
@@ -472,6 +517,7 @@ def test_generic_connector_supports_delete_command_with_confirmation(temp_home: 
 def test_generic_connector_stop_command_stops_bound_quest_without_forwarding_to_agent(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
+    _enable_system_connectors(temp_home, "whatsapp")
     quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
     quest = quest_service.create("connector stop quest")
     quest_id = quest["quest_id"]
@@ -508,6 +554,7 @@ def test_generic_connector_stop_command_stops_bound_quest_without_forwarding_to_
 def test_generic_connector_resume_command_resumes_bound_quest_without_forwarding_to_agent(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
+    _enable_system_connectors(temp_home, "whatsapp")
     quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
     quest = quest_service.create("connector resume quest")
     quest_id = quest["quest_id"]

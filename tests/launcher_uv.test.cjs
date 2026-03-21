@@ -150,6 +150,19 @@ test('buildUpdateStatus only auto-prompts once per target version', () => {
   assert.equal(nextStatus.prompt_recommended, true);
 });
 
+test('buildUpdateStatus suppresses stale busy state when the target is not newer', () => {
+  const status = __internal.buildUpdateStatus('/tmp/ds-update-state', {
+    current_version: '1.5.7',
+    latest_version: '1.5.7',
+    target_version: '1.5.3',
+    busy: true,
+  });
+
+  assert.equal(status.update_available, false);
+  assert.equal(status.busy, false);
+  assert.equal(status.target_version, null);
+});
+
 test('resolveUvBinary prefers the DeepScientist-local uv install over PATH', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-uv-home-'));
   const localUv = __internal.runtimeUvBinaryPath(home);
@@ -212,4 +225,50 @@ test('parseLauncherArgs accepts --proxy without treating its URL as a positional
 
   assert.equal(parsed.port, 8890);
   assert.equal(parsed.proxy, 'http://127.0.0.1:58887');
+});
+
+test('repairLegacyPathWrappers rewrites old install wrappers to the current npm launcher', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-wrapper-repair-'));
+  const launcherPath = path.join(tempDir, 'global-ds.js');
+  const wrapperDir = path.join(tempDir, 'bin');
+  const wrapperPath = path.join(wrapperDir, 'ds');
+  const home = path.join(path.sep, 'tmp', 'DeepScientistHome');
+
+  fs.mkdirSync(wrapperDir, { recursive: true });
+  fs.writeFileSync(launcherPath, '#!/usr/bin/env node\n', { encoding: 'utf8', mode: 0o755 });
+  fs.writeFileSync(
+    wrapperPath,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'if [ -z "${DEEPSCIENTIST_HOME:-}" ]; then',
+      `  export DEEPSCIENTIST_HOME="${home}"`,
+      'fi',
+      `exec "${path.join(home, 'cli', 'bin', 'ds')}" "$@"`,
+      '',
+    ].join('\n'),
+    { encoding: 'utf8', mode: 0o755 }
+  );
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = wrapperDir;
+  try {
+    const rewritten = __internal.repairLegacyPathWrappers({
+      home,
+      launcherPath,
+      force: true,
+    });
+    assert.deepEqual(rewritten, [wrapperPath]);
+    const content = fs.readFileSync(wrapperPath, 'utf8');
+    assert.match(content, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(content, new RegExp(launcherPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(content, /\/cli\/bin\/ds/);
+  } finally {
+    if (typeof originalPath === 'string') {
+      process.env.PATH = originalPath;
+    } else {
+      delete process.env.PATH;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

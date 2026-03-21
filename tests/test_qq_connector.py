@@ -287,6 +287,9 @@ def test_qq_auto_bind_to_latest_quest_still_happens_when_another_connector_is_pr
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["telegram"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["_routing"]["primary_connector"] = "telegram"
     connectors["qq"]["enabled"] = True

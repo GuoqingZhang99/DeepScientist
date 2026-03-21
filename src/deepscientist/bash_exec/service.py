@@ -555,6 +555,7 @@ class BashExecService:
         before_seq: int | None = None,
         after_seq: int | None = None,
         order: str = "asc",
+        prefer_visible: bool = False,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not self.meta_path(quest_root, bash_id).exists():
             raise FileNotFoundError(f"Unknown bash session `{bash_id}`.")
@@ -579,9 +580,16 @@ class BashExecService:
             entries = [entry for entry in entries if int(entry.get("seq") or 0) > normalized_after]
         if normalized_before is not None:
             entries = [entry for entry in entries if int(entry.get("seq") or 0) < normalized_before]
+        selection_pool = entries
+        if prefer_visible:
+            visible_entries = [
+                entry for entry in entries if str(entry.get("stream") or "") not in {"system", "prompt"}
+            ]
+            if visible_entries:
+                selection_pool = visible_entries
         normalized_limit = max(1, limit)
-        truncated = len(entries) > normalized_limit
-        selected = entries[-normalized_limit:]
+        truncated = len(selection_pool) > normalized_limit
+        selected = selection_pool[-normalized_limit:]
         if order == "desc":
             selected = list(reversed(selected))
         tail_start_seq = int(selected[0].get("seq") or 0) if selected else None
@@ -1025,15 +1033,14 @@ class BashExecService:
         if not normalized_data:
             raise ValueError("terminal_input_required")
         session = self.reconcile_session(quest_root, bash_id)
-        if _normalize_string(session.get("kind")).lower() != "terminal":
-            raise ValueError("not_terminal_session")
         status = _normalize_string(session.get("status")).lower()
         if status in TERMINAL_STATUSES:
             raise ValueError("terminal_session_inactive")
         runtime = self._terminal_runtime_manager.get_runtime(quest_root, bash_id)
-        if runtime is None:
+        if runtime is None and _normalize_string(session.get("kind")).lower() == "terminal":
             raise ValueError("terminal_runtime_inactive")
-        runtime.write_input(normalized_data)
+        if runtime is not None:
+            runtime.write_input(normalized_data)
 
         entry = {
             "input_id": generate_id("tin"),
@@ -1081,9 +1088,10 @@ class BashExecService:
         return True
 
     def issue_terminal_attach_token(self, quest_root: Path, bash_id: str, *, ttl_seconds: int = 60) -> dict[str, Any]:
-        runtime = self._terminal_runtime_manager.get_runtime(quest_root, bash_id)
-        if runtime is None:
-            raise ValueError("terminal_runtime_inactive")
+        session = self.reconcile_session(quest_root, bash_id)
+        status = _normalize_string(session.get("status")).lower()
+        if status in TERMINAL_STATUSES:
+            raise ValueError("terminal_session_inactive")
         token = self._terminal_runtime_manager.issue_attach_token(
             quest_root,
             bash_id,

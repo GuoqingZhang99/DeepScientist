@@ -21,6 +21,9 @@ def test_slack_socket_mode_handles_envelope_and_updates_runtime_status(temp_home
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["slack"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["slack"]["enabled"] = True
     connectors["slack"]["transport"] = "socket_mode"

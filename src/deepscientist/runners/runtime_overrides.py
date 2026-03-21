@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+import os
+from copy import deepcopy
+from typing import Any
+
+
+def _as_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _as_bool_env(name: str) -> bool:
+    value = _as_text(os.environ.get(name))
+    if value is None:
+        return False
+    return value.lower() in {"1", "true", "yes", "on", "y"}
+
+
+def codex_runtime_overrides() -> dict[str, str]:
+    approval_policy = _as_text(os.environ.get("DEEPSCIENTIST_CODEX_APPROVAL_POLICY"))
+    sandbox_mode = _as_text(os.environ.get("DEEPSCIENTIST_CODEX_SANDBOX_MODE"))
+
+    if _as_bool_env("DEEPSCIENTIST_CODEX_YOLO"):
+        approval_policy = approval_policy or "never"
+        sandbox_mode = sandbox_mode or "danger-full-access"
+
+    overrides: dict[str, str] = {}
+    if approval_policy:
+        overrides["approval_policy"] = approval_policy
+    if sandbox_mode:
+        overrides["sandbox_mode"] = sandbox_mode
+    return overrides
+
+
+def apply_codex_runtime_overrides(config: dict[str, Any] | None) -> dict[str, Any]:
+    resolved = deepcopy(config or {})
+    resolved.update(codex_runtime_overrides())
+    return resolved
+
+
+def apply_runners_runtime_overrides(runners_config: dict[str, Any] | None) -> dict[str, Any]:
+    resolved = deepcopy(runners_config or {})
+    codex = resolved.get("codex")
+    resolved["codex"] = apply_codex_runtime_overrides(codex if isinstance(codex, dict) else {})
+    return resolved

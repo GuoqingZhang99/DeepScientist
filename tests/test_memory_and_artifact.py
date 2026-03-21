@@ -7,6 +7,7 @@ from urllib.error import HTTPError
 import pytest
 
 from deepscientist.artifact import ArtifactService
+from deepscientist.artifact.metrics import MetricContractValidationError
 from deepscientist.config import ConfigManager
 from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.memory import MemoryService
@@ -15,6 +16,34 @@ from deepscientist.quest import QuestService
 from deepscientist.registries import BaselineRegistry
 from deepscientist.shared import read_json, read_jsonl, read_yaml, write_json, write_yaml
 from deepscientist.skills import SkillInstaller
+
+
+def _detailed_metric_contract(
+    metric_ids: list[str],
+    *,
+    primary_metric_id: str | None = None,
+    directions: dict[str, str] | None = None,
+    evaluation_protocol: dict[str, object] | None = None,
+) -> dict:
+    resolved_directions = directions or {}
+    payload = {
+        "primary_metric_id": primary_metric_id or (metric_ids[0] if metric_ids else None),
+        "metrics": [
+            {
+                "metric_id": metric_id,
+                "label": metric_id,
+                "direction": resolved_directions.get(metric_id, "maximize"),
+                "description": f"Canonical metric `{metric_id}`.",
+                "derivation": f"Read `{metric_id}` from the canonical evaluation output.",
+                "source_ref": "paper table + eval.py",
+                "required": True,
+            }
+            for metric_id in metric_ids
+        ],
+    }
+    if evaluation_protocol:
+        payload["evaluation_protocol"] = evaluation_protocol
+    return payload
 
 
 def _confirm_local_baseline(artifact: ArtifactService, quest_root: Path, baseline_id: str = "baseline-local") -> dict:
@@ -56,6 +85,152 @@ def test_confirm_baseline_writes_metric_contract_json_and_exposes_path(temp_home
     assert payload["metric_contract"]["primary_metric_id"] == "acc"
     attachment = read_yaml(quest_root / "baselines" / "imported" / "baseline-metric-contract" / "attachment.yaml", {})
     assert attachment["confirmation"]["metric_contract_json_rel_path"] == confirmed_ref["metric_contract_json_rel_path"]
+
+
+def test_confirm_baseline_strict_rejects_missing_metric_explanations(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("strict baseline validation quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    baseline_root = quest_root / "baselines" / "local" / "baseline-strict"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Strict baseline\n", encoding="utf-8")
+
+    with pytest.raises(MetricContractValidationError) as exc_info:
+        artifact.confirm_baseline(
+            quest_root,
+            baseline_path=str(baseline_root),
+            baseline_id="baseline-strict",
+            summary="Strict baseline should fail without explanations",
+            metrics_summary={"acc": 0.91},
+            primary_metric={"name": "acc", "value": 0.91},
+            metric_contract={
+                "primary_metric_id": "acc",
+                "metrics": [{"metric_id": "acc", "direction": "higher"}],
+            },
+            strict_metric_contract=True,
+        )
+
+    exc = exc_info.value
+    assert exc.error_code == "baseline_metric_explanations_missing"
+    assert exc.details["validation_stage"] == "baseline"
+    assert exc.details["baseline_metric_ids"] == ["acc"]
+    assert exc.details["baseline_metric_details"][0]["metric_id"] == "acc"
+
+
+def test_confirm_baseline_strict_flattens_canonical_metric_summary(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("flatten canonical baseline quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    baseline_root = quest_root / "baselines" / "local" / "baseline-flat"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Flat baseline\n", encoding="utf-8")
+
+    result = artifact.confirm_baseline(
+        quest_root,
+        baseline_path=str(baseline_root),
+        baseline_id="baseline-flat",
+        summary="Canonical baseline should be flat.",
+        metrics_summary={
+            "global_sigma": {"sigma_max": 0.5751, "sigma_GS": 0.3347},
+            "overall_false_ratios": {"raw_false": 0.2348},
+        },
+        primary_metric={"name": "sigma_max", "value": 0.5751, "direction": "lower_better"},
+        metric_contract={
+            "primary_metric_id": "sigma_max",
+            "metrics": [
+                {
+                    "metric_id": "sigma_max",
+                    "direction": "lower",
+                    "description": "Maximum sigma.",
+                    "origin_path": "global_sigma.sigma_max",
+                    "source_ref": "paper table + eval.py",
+                },
+                {
+                    "metric_id": "sigma_GS",
+                    "direction": "lower",
+                    "description": "GS sigma.",
+                    "origin_path": "global_sigma.sigma_GS",
+                    "source_ref": "paper table + eval.py",
+                },
+                {
+                    "metric_id": "raw_false",
+                    "direction": "lower",
+                    "description": "Raw false ratio.",
+                    "origin_path": "overall_false_ratios.raw_false",
+                    "source_ref": "paper table + eval.py",
+                },
+            ],
+        },
+        strict_metric_contract=True,
+    )
+
+    assert result["ok"] is True
+    payload = read_json(Path(result["confirmed_baseline_ref"]["metric_contract_json_path"]), {})
+    assert payload["metrics_summary"] == {
+        "sigma_max": pytest.approx(0.5751),
+        "sigma_GS": pytest.approx(0.3347),
+        "raw_false": pytest.approx(0.2348),
+    }
+    assert "metric_note_path" not in result
+    assert "metric_note_path" not in result["confirmed_baseline_ref"]
+    assert result["metric_details"][0]["metric_id"] == "sigma_max"
+
+
+def test_record_main_experiment_strict_rejects_missing_required_baseline_metric(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("strict main experiment metric validation quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    baseline_root = quest_root / "baselines" / "local" / "baseline-main-strict"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Strict main baseline\n", encoding="utf-8")
+
+    artifact.confirm_baseline(
+        quest_root,
+        baseline_path=str(baseline_root),
+        baseline_id="baseline-main-strict",
+        summary="Strict baseline for main-experiment validation.",
+        metrics_summary={"acc": 0.9, "f1": 0.87},
+        primary_metric={"metric_id": "acc", "value": 0.9, "direction": "maximize"},
+        metric_contract=_detailed_metric_contract(
+            ["acc", "f1"],
+            primary_metric_id="acc",
+            evaluation_protocol={
+                "scope_id": "full",
+                "code_paths": ["eval.py"],
+            },
+        ),
+        strict_metric_contract=True,
+    )
+
+    with pytest.raises(MetricContractValidationError) as exc_info:
+        artifact.record_main_experiment(
+            quest_root,
+            run_id="main-strict-001",
+            title="Missing F1 main run",
+            hypothesis="The adapter improves only one reported metric.",
+            setup="Reuse the accepted baseline pipeline.",
+            execution="Ran the main evaluation once.",
+            results="Accuracy is present but F1 is missing.",
+            conclusion="This should fail strict metric validation.",
+            metric_rows=[{"metric_id": "acc", "value": 0.92, "scope_id": "full"}],
+            strict_metric_contract=True,
+        )
+
+    exc = exc_info.value
+    assert exc.error_code == "main_experiment_metric_validation_failed"
+    assert exc.details["validation_stage"] == "main_experiment"
+    assert exc.details["baseline_metric_ids"] == ["acc", "f1"]
+    assert exc.details["missing_metric_ids"] == ["f1"]
+    assert exc.details["extra_metric_ids"] == []
 
 
 class _FakeHeaders:
@@ -161,6 +336,40 @@ def test_memory_list_recent_and_search_prefer_latest_updates(temp_home: Path) ->
         limit=2,
     )
     assert [item["title"] for item in search] == [newer["title"], older["title"]]
+
+
+def test_memory_document_open_uses_quest_root_when_active_workspace_is_worktree(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("memory worktree open contract")
+    quest_root = Path(quest["quest_root"])
+    memory = MemoryService(temp_home)
+
+    card = memory.write_card(
+        scope="quest",
+        kind="papers",
+        title="Closest prior work cluster",
+        body="Memory content should still resolve from quest root.",
+        quest_root=quest_root,
+        quest_id=quest["quest_id"],
+    )
+
+    worktree_root = quest_root / ".ds" / "worktrees" / "idea-branch-001"
+    worktree_root.mkdir(parents=True, exist_ok=True)
+    (worktree_root / "brief.md").write_text("# Worktree brief\n", encoding="utf-8")
+    quest_service.update_research_state(
+        quest_root,
+        current_workspace_root=str(worktree_root),
+        research_head_worktree_root=str(worktree_root),
+    )
+
+    relative_memory_path = Path(card["path"]).relative_to(quest_root / "memory").as_posix()
+    opened = quest_service.open_document(quest["quest_id"], f"memory::{relative_memory_path}")
+
+    assert opened["writable"] is True
+    assert opened["path"] == str(Path(card["path"]))
+    assert "Memory content should still resolve from quest root." in opened["content"]
 
 
 def test_artifact_interact_and_prepare_branch(temp_home: Path) -> None:
@@ -729,12 +938,15 @@ def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path
         outline_id="outline-001",
         selected_reason="Use this for bundle generation.",
     )
-    (quest_root / "paper" / "draft.md").write_text("# Draft\n", encoding="utf-8")
-    (quest_root / "paper" / "writing_plan.md").write_text("# Plan\n", encoding="utf-8")
-    (quest_root / "paper" / "references.bib").write_text("@article{demo, title={Demo}}\n", encoding="utf-8")
-    (quest_root / "paper" / "build").mkdir(parents=True, exist_ok=True)
-    write_json(quest_root / "paper" / "build" / "compile_report.json", {"ok": True})
-    (quest_root / "paper" / "paper.pdf").write_bytes(b"%PDF-1.4\n%paper\n")
+    paper_workspace = quest_service.active_workspace_root(quest_root)
+    paper_root = paper_workspace / "paper"
+    paper_root.mkdir(parents=True, exist_ok=True)
+    (paper_root / "draft.md").write_text("# Draft\n", encoding="utf-8")
+    (paper_root / "writing_plan.md").write_text("# Plan\n", encoding="utf-8")
+    (paper_root / "references.bib").write_text("@article{demo, title={Demo}}\n", encoding="utf-8")
+    (paper_root / "build").mkdir(parents=True, exist_ok=True)
+    write_json(paper_root / "build" / "compile_report.json", {"ok": True})
+    (paper_root / "paper.pdf").write_bytes(b"%PDF-1.4\n%paper\n")
 
     result = artifact.submit_paper_bundle(
         quest_root,
@@ -749,8 +961,10 @@ def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path
     baseline_inventory = read_json(Path(result["baseline_inventory_path"]), {})
     assert baseline_inventory["schema_version"] == 1
     open_source_manifest = read_json(Path(result["open_source_manifest_path"]), {})
-    assert open_source_manifest["source_bundle_manifest_path"] == "paper/paper_bundle_manifest.json"
-    assert open_source_manifest["cleanup_plan_path"] == "release/open_source/cleanup_plan.md"
+    expected_bundle_rel = Path(result["manifest_path"]).relative_to(quest_root).as_posix()
+    expected_cleanup_rel = Path(result["open_source_manifest_path"]).parent.joinpath("cleanup_plan.md").relative_to(quest_root).as_posix()
+    assert open_source_manifest["source_bundle_manifest_path"] == expected_bundle_rel
+    assert open_source_manifest["cleanup_plan_path"] == expected_cleanup_rel
     snapshot = quest_service.snapshot(quest["quest_id"])
     assert snapshot["active_anchor"] == "finalize"
 
@@ -870,13 +1084,118 @@ def test_record_main_experiment_writes_result_and_baseline_comparison(temp_home:
     stage_view = quest_service.stage_view(
         quest["quest_id"],
         {
-            "selection_ref": f"stage:{idea['branch']}:experiment",
+            "selection_ref": "stage:run/main-001:experiment",
             "selection_type": "stage_node",
-            "branch_name": idea["branch"],
+            "branch_name": "run/main-001",
             "stage_key": "experiment",
         },
     )
     assert stage_view["details"]["experiment"]["evaluation_summary"]["baseline_relation"] == "better"
+
+
+def test_record_main_experiment_prefers_metric_rows_for_nested_metric_summaries(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("nested metric summary quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    baseline_root = quest_root / "baselines" / "local" / "baseline-nested"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Nested baseline\n", encoding="utf-8")
+
+    artifact.record(
+        quest_root,
+        {
+            "kind": "baseline",
+            "publish_global": True,
+            "baseline_id": "baseline-nested",
+            "name": "Nested baseline",
+            "primary_metric": {"name": "sigma_max", "value": 0.6921},
+            "metrics_summary": {"sigma_max": 0.6921, "raw_false": 0.2149},
+            "baseline_variants": [
+                {
+                    "variant_id": "main",
+                    "label": "Main",
+                    "metrics_summary": {"sigma_max": 0.6921, "raw_false": 0.2149},
+                }
+            ],
+            "default_variant_id": "main",
+            "metric_contract": {
+                "primary_metric_id": "sigma_max",
+                "metrics": [
+                    {"metric_id": "sigma_max", "direction": "lower"},
+                    {"metric_id": "raw_false", "direction": "lower"},
+                ],
+            },
+        },
+    )
+    artifact.attach_baseline(quest_root, "baseline-nested", "main")
+    artifact.confirm_baseline(
+        quest_root,
+        baseline_path="baselines/imported/baseline-nested",
+        baseline_id="baseline-nested",
+        variant_id="main",
+        summary="Baseline nested confirmed",
+    )
+
+    artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Ledger route",
+        problem="Need a more robust guidance controller.",
+        hypothesis="Ledgering reduces maximal reality shift.",
+        mechanism="Carry structured correction state across steps.",
+        decision_reason="Best follow-up route.",
+        next_target="experiment",
+    )
+
+    result = artifact.record_main_experiment(
+        quest_root,
+        run_id="nested-001",
+        title="Nested metric run",
+        hypothesis="Ledgering improves the lower-is-better metrics.",
+        setup="Three-task pooled evaluation.",
+        execution="Ran the pooled comparison sweep.",
+        results="The pooled result is favorable overall.",
+        conclusion="Promising enough for analysis.",
+        metrics_summary={
+            "headline": "Full pooled comparison is favorable.",
+            "primary_metric": {"metric_id": "sigma_max", "value": 0.2477},
+            "supporting_metrics": {"raw_false": {"value": 0.2063}},
+            "per_task_read": {"sports_understanding": "favorable"},
+        },
+        metric_rows=[
+            {"metric_id": "sigma_max", "value": 0.2477, "delta": -0.4444, "direction": "lower_better"},
+            {"metric_id": "raw_false", "value": 0.2063, "delta": -0.0086, "direction": "lower_better"},
+        ],
+        evaluation_summary={
+            "takeaway": "The pooled run beats the baseline on the key lower-is-better metrics.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "analysis_campaign",
+        },
+    )
+
+    payload = read_json(Path(result["result_json_path"]), {})
+    comparison_ids = {item["metric_id"] for item in payload["baseline_comparisons"]["items"]}
+    assert comparison_ids == {"sigma_max", "raw_false"}
+    assert payload["baseline_comparisons"]["primary_metric_id"] == "sigma_max"
+    assert payload["progress_eval"]["direction"] == "minimize"
+    assert payload["progress_eval"]["delta_vs_baseline"] == pytest.approx(-0.4444)
+
+    snapshot = quest_service.snapshot(quest["quest_id"])
+    assert snapshot["summary"]["latest_metric"]["key"] == "sigma_max"
+    assert snapshot["summary"]["latest_metric"]["value"] == pytest.approx(0.2477)
+    assert snapshot["summary"]["latest_metric"]["delta_vs_baseline"] == pytest.approx(-0.4444)
+
+    timeline = quest_service.metrics_timeline(quest["quest_id"])
+    series_by_id = {item["metric_id"]: item for item in timeline["series"]}
+    assert set(series_by_id.keys()) == {"sigma_max", "raw_false"}
+    assert series_by_id["sigma_max"]["points"][0]["value"] == pytest.approx(0.2477)
+    assert series_by_id["raw_false"]["points"][0]["value"] == pytest.approx(0.2063)
 
 
 def test_submit_idea_supports_foundation_selection_and_branch_listing(temp_home: Path) -> None:
@@ -947,7 +1266,7 @@ def test_submit_idea_supports_foundation_selection_and_branch_listing(temp_home:
     second_metadata, _ = load_markdown_document(Path(second_idea["idea_md_path"]))
     assert second_metadata["foundation_ref"]["kind"] == "run"
     assert second_metadata["foundation_ref"]["ref"] == "main-001"
-    assert second_metadata["foundation_ref"]["branch"] == first_idea["branch"]
+    assert second_metadata["foundation_ref"]["branch"] == "run/main-001"
     assert second_metadata["foundation_reason"] == "Build on the best measured main run."
 
     third_idea = artifact.submit_idea(
@@ -970,7 +1289,7 @@ def test_submit_idea_supports_foundation_selection_and_branch_listing(temp_home:
 
     branches = artifact.list_research_branches(quest_root)
     assert branches["ok"] is True
-    assert branches["count"] == 3
+    assert branches["count"] == 4
     assert branches["active_head_branch"] == third_idea["branch"]
 
     by_branch = {item["branch_name"]: item for item in branches["branches"]}
@@ -979,16 +1298,25 @@ def test_submit_idea_supports_foundation_selection_and_branch_listing(temp_home:
     assert first_branch["idea_title"] == "Adapter route refined"
     assert first_branch["parent_branch"] == "main"
     assert first_branch["foundation_ref"]["kind"] == "current_head"
-    assert first_branch["latest_main_experiment"]["run_id"] == "main-001"
-    assert first_branch["latest_main_experiment"]["primary_metric_id"] == "acc"
-    assert first_branch["latest_main_experiment"]["primary_value"] == pytest.approx(0.88)
-    assert first_branch["has_main_result"] is True
-    assert first_branch["round_state"] == "post_result"
+    assert first_branch["latest_main_experiment"] is None
+    assert first_branch["experiment_count"] == 0
+    assert first_branch["has_main_result"] is False
+    assert first_branch["round_state"] == "pre_result"
+
+    run_branch = by_branch["run/main-001"]
+    assert run_branch["parent_branch"] == first_idea["branch"]
+    assert run_branch["latest_main_experiment"]["run_id"] == "main-001"
+    assert run_branch["latest_main_experiment"]["primary_metric_id"] == "acc"
+    assert run_branch["latest_main_experiment"]["primary_value"] == pytest.approx(0.88)
+    assert run_branch["experiment_count"] == 1
+    assert [item["run_id"] for item in run_branch["experiments"]] == ["main-001"]
+    assert run_branch["has_main_result"] is True
+    assert run_branch["round_state"] == "post_result"
 
     second_branch = by_branch[second_idea["branch"]]
     assert second_branch["branch_no"] == "002"
     assert second_branch["idea_title"] == "Run-informed route"
-    assert second_branch["parent_branch"] == first_idea["branch"]
+    assert second_branch["parent_branch"] == "run/main-001"
     assert second_branch["foundation_ref"]["kind"] == "run"
     assert second_branch["foundation_ref"]["ref"] == "main-001"
     assert second_branch["foundation_reason"] == "Build on the best measured main run."
@@ -1005,6 +1333,15 @@ def test_submit_idea_supports_foundation_selection_and_branch_listing(temp_home:
     assert third_branch["foundation_reason"] == "Restart from the confirmed baseline branch."
     assert branches["branches"][0]["branch_name"] == third_idea["branch"]
 
+    artifact_listing = quest_service.artifacts(quest["quest_id"])
+    mirrored_main_runs = [
+        item
+        for item in artifact_listing["items"]
+        if str((item.get("kind") or "")) == "runs"
+        and str(((item.get("payload") or {}).get("run_id")) or "") == "main-001"
+    ]
+    assert len(mirrored_main_runs) == 1
+
     branch_view = quest_service.stage_view(
         quest["quest_id"],
         {
@@ -1019,7 +1356,7 @@ def test_submit_idea_supports_foundation_selection_and_branch_listing(temp_home:
     assert branch_view["branch_no"] == "002"
     assert branch_view["title"] == "Branch #002 · Run-informed route"
     assert branch_view["foundation_label"] == "run · main-001"
-    assert branch_view["parent_branch"] == first_idea["branch"]
+    assert branch_view["parent_branch"] == "run/main-001"
     assert branch_view["compare_base"] == first_idea["branch"]
     assert branch_view["compare_head"] == second_idea["branch"]
     assert branch_view["lineage_intent"] == "continue_line"
@@ -1289,6 +1626,10 @@ def test_artifact_interact_respects_primary_connector_policy(temp_home: Path, mo
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["telegram"] = True
+    config["connectors"]["system_enabled"]["slack"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["telegram"]["enabled"] = True
     connectors["slack"]["enabled"] = True
@@ -1339,6 +1680,9 @@ def test_artifact_interact_fans_out_to_all_bound_connectors_without_primary(
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["telegram"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["qq"]["enabled"] = True
     connectors["qq"]["app_id"] = "1903299925"
@@ -1400,6 +1744,9 @@ def test_artifact_interact_auto_uses_single_enabled_connector_for_primary_only(t
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["whatsapp"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["_routing"]["primary_connector"] = None
@@ -1439,6 +1786,8 @@ def test_artifact_interact_persists_surface_actions_and_connector_payload(temp_h
     manager.ensure_files()
     connectors = manager.load_named("connectors")
     connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
     connectors["_routing"]["artifact_delivery_policy"] = "primary_only"
     write_yaml(manager.path_for("connectors"), connectors)
 
@@ -1493,6 +1842,8 @@ def test_artifact_interact_normalizes_attachment_paths_and_returns_delivery_resu
     manager.ensure_files()
     connectors = manager.load_named("connectors")
     connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
     connectors["_routing"]["artifact_delivery_policy"] = "primary_only"
     write_yaml(manager.path_for("connectors"), connectors)
 
@@ -2017,6 +2368,8 @@ def test_artifact_delivery_prefers_connector_binding_case_for_qq(temp_home: Path
     manager.ensure_files()
     connectors = manager.load_named("connectors")
     connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
     write_yaml(manager.path_for("connectors"), connectors)
 
     quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
@@ -2404,6 +2757,81 @@ def test_artifact_interact_default_agent_instruction_respects_english_locale(tem
     assert result["agent_instruction"] == "No new user message has arrived. Continue the task according to the user's requirements."
 
 
+def test_activate_branch_preserves_head_and_redirects_main_run(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("activate branch quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    _confirm_local_baseline(artifact, quest_root)
+    parent = artifact.submit_idea(
+        quest_root,
+        title="Parent route",
+        problem="Need one older branch worth revisiting.",
+        hypothesis="This branch should stay reusable after a newer head appears.",
+        mechanism="Create one durable branch with a recorded main result.",
+        expected_gain="A stable revisit target.",
+        decision_reason="Promote the first durable route.",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="run-parent-1",
+        title="Parent main run",
+        hypothesis="The parent route is promising enough.",
+        setup="Use the standard configuration.",
+        execution="Ran the main experiment.",
+        results="The result is promising but may need more work later.",
+        conclusion="Keep this branch available for future follow-up.",
+        metric_rows=[{"metric_id": "acc", "value": 0.84}],
+        evidence_paths=["experiments/main/run-parent-1/result.json"],
+    )
+    head = artifact.submit_idea(
+        quest_root,
+        title="Newer head route",
+        problem="Create a newer head branch after the first result.",
+        hypothesis="The newer route should become head without destroying revisit support.",
+        mechanism="Create one more accepted idea branch.",
+        expected_gain="A newer durable head.",
+        decision_reason="Advance the frontier while keeping the older route.",
+    )
+
+    activated = artifact.activate_branch(quest_root, branch=parent["branch"])
+
+    assert activated["ok"] is True
+    assert activated["branch"] == parent["branch"]
+    assert activated["worktree_root"] == parent["worktree_root"]
+    assert activated["idea_id"] == parent["idea_id"]
+    assert activated["next_anchor"] == "decision"
+    assert activated["promote_to_head"] is False
+    assert activated["interaction"]["delivered"] is True
+    assert activated["interaction"]["delivery_targets"] == ["local:default"]
+    assert activated["interaction"]["normalized_attachments"][0]["kind"] == "branch_activation"
+
+    rerun = artifact.record_main_experiment(
+        quest_root,
+        run_id="run-parent-2",
+        title="Reactivated parent run",
+        hypothesis="The reactivated branch still owns the next result.",
+        setup="Use the same branch-local workspace.",
+        execution="Ran another main experiment after reactivation.",
+        results="The follow-up run stayed on the activated branch.",
+        conclusion="The branch activation redirect worked.",
+        metric_rows=[{"metric_id": "acc", "value": 0.845}],
+        evidence_paths=["experiments/main/run-parent-2/result.json"],
+    )
+
+    result_payload = read_json(Path(rerun["result_json_path"]), {})
+    assert result_payload["branch"] == "run/run-parent-2"
+    assert result_payload["parent_branch"] == parent["branch"]
+    assert Path(rerun["result_json_path"]).is_relative_to(Path(parent["worktree_root"]))
+    final_state = quest_service.read_research_state(quest_root)
+    assert final_state["current_workspace_branch"] == "run/run-parent-2"
+    assert final_state["research_head_branch"] == "run/run-parent-2"
+    assert final_state["active_idea_id"] == parent["idea_id"]
+
+
 def test_analysis_campaign_uses_current_workspace_parent_and_returns_there(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -2445,13 +2873,9 @@ def test_analysis_campaign_uses_current_workspace_parent_and_returns_there(temp_
         decision_reason="Keep exploring a different route.",
     )
 
-    quest_service.update_research_state(
-        quest_root,
-        active_idea_id=parent["idea_id"],
-        current_workspace_branch=parent["branch"],
-        current_workspace_root=parent["worktree_root"],
-        workspace_mode="idea",
-    )
+    activated = artifact.activate_branch(quest_root, branch=parent["branch"])
+    assert activated["branch"] == parent["branch"]
+    assert activated["next_anchor"] == "decision"
 
     campaign = artifact.create_analysis_campaign(
         quest_root,
@@ -2468,7 +2892,7 @@ def test_analysis_campaign_uses_current_workspace_parent_and_returns_there(temp_
         ],
     )
 
-    assert campaign["parent_branch"] == parent["branch"]
+    assert campaign["parent_branch"] == "run/run-parent"
     assert campaign["parent_worktree_root"] == parent["worktree_root"]
     assert campaign["slices"][0]["branch"].startswith(f"analysis/{parent['idea_id']}/")
 
@@ -2484,9 +2908,9 @@ def test_analysis_campaign_uses_current_workspace_parent_and_returns_there(temp_
     )
 
     assert completed["completed"] is True
-    assert completed["returned_to_branch"] == parent["branch"]
+    assert completed["returned_to_branch"] == "run/run-parent"
     final_state = quest_service.read_research_state(quest_root)
-    assert final_state["current_workspace_branch"] == parent["branch"]
-    assert final_state["current_workspace_root"] == parent["worktree_root"]
+    assert final_state["current_workspace_branch"].startswith("paper/")
+    assert final_state["workspace_mode"] == "paper"
     assert final_state["research_head_branch"] == head["branch"]
     assert final_state["active_idea_id"] == parent["idea_id"]

@@ -392,6 +392,18 @@ export default function Hero() {
 
                     <div className="space-y-1 text-xs text-[#7E8B97]">
                       <div>{HERO_COPY.supportLine}</div>
+                      <div>
+                        {HERO_COPY.moreContentLine}{' '}
+                        <a
+                          href={HERO_COPY.moreContentUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline decoration-[#9FB1C2] underline-offset-4 transition-colors hover:text-[#5D5A55]"
+                        >
+                          {HERO_COPY.moreContentUrl}
+                        </a>
+                        .
+                      </div>
                       {currentVersion ? <div>{`DeepScientist v${currentVersion}`}</div> : null}
                     </div>
                   </div>

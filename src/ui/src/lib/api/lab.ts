@@ -5,6 +5,7 @@ import type {
   GitBranchNode,
   GitBranchesPayload,
   GitComparePayload,
+  MainExperimentResultPayload,
   MemoryCard,
   OpenDocumentPayload,
   QuestArtifactListPayload,
@@ -213,6 +214,7 @@ export type LabQuestGraphNode = {
   placeholder?: boolean | null
   worktree_rel_path?: string | null
   latest_commit?: string | null
+  latest_result?: MainExperimentResultPayload | null
   status?: string | null
   idea_id?: string | null
   idea_json?: Record<string, unknown> | null
@@ -1640,6 +1642,7 @@ function buildLocalBranchGraphNodes(
 ): LabQuestGraphNode[] {
   const baselineGate = resolveBaselineGate(summary)
   const baselineRootId = resolveBaselineNodeId(summary)
+  const baselineSnapshot = collectBaselineMetricsFromBranches(branches)
   const realNodes =
     branches?.nodes?.length
       ? branches.nodes.map((node) =>
@@ -1656,6 +1659,7 @@ function buildLocalBranchGraphNodes(
     placeholder: baselineGate === 'pending',
     worktree_rel_path: resolveConfirmedBaselineRelPath(summary),
     latest_commit: null,
+    metrics_json: baselineSnapshot.metrics,
     status: baselineGate,
     stage_key: 'baseline',
     stage_title: 'Baseline',
@@ -1667,6 +1671,7 @@ function buildLocalBranchGraphNodes(
     node_summary: {
       last_event_type: 'baseline_gate',
       last_reply: resolveBaselineRootSummary(summary),
+      latest_metrics: baselineSnapshot.metrics,
     },
   }
 
@@ -1744,6 +1749,38 @@ export function resolveLocalBaselineAnchorNode(
   return operationalNodes[0] ?? null
 }
 
+function buildGraphMetricCatalogFromNodes(nodes: LabQuestGraphNode[]): LabMetricObjective[] {
+  const catalog = new Map<string, LabMetricObjective>()
+
+  const upsert = (entry: LabMetricObjective) => {
+    if (!entry.key) return
+    const current = catalog.get(entry.key)
+    catalog.set(entry.key, {
+      key: entry.key,
+      label: entry.label || current?.label || entry.key,
+      direction: entry.direction || current?.direction || null,
+      importance: entry.importance ?? current?.importance ?? null,
+      unit: entry.unit ?? current?.unit ?? null,
+      target: entry.target ?? current?.target ?? null,
+    })
+  }
+
+  nodes.forEach((node) => {
+    extractLatestResultMetricCatalog(node.latest_result).forEach(upsert)
+    Object.entries(node.metrics_json ?? {}).forEach(([key, value]) => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return
+      upsert({ key, label: key, direction: null, importance: null, unit: null, target: null })
+    })
+  })
+
+  return [...catalog.values()].sort((left, right) => {
+    const leftImportance = typeof left.importance === 'number' ? left.importance : -1
+    const rightImportance = typeof right.importance === 'number' ? right.importance : -1
+    if (leftImportance !== rightImportance) return rightImportance - leftImportance
+    return left.key.localeCompare(right.key)
+  })
+}
+
 function buildLocalBranchGraphEdges(
   summary: QuestSummary,
   nodes: LabQuestGraphNode[],
@@ -1797,6 +1834,110 @@ function latestMetrics(summary: QuestSummary) {
   }
 }
 
+function normalizeGraphMetricDirection(value: unknown): 'higher' | 'lower' | null {
+  const text = String(value || '').trim().toLowerCase().replace(/[- ]+/g, '_')
+  if (text === 'higher' || text === 'maximize' || text === 'higher_better' || text === 'more_is_better') {
+    return 'higher'
+  }
+  if (text === 'lower' || text === 'minimize' || text === 'lower_better' || text === 'less_is_better') {
+    return 'lower'
+  }
+  return null
+}
+
+function extractLatestResultMetrics(result?: MainExperimentResultPayload | null) {
+  if (!result) return null
+  const metrics: Record<string, number> = {}
+  ;(result.metric_rows ?? []).forEach((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return
+    const record = row as Record<string, unknown>
+    const key = String(record.metric_id || record.name || record.metric || '').trim()
+    const value = typeof record.numeric_value === 'number' ? record.numeric_value : record.value
+    if (!key || typeof value !== 'number' || !Number.isFinite(value)) return
+    metrics[key] = Number(value)
+  })
+  Object.entries(result.metrics_summary ?? {}).forEach(([key, value]) => {
+    if (key in metrics) return
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      metrics[key] = Number(value)
+    }
+  })
+  return Object.keys(metrics).length ? metrics : null
+}
+
+function extractLatestResultMetricDeltas(result?: MainExperimentResultPayload | null) {
+  if (!result) return null
+  const deltas: Record<string, number> = {}
+  ;(result.baseline_comparisons?.items ?? []).forEach((item) => {
+    if (!item?.metric_id || typeof item.delta !== 'number' || !Number.isFinite(item.delta)) return
+    deltas[item.metric_id] = Number(item.delta)
+  })
+  ;(result.metric_rows ?? []).forEach((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return
+    const record = row as Record<string, unknown>
+    const key = String(record.metric_id || record.name || record.metric || '').trim()
+    const delta = record.delta
+    if (!key || key in deltas || typeof delta !== 'number' || !Number.isFinite(delta)) return
+    deltas[key] = Number(delta)
+  })
+  return Object.keys(deltas).length ? deltas : null
+}
+
+function extractLatestResultMetricCatalog(result?: MainExperimentResultPayload | null) {
+  if (!result) return []
+  const catalog = new Map<string, LabMetricObjective>()
+  ;(result.metric_contract?.metrics ?? []).forEach((item) => {
+    if (!item?.metric_id) return
+    const key = String(item.metric_id).trim()
+    if (!key) return
+    catalog.set(key, {
+      key,
+      label: String(item.label || key).trim() || key,
+      direction: normalizeGraphMetricDirection(item.direction),
+      importance: key === result.metric_contract?.primary_metric_id ? 1 : null,
+      unit: item.unit ?? null,
+    })
+  })
+  ;(result.metric_rows ?? []).forEach((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return
+    const record = row as Record<string, unknown>
+    const key = String(record.metric_id || record.name || record.metric || '').trim()
+    if (!key) return
+    const current = catalog.get(key)
+    catalog.set(key, {
+      key,
+      label: String(record.label || record.name || current?.label || key).trim() || key,
+      direction: normalizeGraphMetricDirection(record.direction) || current?.direction || null,
+      importance: current?.importance ?? (key === result.metric_contract?.primary_metric_id ? 1 : null),
+      unit: (typeof record.unit === 'string' ? record.unit : current?.unit) ?? null,
+    })
+  })
+  return [...catalog.values()]
+}
+
+function collectBaselineMetricsFromBranches(branches?: GitBranchesPayload | null) {
+  const metrics: Record<string, number> = {}
+  const catalog = new Map<string, LabMetricObjective>()
+  ;(branches?.nodes ?? []).forEach((node) => {
+    ;(node.latest_result?.baseline_comparisons?.items ?? []).forEach((item) => {
+      if (!item?.metric_id || typeof item.baseline_value !== 'number' || !Number.isFinite(item.baseline_value)) return
+      metrics[item.metric_id] = Number(item.baseline_value)
+      const current = catalog.get(item.metric_id)
+      catalog.set(item.metric_id, {
+        key: item.metric_id,
+        label: String(item.label || current?.label || item.metric_id).trim() || item.metric_id,
+        direction: normalizeGraphMetricDirection(item.direction) || current?.direction || null,
+        importance: current?.importance ?? null,
+        unit: item.unit ?? current?.unit ?? null,
+      })
+    })
+  })
+  return {
+    metrics: Object.keys(metrics).length ? metrics : null,
+    catalog: [...catalog.values()],
+  }
+}
+
 function buildLocalQuestNodes(summary: QuestSummary): LabQuestNode[] {
   const stages = [
     { key: 'scout', title: 'Scout' },
@@ -1844,12 +1985,12 @@ function buildLocalBranchWorkbench(summary: QuestSummary, branches?: GitBranches
     branchClass: resolveBranchClass(node),
     parentBranch: node.parent_ref ?? null,
     worktreeRelPath: node.worktree_root ?? null,
-    isHead: Boolean(node.current),
+    isHead: Boolean(node.research_head),
     stage: resolveGraphBranchStageKey(summary, node, null),
     nowDoing: node.latest_summary ?? node.subject ?? null,
-    latestMetrics: node.latest_metric?.key
-      ? { [node.latest_metric.key]: node.latest_metric.value ?? null }
-      : null,
+    latestMetrics:
+      extractLatestResultMetrics(node.latest_result) ||
+      (node.latest_metric?.key ? { [node.latest_metric.key]: node.latest_metric.value ?? null } : null),
   }))
 }
 
@@ -1864,7 +2005,7 @@ function buildLocalGovernanceVm(summary: QuestSummary, branches?: GitBranchesPay
     questId: summary.quest_id,
     title: summary.title || summary.quest_id,
     topology: {
-      headBranch: summary.branch || 'main',
+      headBranch: branches?.research_head_ref || summary.research_head_branch || summary.branch || 'main',
       branchCount,
       edgeCount: branches?.edges?.length ?? 0,
     },
@@ -2110,9 +2251,13 @@ function mapGitNodeToLabQuestGraphNode(
   const traceMetrics = extractTraceMetrics(branchTrace)
   const traceWorktreeRelPath = String(branchTrace?.worktree_rel_path || '').trim() || null
   const metrics =
-    node.latest_metric?.key
+    extractLatestResultMetrics(node.latest_result) ||
+    (node.latest_metric?.key
       ? { [node.latest_metric.key]: node.latest_metric.value ?? null }
-      : traceMetrics || latestMetrics(summary)
+      : null) ||
+    traceMetrics ||
+    latestMetrics(summary)
+  const metricDeltas = extractLatestResultMetricDeltas(node.latest_result)
   const stageKey = resolveGraphBranchStageKey(summary, node, branchTrace)
 
   return {
@@ -2133,7 +2278,8 @@ function mapGitNodeToLabQuestGraphNode(
     placeholder: false,
     worktree_rel_path: traceWorktreeRelPath,
     latest_commit: branchTrace?.head_commit || node.head || null,
-    status: node.current ? 'active' : 'ready',
+    latest_result: node.latest_result ?? null,
+    status: node.active_workspace ? 'active' : node.research_head ? 'head' : 'ready',
     idea_id: (asStringValue(asRecordValue(branchTrace?.payload_json)?.idea_id) || node.idea_id) ?? null,
     metrics_json: metrics,
     verdict: branchTrace?.summary || node.latest_summary || null,
@@ -2147,7 +2293,7 @@ function mapGitNodeToLabQuestGraphNode(
       .filter((value): value is string => Boolean(value)),
     event_count: branchTrace?.counts?.actions ?? node.commit_count ?? 0,
     baseline_state: resolveBaselineGate(summary),
-    runtime_state: node.current ? normalizeLabWorkingStatus(summary.status) : 'idle',
+    runtime_state: node.active_workspace ? normalizeLabWorkingStatus(summary.status) : 'idle',
     target_label: node.label,
     scope_paths: resolveBranchScopePaths(node),
     compare_base: resolveBranchCompareBase(node),
@@ -2158,6 +2304,7 @@ function mapGitNodeToLabQuestGraphNode(
         branchTrace?.actions?.[branchTrace.actions.length - 1]?.raw_event_type ||
         stageKey,
       last_reply: branchTrace?.summary || node.latest_summary || node.subject || null,
+      metrics_delta: metricDeltas,
       latest_metrics: metrics,
       trend_preview: null,
       claim_verdict: null,
@@ -2779,16 +2926,7 @@ function buildLocalQuestGraphResponse(
     edges: branchEdges,
     head_branch: summary.branch || 'main',
     layout_json: null,
-    metric_catalog: summary.summary?.latest_metric?.key
-      ? [
-          {
-            key: summary.summary.latest_metric.key,
-            label: summary.summary.latest_metric.key,
-            direction: 'higher',
-            importance: 1,
-          },
-        ]
-      : [],
+    metric_catalog: buildGraphMetricCatalogFromNodes(branchNodes),
     governance_vm: buildLocalGovernanceVm(summary, branches),
     overlay_actions: [],
   }
@@ -3416,16 +3554,7 @@ export async function getLabQuestGraph(
       edges: branchEdges,
       head_branch: summary.branch || 'main',
       layout_json: null,
-      metric_catalog: summary.summary?.latest_metric?.key
-        ? [
-            {
-              key: summary.summary.latest_metric.key,
-              label: summary.summary.latest_metric.key,
-              direction: 'higher',
-              importance: 1,
-            },
-          ]
-        : [],
+      metric_catalog: buildGraphMetricCatalogFromNodes(branchNodes),
       governance_vm: buildLocalGovernanceVm(summary, branches),
       overlay_actions: [],
     }

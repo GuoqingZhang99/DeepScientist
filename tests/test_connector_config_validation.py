@@ -14,6 +14,9 @@ def test_connector_validation_accepts_no_callback_first_transport_defaults(temp_
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["whatsapp"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["feishu"]["enabled"] = True
     connectors["feishu"]["transport"] = "long_connection"
@@ -96,14 +99,16 @@ def test_connector_validation_rejects_qq_direct_without_credentials(temp_home: P
 
     result = manager.validate_named_text("connectors", yaml.safe_dump(connectors, sort_keys=False))
     assert result["ok"] is False
-    assert any("qq: requires `app_id`" in item for item in result["errors"])
-    assert any("qq: requires `app_secret`" in item for item in result["errors"])
+    assert any("qq: requires at least one configured profile under `qq.profiles`." in item for item in result["errors"])
 
 
 def test_generic_connector_enforces_dm_allowlist(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["whatsapp"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["whatsapp"]["enabled"] = True
     connectors["whatsapp"]["transport"] = "local_session"

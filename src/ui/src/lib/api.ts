@@ -6,6 +6,7 @@ import type {
   ConnectorSnapshot,
   ConnectorAvailabilitySnapshot,
   ExplorerPayload,
+  FileChangeDiffPayload,
   FeedEnvelope,
   GitBranchesPayload,
   GitCommitDetailPayload,
@@ -46,7 +47,9 @@ type ConfigTestInput =
 
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    throw new Error(await response.text())
+    const body = await parseResponseBody(response)
+    const message = typeof body.message === 'string' && body.message.trim() ? body.message.trim() : null
+    throw new Error(message || JSON.stringify(body))
   }
   return (await response.json()) as T
 }
@@ -243,6 +246,12 @@ export const client = {
     api<GitDiffPayload>(
       `/api/quests/${questId}/git/diff-file?base=${encodeURIComponent(base)}&head=${encodeURIComponent(head)}&path=${encodeURIComponent(path)}`
     ),
+  fileChangeDiff: (questId: string, runId: string, path: string, eventId?: string) =>
+    api<FileChangeDiffPayload>(
+      `/api/quests/${questId}/operations/file-change-diff?run_id=${encodeURIComponent(runId)}&path=${encodeURIComponent(path)}${
+        eventId ? `&event_id=${encodeURIComponent(eventId)}` : ''
+      }`
+    ),
   gitCommitFile: (questId: string, sha: string, path: string) =>
     api<GitDiffPayload>(`/api/quests/${questId}/git/commit-file?sha=${encodeURIComponent(sha)}&path=${encodeURIComponent(path)}`),
   openDocument: (questId: string, documentId: string) =>
@@ -353,6 +362,19 @@ export const client = {
       body: JSON.stringify({ document_id: documentId }),
     }),
   connectors: () => api<ConnectorSnapshot[]>('/api/connectors'),
+  deleteConnectorProfile: (connectorName: string, profileId: string) =>
+    api<{
+      ok: boolean
+      connector: string
+      profile_id: string
+      deleted?: boolean
+      deleted_bound_conversations?: string[]
+      remaining_profile_count?: number
+      snapshot?: ConnectorSnapshot | null
+      message?: string
+    }>(`/api/connectors/${encodeURIComponent(connectorName)}/profiles/${encodeURIComponent(profileId)}`, {
+      method: 'DELETE',
+    }),
   configFiles: () => api<ConfigFileEntry[]>('/api/config/files'),
   configDocument: (name: string) => api<OpenDocumentPayload>(`/api/config/${name}`),
   saveConfig: (name: string, input: ConfigSaveInput) =>

@@ -6,9 +6,93 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from ..artifact import ArtifactService
+from ..artifact.metrics import MetricContractValidationError
 from ..bash_exec import BashExecService
 from ..memory import MemoryService
 from .context import McpContext
+
+DEFAULT_INLINE_BASH_LOG_LINE_LIMIT = 2000
+DEFAULT_INLINE_BASH_LOG_HEAD_LINES = 500
+DEFAULT_INLINE_BASH_LOG_TAIL_LINES = 1500
+DEFAULT_INLINE_BASH_LOG_WINDOW_LINES = 200
+MAX_INLINE_BASH_LOG_WINDOW_LINES = 2000
+LONG_BASH_LOG_HINT = (
+    "Use `bash_exec(mode='read', id=..., start=..., tail=...)` to inspect a specific log window, "
+    "or `bash_exec(mode='read', id=..., tail=...)` to inspect the latest rendered lines."
+)
+
+
+def _metric_validation_error_payload(exc: MetricContractValidationError) -> dict[str, Any]:
+    return exc.as_payload()
+
+
+def _split_bash_log_lines(log_text: str) -> list[str]:
+    return log_text.splitlines()
+
+
+def _join_bash_log_lines(lines: list[str]) -> str:
+    return "\n".join(lines)
+
+
+def _normalize_bash_log_window_size(value: int | None, *, default: int = DEFAULT_INLINE_BASH_LOG_WINDOW_LINES) -> int:
+    resolved = default if value is None else int(value)
+    return max(1, min(resolved, MAX_INLINE_BASH_LOG_WINDOW_LINES))
+
+
+def _build_bash_log_window(log_text: str, *, start: int | None = None, tail: int | None = None) -> dict[str, Any]:
+    lines = _split_bash_log_lines(log_text)
+    total = len(lines)
+    line_limit = _normalize_bash_log_window_size(tail)
+    if start is not None:
+        requested_start = max(1, int(start))
+        start_index = min(max(0, requested_start - 1), total)
+    else:
+        start_index = max(0, total - line_limit)
+    selected = lines[start_index : start_index + line_limit]
+    returned_count = len(selected)
+    line_start = start_index + 1 if total else 1
+    line_end = start_index + returned_count
+    return {
+        "log": _join_bash_log_lines(selected),
+        "log_line_count": total,
+        "log_windowed": True,
+        "line_start": line_start,
+        "line_end": line_end,
+        "line_limit": line_limit,
+        "returned_line_count": returned_count,
+        "has_more_before": start_index > 0,
+        "has_more_after": line_end < total,
+        "log_read_hint": LONG_BASH_LOG_HINT,
+    }
+
+
+def _build_default_bash_log_payload(log_text: str) -> dict[str, Any]:
+    lines = _split_bash_log_lines(log_text)
+    total = len(lines)
+    if total <= DEFAULT_INLINE_BASH_LOG_LINE_LIMIT:
+        return {
+            "log": log_text,
+            "log_line_count": total,
+            "log_truncated": False,
+        }
+    omitted = total - DEFAULT_INLINE_BASH_LOG_HEAD_LINES - DEFAULT_INLINE_BASH_LOG_TAIL_LINES
+    marker = (
+        f"[... omitted {omitted} lines from the middle of this log. {LONG_BASH_LOG_HINT}]"
+    )
+    preview_lines = (
+        lines[:DEFAULT_INLINE_BASH_LOG_HEAD_LINES]
+        + [marker]
+        + lines[-DEFAULT_INLINE_BASH_LOG_TAIL_LINES :]
+    )
+    return {
+        "log": _join_bash_log_lines(preview_lines),
+        "log_line_count": total,
+        "log_truncated": True,
+        "log_preview_head_lines": DEFAULT_INLINE_BASH_LOG_HEAD_LINES,
+        "log_preview_tail_lines": DEFAULT_INLINE_BASH_LOG_TAIL_LINES,
+        "log_preview_omitted_lines": omitted,
+        "log_read_hint": LONG_BASH_LOG_HINT,
+    }
 
 
 def build_memory_server(context: McpContext) -> FastMCP:
@@ -201,6 +285,32 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         )
 
     @server.tool(
+        name="activate_branch",
+        description=(
+            "Activate one existing durable research branch as the current workspace without creating a new lineage node. "
+            "Use this when you need to revisit an older idea/main-result branch for more experiments or a fresh decision."
+        ),
+    )
+    def activate_branch(
+        branch: str | None = None,
+        idea_id: str | None = None,
+        run_id: str | None = None,
+        anchor: str | None = "auto",
+        promote_to_head: bool = False,
+        create_worktree_if_missing: bool = True,
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.activate_branch(
+            context.require_quest_root(),
+            branch=branch,
+            idea_id=idea_id,
+            run_id=run_id,
+            anchor=anchor,
+            promote_to_head=promote_to_head,
+            create_worktree_if_missing=create_worktree_if_missing,
+        )
+
+    @server.tool(
         name="submit_idea",
         description=(
             "Create or revise the active research idea. "
@@ -310,29 +420,33 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         evaluation_summary: dict[str, Any] | None = None,
         comment: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return service.record_main_experiment(
-            context.require_quest_root(),
-            run_id=run_id,
-            title=title,
-            hypothesis=hypothesis,
-            setup=setup,
-            execution=execution,
-            results=results,
-            conclusion=conclusion,
-            metric_rows=metric_rows,
-            metrics_summary=metrics_summary,
-            metric_contract=metric_contract,
-            evidence_paths=evidence_paths,
-            changed_files=changed_files,
-            config_paths=config_paths,
-            notes=notes,
-            dataset_scope=dataset_scope,
-            verdict=verdict,
-            status=status,
-            baseline_id=baseline_id,
-            baseline_variant_id=baseline_variant_id,
-            evaluation_summary=evaluation_summary,
-        )
+        try:
+            return service.record_main_experiment(
+                context.require_quest_root(),
+                run_id=run_id,
+                title=title,
+                hypothesis=hypothesis,
+                setup=setup,
+                execution=execution,
+                results=results,
+                conclusion=conclusion,
+                metric_rows=metric_rows,
+                metrics_summary=metrics_summary,
+                metric_contract=metric_contract,
+                evidence_paths=evidence_paths,
+                changed_files=changed_files,
+                config_paths=config_paths,
+                notes=notes,
+                dataset_scope=dataset_scope,
+                verdict=verdict,
+                status=status,
+                baseline_id=baseline_id,
+                baseline_variant_id=baseline_variant_id,
+                evaluation_summary=evaluation_summary,
+                strict_metric_contract=True,
+            )
+        except MetricContractValidationError as exc:
+            return _metric_validation_error_payload(exc)
 
     @server.tool(
         name="create_analysis_campaign",
@@ -527,19 +641,23 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         auto_advance: bool = True,
         comment: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return service.confirm_baseline(
-            context.require_quest_root(),
-            baseline_path=baseline_path,
-            comment=comment,
-            baseline_id=baseline_id,
-            variant_id=variant_id,
-            summary=summary,
-            baseline_kind=baseline_kind,
-            metric_contract=metric_contract,
-            metrics_summary=metrics_summary,
-            primary_metric=primary_metric,
-            auto_advance=auto_advance,
-        )
+        try:
+            return service.confirm_baseline(
+                context.require_quest_root(),
+                baseline_path=baseline_path,
+                comment=comment,
+                baseline_id=baseline_id,
+                variant_id=variant_id,
+                summary=summary,
+                baseline_kind=baseline_kind,
+                metric_contract=metric_contract,
+                metrics_summary=metrics_summary,
+                primary_metric=primary_metric,
+                auto_advance=auto_advance,
+                strict_metric_contract=True,
+            )
+        except MetricContractValidationError as exc:
+            return _metric_validation_error_payload(exc)
 
     @server.tool(
         name="waive_baseline",
@@ -661,7 +779,10 @@ def build_bash_exec_server(context: McpContext) -> FastMCP:
         description=(
             "Execute a bash command inside the current quest. "
             "mode=detach returns immediately. mode=await/create waits for completion. "
-            "mode=read returns the saved log or a tailed log window. mode=kill requests termination. "
+            "mode=read returns the saved log. It returns the full saved log up to 2000 lines, "
+            "or a 500-line head plus 1500-line tail preview for longer logs. "
+            "Use start/tail for rendered line windows and tail_limit/after_seq for seq-based monitoring. "
+            "mode=kill requests termination. "
             "mode=list shows known quest-local bash sessions. mode=history shows a compact reverse-chronological bash id list."
         ),
     )
@@ -681,6 +802,8 @@ def build_bash_exec_server(context: McpContext) -> FastMCP:
         agent_instance_ids: list[str] | None = None,
         chat_session_id: str | None = None,
         limit: int = 20,
+        start: int | None = None,
+        tail: int | None = None,
         tail_limit: int | None = None,
         before_seq: int | None = None,
         after_seq: int | None = None,
@@ -732,6 +855,29 @@ def build_bash_exec_server(context: McpContext) -> FastMCP:
             normalized_order = (order or "asc").strip().lower()
             if normalized_order not in {"asc", "desc"}:
                 normalized_order = "asc"
+            if tail is not None and tail_limit is not None:
+                raise ValueError("Use either `tail` or `tail_limit`, not both.")
+            use_line_window = start is not None or tail is not None or (start is not None and tail_limit is not None)
+            if use_line_window and (before_seq is not None or after_seq is not None):
+                raise ValueError("`start`/`tail` cannot be combined with `before_seq` or `after_seq`.")
+            if use_line_window and normalized_order != "asc":
+                raise ValueError("`start`/`tail` windows only support `order='asc'`.")
+            if use_line_window:
+                payload = service.build_tool_result(
+                    context,
+                    session=session,
+                    include_log=False,
+                    export_log=export_log,
+                    export_log_to=export_log_to,
+                )
+                payload.update(
+                    _build_bash_log_window(
+                        service.read_terminal_log(quest_root, bash_id),
+                        start=start,
+                        tail=tail if tail is not None else tail_limit,
+                    )
+                )
+                return payload
             use_tail = tail_limit is not None or before_seq is not None or after_seq is not None or normalized_order != "asc"
             if use_tail:
                 resolved_tail_limit = max(1, min(int(tail_limit or 200), 1000))
@@ -742,6 +888,7 @@ def build_bash_exec_server(context: McpContext) -> FastMCP:
                     before_seq=before_seq,
                     after_seq=after_seq,
                     order=normalized_order,
+                    prefer_visible=True,
                 )
                 payload = service.build_tool_result(
                     context,
@@ -758,13 +905,15 @@ def build_bash_exec_server(context: McpContext) -> FastMCP:
                 payload["before_seq"] = tail_meta.get("before_seq")
                 payload["order"] = normalized_order
                 return payload
-            return service.build_tool_result(
+            payload = service.build_tool_result(
                 context,
                 session=session,
-                include_log=True,
+                include_log=False,
                 export_log=export_log,
                 export_log_to=export_log_to,
             )
+            payload.update(_build_default_bash_log_payload(service.read_terminal_log(quest_root, bash_id)))
+            return payload
         if normalized_mode == "kill":
             bash_id = service.resolve_session_id(quest_root, id)
             session = service.request_stop(

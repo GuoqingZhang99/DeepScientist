@@ -6,12 +6,13 @@ from urllib.parse import quote
 import pytest
 
 from deepscientist.artifact import ArtifactService
+from deepscientist.artifact.metrics import build_metrics_timeline
 from deepscientist.config import ConfigManager
 from deepscientist.daemon.app import DaemonApp
 from deepscientist.gitops import checkpoint_repo
 from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.quest import QuestService
-from deepscientist.shared import run_command, write_text
+from deepscientist.shared import run_command, write_json, write_text
 from deepscientist.skills import SkillInstaller
 
 
@@ -29,6 +30,35 @@ def _confirm_local_baseline(artifact: ArtifactService, quest_root: Path, baselin
         metric_contract={
             "primary_metric_id": "acc",
             "metrics": [{"metric_id": "acc", "direction": "higher"}],
+        },
+    )
+
+
+def _write_run_artifact(
+    quest_root: Path,
+    *,
+    run_id: str,
+    branch: str,
+    base: str,
+    head: str,
+    workspace_root: Path,
+) -> None:
+    run_root = quest_root / ".ds" / "runs" / run_id
+    run_root.mkdir(parents=True, exist_ok=True)
+    write_json(
+        run_root / "artifact.json",
+        {
+            "ok": True,
+            "workspace_root": str(workspace_root),
+            "record": {
+                "run_id": run_id,
+                "branch": branch,
+                "head_commit": base,
+                "workspace_root": str(workspace_root),
+            },
+            "checkpoint": {
+                "head": head,
+            },
         },
     )
 
@@ -244,6 +274,185 @@ def test_git_branch_canvas_reads_artifacts_from_worktrees(temp_home: Path) -> No
     assert nodes[analysis_branch]["latest_result"]["evaluation_summary"]["next_action"] == "write"
 
 
+def test_git_branch_canvas_dedupes_mirrored_main_experiment_counts(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("worktree main run dedupe quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root)
+
+    parent = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Primary route",
+        problem="Baseline saturates.",
+        hypothesis="A lightweight adapter helps.",
+        mechanism="Insert a residual adapter.",
+        decision_reason="Promote the strongest current route.",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="main-dedupe-001",
+        title="Primary route main run",
+        hypothesis="The promoted route is strong enough for a measured run.",
+        setup="Standard validation recipe.",
+        execution="Ran the main experiment once.",
+        results="The primary route improved accuracy.",
+        conclusion="Use the result as the next foundation.",
+        metric_rows=[{"metric_id": "acc", "value": 0.86}],
+    )
+    artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Follow-up route",
+        problem="Continue from the best measured result.",
+        hypothesis="A second route can build on the measured gain.",
+        mechanism="Branch from the durable main result.",
+        decision_reason="Create a child route from the promoted evidence.",
+        foundation_ref={"kind": "run", "ref": "main-dedupe-001"},
+        foundation_reason="Build on the best measured run.",
+        next_target="experiment",
+    )
+
+    app = DaemonApp(temp_home)
+    branches = app.handlers.git_branches(quest_id)
+    nodes = {item["ref"]: item for item in branches["nodes"]}
+
+    assert nodes["run/main-dedupe-001"]["latest_result"]["run_id"] == "main-dedupe-001"
+    assert nodes["run/main-dedupe-001"]["parent_ref"] == parent["branch"]
+
+
+def test_file_change_diff_falls_back_to_run_commit_range_for_quest_root(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("file change diff quest root")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    target = quest_root / "plan.md"
+    write_text(target, "# Plan\n\nQuest-root base change.\n")
+    base = checkpoint_repo(quest_root, "quest root diff base", allow_empty=False)["head"]
+    write_text(target, "# Plan\n\nQuest-root head change.\n")
+    head = checkpoint_repo(quest_root, "quest root diff head", allow_empty=False)["head"]
+    _write_run_artifact(
+        quest_root,
+        run_id="run-file-change-root",
+        branch="main",
+        base=base,
+        head=head,
+        workspace_root=quest_root,
+    )
+
+    app = DaemonApp(temp_home)
+    diff = app.handlers.file_change_diff(
+        quest_id,
+        path=(
+            f"/api/quests/{quest_id}/operations/file-change-diff?run_id=run-file-change-root"
+            f"&path={quote(str(target))}&event_id=evt-root"
+        ),
+    )
+
+    assert diff["ok"] is True
+    assert diff["available"] is True
+    assert diff["source"] == "run_range"
+    assert diff["path"] == "plan.md"
+    assert diff["display_path"] == "plan.md"
+    assert diff["run_id"] == "run-file-change-root"
+    assert diff["event_id"] == "evt-root"
+    assert any("Quest-root head change." in line for line in diff["lines"])
+
+
+def test_file_change_diff_falls_back_to_run_commit_range_for_worktree_root(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("file change diff worktree root")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    prepared = artifact.prepare_branch(
+        quest_root,
+        run_id="run-file-change-worktree",
+        branch_kind="run",
+        create_worktree_flag=True,
+    )
+    worktree_root = Path(str(prepared["worktree_root"]))
+    target = worktree_root / "plan.md"
+    write_text(target, "# Plan\n\nWorktree base change.\n")
+    base = checkpoint_repo(worktree_root, "worktree diff base", allow_empty=False)["head"]
+    write_text(target, "# Plan\n\nWorktree head change.\n")
+    head = checkpoint_repo(worktree_root, "worktree diff head", allow_empty=False)["head"]
+    _write_run_artifact(
+        quest_root,
+        run_id="run-file-change-worktree",
+        branch=str(prepared["branch"]),
+        base=base,
+        head=head,
+        workspace_root=worktree_root,
+    )
+
+    app = DaemonApp(temp_home)
+    diff = app.handlers.file_change_diff(
+        quest_id,
+        path=(
+            f"/api/quests/{quest_id}/operations/file-change-diff?run_id=run-file-change-worktree"
+            f"&path={quote(str(target))}&event_id=evt-worktree"
+        ),
+    )
+
+    assert diff["ok"] is True
+    assert diff["available"] is True
+    assert diff["source"] == "run_range"
+    assert diff["path"] == "plan.md"
+    assert str(diff["display_path"]).endswith("/plan.md")
+    assert diff["branch"] == prepared["branch"]
+    assert any("Worktree head change." in line for line in diff["lines"])
+
+
+def test_file_change_diff_reports_unavailable_when_file_is_not_in_final_run_diff(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("file change diff unavailable")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    changed_path = quest_root / "status.md"
+    untouched_path = quest_root / "plan.md"
+    write_text(changed_path, "# Status\n\nOnly this file changes in base.\n")
+    base = checkpoint_repo(quest_root, "unavailable diff base", allow_empty=False)["head"]
+    write_text(changed_path, "# Status\n\nOnly this file changes in head.\n")
+    head = checkpoint_repo(quest_root, "unavailable diff head", allow_empty=False)["head"]
+    _write_run_artifact(
+        quest_root,
+        run_id="run-file-change-unavailable",
+        branch="main",
+        base=base,
+        head=head,
+        workspace_root=quest_root,
+    )
+
+    app = DaemonApp(temp_home)
+    diff = app.handlers.file_change_diff(
+        quest_id,
+        path=(
+            f"/api/quests/{quest_id}/operations/file-change-diff?run_id=run-file-change-unavailable"
+            f"&path={quote(str(untouched_path))}&event_id=evt-unavailable"
+        ),
+    )
+
+    assert diff["ok"] is True
+    assert diff["available"] is False
+    assert diff["source"] == "unavailable"
+    assert diff["path"] == "plan.md"
+    assert "final checkpoint" in str(diff["message"])
+
+
 def test_git_branch_canvas_marks_breakthrough_and_metrics_timeline(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -313,11 +522,11 @@ def test_git_branch_canvas_marks_breakthrough_and_metrics_timeline(temp_home: Pa
     branches = app.handlers.git_branches(quest_id)
     nodes = {item["ref"]: item for item in branches["nodes"]}
 
-    assert nodes[idea["branch"]]["breakthrough"] is True
-    assert nodes[idea["branch"]]["breakthrough_level"] in {"minor", "major"}
-    assert nodes[idea["branch"]]["latest_result"]["run_id"] == "main-graph-001"
-    assert nodes[idea["branch"]]["latest_metric"]["delta_vs_baseline"] == pytest.approx(0.06)
-    assert nodes[idea["branch"]]["latest_result"]["evaluation_summary"]["claim_update"] == "strengthens"
+    assert nodes["run/main-graph-001"]["breakthrough"] is True
+    assert nodes["run/main-graph-001"]["breakthrough_level"] in {"minor", "major"}
+    assert nodes["run/main-graph-001"]["latest_result"]["run_id"] == "main-graph-001"
+    assert nodes["run/main-graph-001"]["latest_metric"]["delta_vs_baseline"] == pytest.approx(0.06)
+    assert nodes["run/main-graph-001"]["latest_result"]["evaluation_summary"]["claim_update"] == "strengthens"
 
     timeline = app.handlers.metrics_timeline(quest_id)
     assert timeline["primary_metric_id"] == "acc"
@@ -325,6 +534,73 @@ def test_git_branch_canvas_marks_breakthrough_and_metrics_timeline(temp_home: Pa
     assert acc_series["points"][0]["value"] == 0.86
     assert acc_series["points"][0]["breakthrough"] is True
     assert acc_series["baselines"][0]["value"] == 0.8
+
+
+def test_metrics_timeline_dedupes_mirrored_run_records_and_keeps_numeric_metric_rows() -> None:
+    baseline_entry = {
+        "baseline_id": "baseline-mirror",
+        "metrics_summary": {"sigma_max": 0.6921, "raw_false": 0.2149},
+        "primary_metric": {"name": "sigma_max", "value": 0.6921},
+        "metric_contract": {
+            "primary_metric_id": "sigma_max",
+            "metrics": [
+                {"metric_id": "sigma_max", "direction": "lower"},
+                {"metric_id": "raw_false", "direction": "lower"},
+            ],
+        },
+    }
+    older = {
+        "run_id": "mirror-001",
+        "artifact_id": "artifact-old",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "metrics_summary": {
+            "headline": "Favorable overall.",
+            "primary_metric": {"metric_id": "sigma_max", "value": 0.2477},
+        },
+        "metric_rows": [
+            {"metric_id": "sigma_max", "value": 0.2477, "delta": -0.4444, "direction": "lower_better"},
+        ],
+        "metric_contract": {
+            "primary_metric_id": "sigma_max",
+            "metrics": [{"metric_id": "headline"}, {"metric_id": "sigma_max"}],
+        },
+        "baseline_comparisons": {
+            "primary_metric_id": "sigma_max",
+            "items": [{"metric_id": "sigma_max", "delta": -0.4444, "direction": "lower"}],
+        },
+        "progress_eval": {"primary_metric_id": "sigma_max"},
+    }
+    newer = {
+        **older,
+        "artifact_id": "artifact-new",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "metric_rows": [
+            {"metric_id": "sigma_max", "value": 0.2477, "delta": -0.4444, "direction": "lower_better"},
+            {"metric_id": "raw_false", "value": 0.2063, "delta": -0.0086, "direction": "lower_better"},
+        ],
+        "baseline_comparisons": {
+            "primary_metric_id": "sigma_max",
+            "items": [
+                {"metric_id": "sigma_max", "delta": -0.4444, "direction": "lower"},
+                {"metric_id": "raw_false", "delta": -0.0086, "direction": "lower"},
+            ],
+        },
+    }
+
+    timeline = build_metrics_timeline(
+        quest_id="quest-mirror",
+        run_records=[older, newer],
+        baseline_entry=baseline_entry,
+        selected_variant_id=None,
+    )
+
+    assert timeline["total_runs"] == 1
+    series_by_id = {item["metric_id"]: item for item in timeline["series"]}
+    assert set(series_by_id.keys()) == {"sigma_max", "raw_false"}
+    assert series_by_id["sigma_max"]["direction"] == "minimize"
+    assert series_by_id["raw_false"]["direction"] == "minimize"
+    assert series_by_id["sigma_max"]["points"][0]["artifact_id"] == "artifact-new"
+    assert series_by_id["raw_false"]["points"][0]["value"] == pytest.approx(0.2063)
 
 
 def test_git_branch_canvas_parents_follow_up_analysis_to_current_workspace_node(temp_home: Path) -> None:
@@ -367,13 +643,16 @@ def test_git_branch_canvas_parents_follow_up_analysis_to_current_workspace_node(
         expected_gain="Separate current head from current workspace.",
         decision_reason="Advance the head branch.",
     )
-    quest_service.update_research_state(
-        quest_root,
-        active_idea_id=parent["idea_id"],
-        current_workspace_branch=parent["branch"],
-        current_workspace_root=parent["worktree_root"],
-        workspace_mode="idea",
-    )
+    activated = artifact.activate_branch(quest_root, branch=parent["branch"])
+    assert activated["branch"] == parent["branch"]
+
+    app = DaemonApp(temp_home)
+    before_campaign = app.handlers.git_branches(quest_id)
+    before_nodes = {item["ref"]: item for item in before_campaign["nodes"]}
+    assert before_campaign["active_workspace_ref"] == parent["branch"]
+    assert before_campaign["research_head_ref"] == head["branch"]
+    assert before_nodes[parent["branch"]]["active_workspace"] is True
+    assert before_nodes[head["branch"]]["research_head"] is True
 
     campaign = artifact.create_analysis_campaign(
         quest_root,
@@ -391,10 +670,13 @@ def test_git_branch_canvas_parents_follow_up_analysis_to_current_workspace_node(
     )
     analysis_branch = campaign["slices"][0]["branch"]
 
-    app = DaemonApp(temp_home)
     branches = app.handlers.git_branches(quest_id)
     nodes = {item["ref"]: item for item in branches["nodes"]}
 
     assert head["branch"] != parent["branch"]
-    assert nodes[analysis_branch]["parent_ref"] == parent["branch"]
-    assert nodes[analysis_branch]["parent_branch_recorded"] == parent["branch"]
+    assert branches["active_workspace_ref"] == analysis_branch
+    assert branches["research_head_ref"] == head["branch"]
+    assert nodes[analysis_branch]["active_workspace"] is True
+    assert nodes[head["branch"]]["research_head"] is True
+    assert nodes[analysis_branch]["parent_ref"] == "run/run-parent"
+    assert nodes[analysis_branch]["parent_branch_recorded"] == "run/run-parent"

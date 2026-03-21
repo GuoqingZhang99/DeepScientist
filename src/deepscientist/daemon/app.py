@@ -29,16 +29,24 @@ from ..channels.slack_socket import SlackSocketModeService
 from ..channels.telegram_polling import TelegramPollingService
 from ..channels.whatsapp_local_session import WhatsAppLocalSessionService
 from ..cloud import CloudLinkService
-from ..connector_profiles import PROFILEABLE_CONNECTOR_NAMES, connector_profile_label, list_connector_profiles, merge_connector_profile_config
+from ..connector_profiles import (
+    CONNECTOR_PROFILE_SPECS,
+    PROFILEABLE_CONNECTOR_NAMES,
+    connector_profile_label,
+    list_connector_profiles,
+    merge_connector_profile_config,
+    normalize_connector_config,
+)
 from ..connector_runtime import conversation_identity_key, format_conversation_id, normalize_conversation_id, parse_conversation_id
 from ..config import ConfigManager
+from ..config.models import SYSTEM_CONNECTOR_NAMES
 from ..home import repo_root
 from ..memory import MemoryService
 from ..network import urlopen_with_proxy as urlopen
 from ..latex_runtime import QuestLatexService
 from ..prompts import PromptBuilder
 from ..prompts.builder import STANDARD_SKILLS
-from ..qq_profiles import list_qq_profiles, merge_qq_profile_config
+from ..qq_profiles import list_qq_profiles, merge_qq_profile_config, normalize_qq_connector_config
 from ..quest import QuestService
 from ..runners import CodexRunner, RunRequest, get_runner_factory, register_builtin_runners
 from ..runtime_logs import JsonlLogger
@@ -73,7 +81,8 @@ class DaemonApp:
         self.daemon_managed_by = str(os.environ.get("DS_DAEMON_MANAGED_BY") or "manual").strip() or "manual"
         self.repo_root = repo_root()
         self.config_manager = ConfigManager(home)
-        self.runners_config = self.config_manager.load_named("runners")
+        self.runtime_config = self.config_manager.load_runtime_config()
+        self.runners_config = self.config_manager.load_runners_config()
         self.connectors_config = self.config_manager.load_named_normalized("connectors")
         self.skill_installer = SkillInstaller(self.repo_root, home)
         self.quest_service = QuestService(home, skill_installer=self.skill_installer)
@@ -83,7 +92,7 @@ class DaemonApp:
         self.bash_exec_service = BashExecService(home)
         self.team_service = SingleTeamService(home)
         self.cloud_service = CloudLinkService(home)
-        config = self.config_manager.load_named("config")
+        config = self.runtime_config
         skill_config = config.get("skills") if isinstance(config.get("skills"), dict) else {}
         self.skill_sync_summary = self.skill_installer.ensure_release_sync(
             installed_version=__version__,
@@ -138,9 +147,13 @@ class DaemonApp:
 
     def list_connector_statuses(self) -> list[dict[str, object]]:
         title_by_quest = self._quest_titles_by_id()
-        items = [self._augment_connector_status(channel.status(), title_by_quest=title_by_quest) for channel in self.channels.values()]
+        items = [
+            self._augment_connector_status(channel.status(), title_by_quest=title_by_quest)
+            for name, channel in self.channels.items()
+            if name == "local" or self._is_connector_system_enabled(name)
+        ]
         lingzhu_config = self.connectors_config.get("lingzhu")
-        if isinstance(lingzhu_config, dict):
+        if isinstance(lingzhu_config, dict) and self._is_connector_system_enabled("lingzhu"):
             items.append(self._augment_connector_status(self.config_manager.lingzhu_snapshot(lingzhu_config), title_by_quest=title_by_quest))
         return items
 
@@ -339,6 +352,8 @@ class DaemonApp:
                 continue
             if connector_name not in self.channels:
                 continue
+            if not self._is_connector_system_enabled(connector_name):
+                continue
             if parsed is not None and str(parsed.get("connector") or "").strip().lower() != connector_name:
                 continue
             normalized_by_connector[connector_name] = {
@@ -452,19 +467,203 @@ class DaemonApp:
                 b"Terminal attach token is invalid or expired.",
             )
         if runtime is None:
-            return Response(
-                409,
-                "Conflict",
-                Headers({"Content-Type": "text/plain; charset=utf-8"}),
-                b"Terminal runtime is no longer active.",
-            )
+            try:
+                session = self.bash_exec_service.get_session(attach_token.quest_root, attach_token.bash_id)
+            except FileNotFoundError:
+                return Response(
+                    404,
+                    "Not Found",
+                    Headers({"Content-Type": "text/plain; charset=utf-8"}),
+                    b"Terminal session is no longer available.",
+                )
+            status = str(session.get("status") or "").strip().lower()
+            kind = str(session.get("kind") or "").strip().lower()
+            if status in {"completed", "failed", "terminated"} or kind not in {"exec"}:
+                return Response(
+                    409,
+                    "Conflict",
+                    Headers({"Content-Type": "text/plain; charset=utf-8"}),
+                    b"Terminal runtime is no longer active.",
+                )
         setattr(connection, "_ds_terminal_attach_token", token)
         return None
+
+    def _handle_logged_terminal_attach_connection(
+        self,
+        connection: ServerConnection,
+        *,
+        attach_token,
+        send_lock: threading.Lock,
+    ) -> None:
+        session = self.bash_exec_service.get_session(attach_token.quest_root, attach_token.bash_id)
+        stop_event = threading.Event()
+
+        with send_lock:
+            connection.send(
+                json.dumps(
+                    {
+                        "type": "ready",
+                        "bash_id": attach_token.bash_id,
+                        "status": session.get("status"),
+                        "cwd": session.get("cwd"),
+                        "workdir": session.get("workdir"),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        def _encode_exec_log_entry(entry: dict[str, Any]) -> bytes:
+            line = str(entry.get("line") or "")
+            stream = str(entry.get("stream") or "").strip().lower()
+            if line.startswith("__DS_PROGRESS__") or line.startswith("__DS_BASH_STATUS__"):
+                return b""
+            if line.startswith("__DS_BASH_CR__"):
+                payload = line[len("__DS_BASH_CR__") :].lstrip()
+                return f"\r\x1b[K{payload}".encode("utf-8", errors="replace")
+            if stream in {"prompt", "partial"}:
+                return line.encode("utf-8", errors="replace")
+            if stream == "system" and not line.strip():
+                return b""
+            return f"{line}\n".encode("utf-8", errors="replace")
+
+        def _relay_output() -> None:
+            last_seq = 0
+            try:
+                entries, meta = self.bash_exec_service.read_log_entries(
+                    attach_token.quest_root,
+                    attach_token.bash_id,
+                    limit=2000,
+                    order="asc",
+                )
+                if isinstance(meta.get("latest_seq"), int):
+                    last_seq = int(meta["latest_seq"])
+                elif entries:
+                    last_seq = max(int(item.get("seq") or 0) for item in entries)
+                for entry in entries:
+                    payload = _encode_exec_log_entry(entry)
+                    if not payload:
+                        continue
+                    with send_lock:
+                        connection.send(payload)
+
+                while not stop_event.is_set():
+                    entries, _meta = self.bash_exec_service.read_log_entries(
+                        attach_token.quest_root,
+                        attach_token.bash_id,
+                        limit=400,
+                        after_seq=last_seq,
+                        order="asc",
+                    )
+                    for entry in entries:
+                        last_seq = max(last_seq, int(entry.get("seq") or 0))
+                        payload = _encode_exec_log_entry(entry)
+                        if not payload:
+                            continue
+                        with send_lock:
+                            connection.send(payload)
+                    current = self.bash_exec_service.get_session(
+                        attach_token.quest_root,
+                        attach_token.bash_id,
+                    )
+                    status = str(current.get("status") or "").strip().lower()
+                    if status in {"completed", "failed", "terminated"}:
+                        with send_lock:
+                            connection.send(
+                                json.dumps(
+                                    {
+                                        "type": "exit",
+                                        "bash_id": attach_token.bash_id,
+                                        "status": current.get("status"),
+                                        "exit_code": current.get("exit_code"),
+                                        "stop_reason": current.get("stop_reason"),
+                                        "finished_at": current.get("finished_at"),
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            )
+                        return
+                    time.sleep(TERMINAL_STREAM_IDLE_SLEEP_SECONDS)
+            except Exception as exc:
+                if stop_event.is_set():
+                    return
+                try:
+                    with send_lock:
+                        connection.send(
+                            json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False)
+                        )
+                except Exception:
+                    pass
+
+        relay_thread = threading.Thread(
+            target=_relay_output,
+            daemon=True,
+            name=f"exec-attach-{attach_token.bash_id}",
+        )
+        relay_thread.start()
+        try:
+            while True:
+                try:
+                    message = connection.recv()
+                except ConnectionClosed:
+                    break
+                if message is None:
+                    break
+                if isinstance(message, bytes):
+                    self.bash_exec_service.append_terminal_input(
+                        attach_token.quest_root,
+                        attach_token.bash_id,
+                        data=message.decode("utf-8", errors="replace"),
+                        source="web-pty",
+                    )
+                    continue
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                message_type = str(payload.get("type") or "").strip().lower()
+                if message_type == "input":
+                    self.bash_exec_service.append_terminal_input(
+                        attach_token.quest_root,
+                        attach_token.bash_id,
+                        data=str(payload.get("data") or ""),
+                        source="web-pty",
+                    )
+                    continue
+                if message_type == "binary_input":
+                    raw = str(payload.get("data") or "")
+                    if raw:
+                        self.bash_exec_service.append_terminal_input(
+                            attach_token.quest_root,
+                            attach_token.bash_id,
+                            data=base64.b64decode(raw).decode("utf-8", errors="replace"),
+                            source="web-pty",
+                        )
+                    continue
+                if message_type == "resize":
+                    cols = int(payload.get("cols") or 0)
+                    rows = int(payload.get("rows") or 0)
+                    self.bash_exec_service.resize_terminal_session(
+                        attach_token.quest_root,
+                        attach_token.bash_id,
+                        cols=cols,
+                        rows=rows,
+                    )
+                    continue
+                if message_type == "detach":
+                    break
+                if message_type == "ping":
+                    with send_lock:
+                        connection.send(json.dumps({"type": "pong"}, ensure_ascii=False))
+        finally:
+            stop_event.set()
+            relay_thread.join(timeout=1)
 
     def _handle_terminal_attach_connection(self, connection: ServerConnection) -> None:
         token_value = str(getattr(connection, "_ds_terminal_attach_token", "") or "").strip()
         attach_token, runtime = self.bash_exec_service.consume_terminal_attach_token(token_value)
-        if attach_token is None or runtime is None:
+        if attach_token is None:
             try:
                 connection.close(code=1011, reason="terminal_attach_unavailable")
             except Exception:
@@ -472,6 +671,31 @@ class DaemonApp:
             return
 
         send_lock = threading.Lock()
+        if runtime is None:
+            try:
+                self._handle_logged_terminal_attach_connection(
+                    connection,
+                    attach_token=attach_token,
+                    send_lock=send_lock,
+                )
+            except Exception as exc:
+                try:
+                    with send_lock:
+                        connection.send(
+                            json.dumps(
+                                {"type": "error", "message": str(exc)},
+                                ensure_ascii=False,
+                            )
+                        )
+                except Exception:
+                    pass
+            finally:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+            return
+
         client = TerminalClient(
             client_id=generate_id("tclient"),
             send_text=connection.send,
@@ -628,6 +852,43 @@ class DaemonApp:
         factory = get_channel_factory(name)
         return factory(home=self.home, app=self, config=self.connectors_config.get(name, {}))
 
+    def _system_enabled_connector_names(self) -> set[str]:
+        connectors = self.runtime_config.get("connectors") if isinstance(self.runtime_config.get("connectors"), dict) else {}
+        system_enabled = connectors.get("system_enabled") if isinstance(connectors.get("system_enabled"), dict) else {}
+        return {
+            name
+            for name in SYSTEM_CONNECTOR_NAMES
+            if bool(system_enabled.get(name, name == "qq"))
+        }
+
+    def _is_connector_system_enabled(self, connector_name: str) -> bool:
+        normalized = str(connector_name or "").strip().lower()
+        if normalized == "local":
+            return True
+        enabled = self._system_enabled_connector_names()
+        if normalized in enabled:
+            return True
+        if normalized in SYSTEM_CONNECTOR_NAMES:
+            return False
+        return True
+
+    def reload_runtime_config(self, *, restart_background: bool = True) -> dict[str, object]:
+        previous_enabled = self._system_enabled_connector_names()
+        self.runtime_config = self.config_manager.load_runtime_config()
+        logging_config = self.runtime_config.get("logging") if isinstance(self.runtime_config.get("logging"), dict) else {}
+        self.logger.level = str(logging_config.get("level") or "info").strip().lower() or "info"
+        enabled = self._system_enabled_connector_names()
+        restarted = False
+        if restart_background and self._server is not None and enabled != previous_enabled:
+            self._stop_background_connectors()
+            self._start_background_connectors()
+            restarted = True
+        return {
+            "ok": True,
+            "system_enabled_connectors": sorted(enabled),
+            "restarted_background_connectors": restarted,
+        }
+
     def reload_connectors_config(self, *, restart_background: bool = True) -> dict[str, object]:
         self.connectors_config = self.config_manager.load_named_normalized("connectors")
         register_builtin_channels(home=self.home, connectors_config=self.connectors_config)
@@ -643,13 +904,32 @@ class DaemonApp:
         return {
             "ok": True,
             "connectors": sorted(
-                name for name, config in self.connectors_config.items() if not str(name).startswith("_") and isinstance(config, dict)
+                name
+                for name, config in self.connectors_config.items()
+                if not str(name).startswith("_")
+                and isinstance(config, dict)
+                and self._is_connector_system_enabled(str(name))
             ),
         }
 
+    def reload_runners_config(self) -> dict[str, object]:
+        self.runners_config = self.config_manager.load_runners_config()
+        codex_config = self.runners_config.get("codex", {})
+        if isinstance(codex_config, dict):
+            self.codex_runner.binary = str(codex_config.get("binary") or "codex")
+        return {
+            "ok": True,
+            "runners": sorted(name for name, config in self.runners_config.items() if isinstance(config, dict)),
+            "codex": {
+                "binary": self.codex_runner.binary,
+                "approval_policy": codex_config.get("approval_policy") if isinstance(codex_config, dict) else None,
+                "sandbox_mode": codex_config.get("sandbox_mode") if isinstance(codex_config, dict) else None,
+                "mcp_tool_timeout_sec": codex_config.get("mcp_tool_timeout_sec") if isinstance(codex_config, dict) else None,
+            },
+        }
+
     def _preferred_locale(self) -> str:
-        config = self.config_manager.load_named("config")
-        return str(config.get("default_locale") or "en-US").lower()
+        return str(self.runtime_config.get("default_locale") or "en-US").lower()
 
     def _polite_copy(self, *, zh: str, en: str) -> str:
         return zh if self._preferred_locale().startswith("zh") else en
@@ -718,7 +998,7 @@ class DaemonApp:
         exclude_conversation_id: str | None = None,
         preferred_connector_conversation_id: str | None = None,
         requested_connector_bindings: list[dict[str, object]] | None = None,
-        force_connector_rebind: bool = False,
+        force_connector_rebind: bool = True,
         requested_baseline_ref: dict[str, object] | None = None,
         startup_contract: dict[str, object] | None = None,
     ) -> dict:
@@ -2090,6 +2370,210 @@ class DaemonApp:
         channel = self._channel_with_bindings(connector_name)
         return channel.list_bindings()
 
+    def delete_connector_profile(self, connector_name: str, profile_id: str) -> dict | tuple[int, dict]:
+        normalized_connector = str(connector_name or "").strip().lower()
+        normalized_profile_id = str(profile_id or "").strip()
+        if not normalized_connector:
+            return 400, {"ok": False, "message": "Connector name is required."}
+        if not normalized_profile_id:
+            return 400, {"ok": False, "message": "Profile id is required."}
+        if normalized_connector != "qq" and normalized_connector not in PROFILEABLE_CONNECTOR_NAMES:
+            return 400, {"ok": False, "message": f"Connector `{normalized_connector}` does not support profile deletion."}
+
+        connectors = self.config_manager.load_named_normalized("connectors")
+        connector_config = connectors.get(normalized_connector)
+        if not isinstance(connector_config, dict):
+            return 404, {"ok": False, "message": f"Unknown connector `{normalized_connector}`."}
+
+        if normalized_connector == "qq":
+            profiles = list_qq_profiles(connector_config)
+        else:
+            profiles = list_connector_profiles(normalized_connector, connector_config)
+        if not profiles:
+            return 404, {"ok": False, "message": f"Connector `{normalized_connector}` has no configured profiles."}
+
+        remaining_profiles = [
+            dict(item)
+            for item in profiles
+            if str(item.get("profile_id") or "").strip() != normalized_profile_id
+        ]
+        if len(remaining_profiles) == len(profiles):
+            return 404, {
+                "ok": False,
+                "message": f"Profile `{normalized_profile_id}` was not found under connector `{normalized_connector}`.",
+            }
+
+        deleting_last_profile = len(remaining_profiles) == 0
+        related_conversations = self._connector_profile_bound_conversations(
+            normalized_connector,
+            normalized_profile_id,
+            include_all_if_single_profile=deleting_last_profile,
+        )
+        for conversation_id in related_conversations:
+            self._unbind_connector_conversation_everywhere(normalized_connector, conversation_id)
+
+        next_connector_config = dict(connector_config)
+        next_connector_config["profiles"] = remaining_profiles
+        if deleting_last_profile:
+            next_connector_config["enabled"] = False
+            if normalized_connector == "qq":
+                for key in ("app_id", "app_secret", "app_secret_env", "main_chat_id"):
+                    next_connector_config[key] = None
+            else:
+                profile_spec = CONNECTOR_PROFILE_SPECS.get(normalized_connector, {})
+                for key in profile_spec.get("profile_fields", ()):
+                    if key in {"enabled", "transport", "mode"}:
+                        continue
+                    next_connector_config[key] = None
+        if normalized_connector == "qq":
+            connectors[normalized_connector] = normalize_qq_connector_config(next_connector_config)
+        else:
+            connectors[normalized_connector] = normalize_connector_config(normalized_connector, next_connector_config)
+        save_result = self.config_manager.save_named_payload("connectors", connectors)
+        if not bool(save_result.get("ok")):
+            return 409, {
+                "ok": False,
+                "message": "Failed to persist connector profile deletion.",
+                "errors": save_result.get("errors") or [],
+                "warnings": save_result.get("warnings") or [],
+            }
+
+        self._cleanup_connector_profile_runtime(
+            normalized_connector,
+            normalized_profile_id,
+            clear_all=deleting_last_profile,
+        )
+        self.reload_connectors_config()
+        snapshot = next(
+            (item for item in self.list_connector_statuses() if str(item.get("name") or "").strip().lower() == normalized_connector),
+            None,
+        )
+        return {
+            "ok": True,
+            "connector": normalized_connector,
+            "profile_id": normalized_profile_id,
+            "deleted": True,
+            "deleted_bound_conversations": related_conversations,
+            "remaining_profile_count": len(remaining_profiles),
+            "snapshot": snapshot,
+        }
+
+    def _connector_profile_bound_conversations(
+        self,
+        connector_name: str,
+        profile_id: str,
+        *,
+        include_all_if_single_profile: bool = False,
+    ) -> list[str]:
+        normalized_connector = str(connector_name or "").strip().lower()
+        normalized_profile_id = str(profile_id or "").strip()
+        if not normalized_connector or not normalized_profile_id:
+            return []
+        try:
+            channel = self._channel_with_bindings(normalized_connector)
+        except Exception:
+            return []
+        conversations: list[str] = []
+        seen: set[str] = set()
+        for item in channel.list_bindings():
+            if not isinstance(item, dict):
+                continue
+            conversation_id = str(item.get("conversation_id") or "").strip()
+            if not conversation_id:
+                continue
+            item_profile_id = str(item.get("profile_id") or "").strip()
+            if not include_all_if_single_profile and item_profile_id != normalized_profile_id:
+                continue
+            identity = conversation_identity_key(conversation_id)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            conversations.append(conversation_id)
+        return conversations
+
+    def _unbind_connector_conversation_everywhere(self, connector_name: str, conversation_id: str) -> bool:
+        normalized_connector = str(connector_name or "").strip().lower()
+        normalized_conversation_id = normalize_conversation_id(conversation_id)
+        if not normalized_connector or not normalized_conversation_id:
+            return False
+        try:
+            channel = self._channel_with_bindings(normalized_connector)
+        except Exception:
+            return False
+        bound_quest_id = str(channel.resolve_bound_quest(normalized_conversation_id) or "").strip() or None
+        removed = channel.unbind_conversation(
+            normalized_conversation_id,
+            quest_id=bound_quest_id,
+        )
+        if bound_quest_id:
+            self.sessions.unbind(bound_quest_id, normalized_conversation_id)
+            self.quest_service.unbind_source(bound_quest_id, normalized_conversation_id)
+        return removed
+
+    def _cleanup_connector_profile_runtime(
+        self,
+        connector_name: str,
+        profile_id: str,
+        *,
+        clear_all: bool = False,
+    ) -> None:
+        normalized_connector = str(connector_name or "").strip().lower()
+        normalized_profile_id = str(profile_id or "").strip()
+        if not normalized_connector or not normalized_profile_id:
+            return
+        connector_root = self.home / "logs" / "connectors" / normalized_connector
+        profile_root = connector_root / "profiles" / normalized_profile_id
+        shutil.rmtree(profile_root, ignore_errors=True)
+
+        def matches_profile(payload: object, *, conversation_id: str | None = None) -> bool:
+            if clear_all:
+                return True
+            item = payload if isinstance(payload, dict) else {}
+            item_profile_id = str(item.get("profile_id") or "").strip() if isinstance(item, dict) else ""
+            if item_profile_id:
+                return item_profile_id == normalized_profile_id
+            parsed = parse_conversation_id(conversation_id or "")
+            return str((parsed or {}).get("profile_id") or "").strip() == normalized_profile_id
+
+        bindings_path = connector_root / "bindings.json"
+        bindings_payload = read_json(bindings_path, {"bindings": {}})
+        binding_map = bindings_payload.get("bindings")
+        if isinstance(binding_map, dict):
+            filtered_bindings = {
+                key: value
+                for key, value in binding_map.items()
+                if not matches_profile(value, conversation_id=str(key))
+            }
+            bindings_payload["bindings"] = filtered_bindings
+            write_json(bindings_path, bindings_payload)
+
+        state_path = connector_root / "state.json"
+        state_payload = read_json(state_path, {})
+        if isinstance(state_payload, dict):
+            for key in ("recent_conversations", "known_targets"):
+                raw_items = state_payload.get(key)
+                if isinstance(raw_items, list):
+                    state_payload[key] = [
+                        item
+                        for item in raw_items
+                        if not matches_profile(
+                            item,
+                            conversation_id=str((item or {}).get("conversation_id") or "") if isinstance(item, dict) else "",
+                        )
+                    ]
+            if clear_all:
+                state_payload["last_conversation_id"] = None
+            else:
+                last_conversation_id = str(state_payload.get("last_conversation_id") or "").strip()
+                if last_conversation_id and matches_profile({}, conversation_id=last_conversation_id):
+                    state_payload["last_conversation_id"] = None
+            write_json(state_path, state_payload)
+
+        if clear_all:
+            runtime_path = connector_root / "runtime.json"
+            if runtime_path.exists():
+                write_json(runtime_path, {})
+
     def preview_connector_binding_conflicts(
         self,
         requested_bindings: list[dict[str, object]] | None,
@@ -2439,6 +2923,13 @@ class DaemonApp:
         }
 
     def handle_connector_inbound(self, connector_name: str, body: dict) -> dict:
+        if not self._is_connector_system_enabled(connector_name):
+            return {
+                "ok": True,
+                "accepted": False,
+                "reason": "system_disabled",
+                "message": f"Connector `{connector_name}` is disabled at the system level.",
+            }
         channel = self._channel_with_bindings(connector_name)
         ingested = channel.ingest(body)
         if not ingested.get("accepted", False):
@@ -3103,6 +3594,8 @@ class DaemonApp:
         for connector_name, channel in self.channels.items():
             if connector_name == "local":
                 continue
+            if not self._is_connector_system_enabled(connector_name):
+                continue
             connector_config = self.connectors_config.get(connector_name, {})
             if not isinstance(connector_config, dict):
                 continue
@@ -3296,6 +3789,8 @@ class DaemonApp:
         }
 
     def _maybe_auto_bind_connector_conversation(self, connector_name: str, conversation_id: str) -> dict | None:
+        if not self._is_connector_system_enabled(connector_name):
+            return None
         connector_config = self.connectors_config.get(connector_name, {})
         if not isinstance(connector_config, dict):
             return None
@@ -3519,6 +4014,8 @@ class DaemonApp:
         )
 
     def _profiled_connector_configs(self, connector_name: str) -> list[tuple[str, str | None, dict[str, Any]]]:
+        if not self._is_connector_system_enabled(connector_name):
+            return []
         connector_config = self.connectors_config.get(connector_name, {})
         if not isinstance(connector_config, dict):
             return []
@@ -3536,7 +4033,7 @@ class DaemonApp:
 
     def _start_background_connectors(self) -> None:
         qq_config = self.connectors_config.get("qq", {})
-        if isinstance(qq_config, dict) and not self._qq_gateways:
+        if self._is_connector_system_enabled("qq") and isinstance(qq_config, dict) and not self._qq_gateways:
             profiles = list_qq_profiles(qq_config)
             encode_profile_id = len(profiles) > 1
             for profile in profiles:
@@ -3556,7 +4053,7 @@ class DaemonApp:
                 )
                 if gateway.start():
                     self._qq_gateways[profile_id] = gateway
-        if not self._telegram_polling:
+        if self._is_connector_system_enabled("telegram") and not self._telegram_polling:
             for profile_id, profile_label, profile_config in self._profiled_connector_configs("telegram"):
                 polling = TelegramPollingService(
                     home=self.home,
@@ -3574,7 +4071,7 @@ class DaemonApp:
                 )
                 if polling.start():
                     self._telegram_polling[profile_id] = polling
-        if not self._slack_socket:
+        if self._is_connector_system_enabled("slack") and not self._slack_socket:
             for profile_id, profile_label, profile_config in self._profiled_connector_configs("slack"):
                 slack = SlackSocketModeService(
                     home=self.home,
@@ -3592,7 +4089,7 @@ class DaemonApp:
                 )
                 if slack.start():
                     self._slack_socket[profile_id] = slack
-        if not self._discord_gateway:
+        if self._is_connector_system_enabled("discord") and not self._discord_gateway:
             for profile_id, profile_label, profile_config in self._profiled_connector_configs("discord"):
                 discord = DiscordGatewayService(
                     home=self.home,
@@ -3610,7 +4107,7 @@ class DaemonApp:
                 )
                 if discord.start():
                     self._discord_gateway[profile_id] = discord
-        if not self._feishu_long_connection:
+        if self._is_connector_system_enabled("feishu") and not self._feishu_long_connection:
             for profile_id, profile_label, profile_config in self._profiled_connector_configs("feishu"):
                 feishu = FeishuLongConnectionService(
                     home=self.home,
@@ -3628,7 +4125,7 @@ class DaemonApp:
                 )
                 if feishu.start():
                     self._feishu_long_connection[profile_id] = feishu
-        if not self._whatsapp_local_session:
+        if self._is_connector_system_enabled("whatsapp") and not self._whatsapp_local_session:
             for profile_id, profile_label, profile_config in self._profiled_connector_configs("whatsapp"):
                 whatsapp = WhatsAppLocalSessionService(
                     home=self.home,
@@ -4259,6 +4756,7 @@ class DaemonApp:
                         "git_commit",
                         "git_diff_file",
                         "git_commit_file",
+                        "file_change_diff",
                         "explorer",
                         "quest_search",
                         "node_traces",

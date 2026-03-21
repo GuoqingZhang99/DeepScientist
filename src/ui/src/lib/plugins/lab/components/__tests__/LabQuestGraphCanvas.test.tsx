@@ -179,6 +179,70 @@ describe('LabQuestGraphCanvas', () => {
     expect(screen.getByText('Longer warmup stabilizes the branch.')).toBeInTheDocument()
   })
 
+  it('switches branch nodes into metric mode and keeps baseline metrics visible', async () => {
+    const fetchGraph = jest.fn().mockResolvedValue({
+      view: 'branch',
+      nodes: [
+        {
+          node_id: 'baseline-root',
+          branch_name: 'baseline',
+          node_kind: 'baseline_root',
+          target_label: 'Accepted Baseline',
+          status: 'confirmed',
+          created_at: '2025-01-01T00:00:00Z',
+          metrics_json: { acc: 0.8 },
+          node_summary: {
+            last_reply: 'Baseline locked.',
+            latest_metrics: { acc: 0.8 },
+          },
+        },
+        {
+          node_id: 'branch-1',
+          branch_name: 'main',
+          branch_no: '001',
+          idea_title: 'Branch Alpha',
+          created_at: '2025-01-02T00:00:00Z',
+          metrics_json: { acc: 0.86 },
+          node_summary: {
+            last_reply: 'Main branch beats baseline.',
+            metrics_delta: { acc: 0.06 },
+          },
+        },
+      ],
+      edges: [],
+      head_branch: 'main',
+      layout_json: {},
+      metric_catalog: [{ key: 'acc', label: 'Accuracy', direction: 'higher', importance: 1 }],
+    })
+    const fetchEvents = jest.fn().mockResolvedValue({ items: [], next_cursor: null })
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LabQuestGraphCanvas
+          projectId="project-1"
+          questId="quest-1"
+          fetchGraph={fetchGraph}
+          fetchEvents={fetchEvents}
+        />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(fetchGraph).toHaveBeenCalled()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Metric' }))
+
+    expect(screen.getByText('0.8000')).toBeInTheDocument()
+    expect(screen.getByText('0.8600')).toBeInTheDocument()
+    expect(screen.getByText('Baseline reference')).toBeInTheDocument()
+    expect(screen.getByText('Δ +0.0600 vs baseline')).toBeInTheDocument()
+  })
+
   it('keeps branch list clicks as selection-only without opening the stage page', async () => {
     const fetchGraph = jest.fn().mockResolvedValue({
       view: 'branch',

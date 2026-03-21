@@ -10,6 +10,13 @@ from .shared import slugify
 PROFILEABLE_CONNECTOR_NAMES = ("telegram", "discord", "slack", "feishu", "whatsapp")
 
 
+def _normalize_secret_pair(payload: dict[str, Any], direct_key: str, env_key: str) -> None:
+    direct = _as_text(payload.get(direct_key))
+    env_name = _as_text(payload.get(env_key))
+    payload[direct_key] = direct
+    payload[env_key] = None if direct else env_name
+
+
 CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
     "telegram": {
         "profile_id_prefix": "telegram-profile",
@@ -35,7 +42,7 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
             "transport": "polling",
             "bot_name": "DeepScientist",
             "bot_token": None,
-            "bot_token_env": "TELEGRAM_BOT_TOKEN",
+            "bot_token_env": None,
         },
         "profile_fields": (
             "enabled",
@@ -47,6 +54,7 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
         "migration_keys": ("bot_token",),
         "label_fields": ("bot_name",),
         "id_fields": ("bot_name",),
+        "secret_pairs": (("bot_token", "bot_token_env"),),
     },
     "discord": {
         "profile_id_prefix": "discord-profile",
@@ -74,7 +82,7 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
             "transport": "gateway",
             "bot_name": "DeepScientist",
             "bot_token": None,
-            "bot_token_env": "DISCORD_BOT_TOKEN",
+            "bot_token_env": None,
             "application_id": None,
         },
         "profile_fields": (
@@ -88,6 +96,7 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
         "migration_keys": ("bot_token", "application_id"),
         "label_fields": ("bot_name", "application_id"),
         "id_fields": ("application_id", "bot_name"),
+        "secret_pairs": (("bot_token", "bot_token_env"),),
     },
     "slack": {
         "profile_id_prefix": "slack-profile",
@@ -116,10 +125,10 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
             "transport": "socket_mode",
             "bot_name": "DeepScientist",
             "bot_token": None,
-            "bot_token_env": "SLACK_BOT_TOKEN",
+            "bot_token_env": None,
             "bot_user_id": None,
             "app_token": None,
-            "app_token_env": "SLACK_APP_TOKEN",
+            "app_token_env": None,
         },
         "profile_fields": (
             "enabled",
@@ -134,6 +143,10 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
         "migration_keys": ("bot_token", "bot_user_id", "app_token"),
         "label_fields": ("bot_name", "bot_user_id"),
         "id_fields": ("bot_user_id", "bot_name"),
+        "secret_pairs": (
+            ("bot_token", "bot_token_env"),
+            ("app_token", "app_token_env"),
+        ),
     },
     "feishu": {
         "profile_id_prefix": "feishu-profile",
@@ -162,7 +175,7 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
             "bot_name": "DeepScientist",
             "app_id": None,
             "app_secret": None,
-            "app_secret_env": "FEISHU_APP_SECRET",
+            "app_secret_env": None,
             "api_base_url": "https://open.feishu.cn",
         },
         "profile_fields": (
@@ -177,6 +190,7 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
         "migration_keys": ("app_id", "app_secret"),
         "label_fields": ("bot_name", "app_id"),
         "id_fields": ("app_id", "bot_name"),
+        "secret_pairs": (("app_secret", "app_secret_env"),),
     },
     "whatsapp": {
         "profile_id_prefix": "whatsapp-profile",
@@ -213,6 +227,7 @@ CONNECTOR_PROFILE_SPECS: dict[str, dict[str, Any]] = {
         "migration_keys": ("session_dir",),
         "label_fields": ("bot_name",),
         "id_fields": ("bot_name",),
+        "secret_pairs": (),
     },
 }
 
@@ -270,10 +285,17 @@ def normalize_connector_config(connector_name: str, config: dict[str, Any] | Non
         if key in payload
     }
     shared["profiles"] = []
+    for direct_key, env_key in spec.get("secret_pairs", ()):
+        _normalize_secret_pair(shared, direct_key, env_key)
 
     raw_profiles = payload.get("profiles")
     items = list(raw_profiles) if isinstance(raw_profiles, list) else []
-    if not items and any(_as_text(payload.get(key)) for key in spec["migration_keys"]):
+    has_direct_migration_value = any(_as_text(payload.get(key)) for key in spec["migration_keys"])
+    has_env_only_secret = bool(payload.get("enabled")) and any(
+        _as_text(payload.get(env_key))
+        for _, env_key in spec.get("secret_pairs", ())
+    )
+    if not items and (has_direct_migration_value or has_env_only_secret):
         items = [{key: payload.get(key) for key in spec["profile_fields"]}]
 
     used_ids: set[str] = set()
@@ -297,6 +319,8 @@ def normalize_connector_config(connector_name: str, config: dict[str, Any] | Non
         current["transport"] = infer_connector_transport(connector_name, current)
         if "mode" in spec["profile_defaults"] or current.get("mode") is not None:
             current["mode"] = _as_text(current.get("mode")) or str(spec["profile_defaults"].get("mode") or "")
+        for direct_key, env_key in spec.get("secret_pairs", ()):
+            _normalize_secret_pair(current, direct_key, env_key)
         current["profile_id"] = _unique_profile_id(
             _profile_seed(connector_name, current, index=index),
             prefix=str(spec["profile_id_prefix"]),
@@ -309,6 +333,10 @@ def normalize_connector_config(connector_name: str, config: dict[str, Any] | Non
     if len(profiles) == 1:
         for key in spec["profile_fields"]:
             shared[key] = profiles[0].get(key)
+    elif len(profiles) > 1:
+        for direct_key, env_key in spec.get("secret_pairs", ()):
+            shared[direct_key] = None
+            shared[env_key] = None
     return shared
 
 

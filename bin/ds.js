@@ -38,6 +38,15 @@ const UPDATE_CHECK_TTL_MS = 12 * 60 * 60 * 1000;
 
 const optionsWithValues = new Set(['--home', '--host', '--port', '--quest-id', '--mode', '--proxy']);
 
+function buildCodexOverrideEnv({ yolo = false } = {}) {
+  if (!yolo) {
+    return {};
+  }
+  return {
+    DEEPSCIENTIST_CODEX_YOLO: '1',
+  };
+}
+
 function printLauncherHelp() {
   console.log(`DeepScientist launcher
 
@@ -48,6 +57,7 @@ Usage:
   ds update --yes
   ds migrate /data/DeepScientist
   ds --here
+  ds --yolo --port 20999 --here
   ds --here doctor
   ds --tui
   ds --both
@@ -73,6 +83,7 @@ Launcher flags:
   --home <path>         Use a custom DeepScientist home
   --here                Use the current working directory as DeepScientist home
   --proxy <url>         Use an outbound HTTP/WS proxy for npm and Python runtime traffic
+  --yolo                Run Codex in YOLO mode: approval_policy=never and sandbox_mode=danger-full-access
   --quest-id <id>       Open the TUI on one quest directly
 
 Update:
@@ -209,6 +220,17 @@ function compareVersions(left, right) {
   return 0;
 }
 
+function hasActiveBusyUpdate(state, currentVersion) {
+  if (!state || !state.busy) {
+    return false;
+  }
+  const targetVersion = normalizeVersion(state.target_version || state.latest_version || '');
+  if (!targetVersion) {
+    return false;
+  }
+  return compareVersions(targetVersion, currentVersion) > 0;
+}
+
 function detectInstallMode(rootPath = repoRoot) {
   const normalized = String(rootPath || '');
   return normalized.includes(`${path.sep}node_modules${path.sep}`) ? 'npm-package' : 'source-checkout';
@@ -315,6 +337,8 @@ function buildUpdateStatus(home, statePatch = {}) {
   const support = updateSupportSummary(installMode, npmBinary, launcherPath);
   const currentVersion = normalizeVersion(state.current_version || packageJson.version);
   const latestVersion = normalizeVersion(state.latest_version || '');
+  const targetVersion = normalizeVersion(state.target_version || '');
+  const busy = hasActiveBusyUpdate(state, currentVersion);
   const promptedVersion = normalizeVersion(state.last_prompted_version || '');
   const updateAvailable = Boolean(latestVersion) && compareVersions(latestVersion, currentVersion) > 0;
   const skippedVersion = normalizeVersion(state.last_skipped_version || '');
@@ -322,7 +346,7 @@ function buildUpdateStatus(home, statePatch = {}) {
   const skippedCurrentTarget = Boolean(updateAvailable && skippedVersion && skippedVersion === latestVersion);
   const promptRecommended =
     Boolean(updateAvailable)
-    && !Boolean(state.busy)
+    && !busy
     && !promptedCurrentTarget
     && !skippedCurrentTarget
     ;
@@ -337,7 +361,7 @@ function buildUpdateStatus(home, statePatch = {}) {
     latest_version: latestVersion || null,
     update_available: updateAvailable,
     prompt_recommended: promptRecommended,
-    busy: Boolean(state.busy),
+    busy,
     last_checked_at: state.last_checked_at || null,
     last_check_error: state.last_check_error || null,
     last_prompted_at: state.last_prompted_at || null,
@@ -347,7 +371,7 @@ function buildUpdateStatus(home, statePatch = {}) {
     last_update_started_at: state.last_update_started_at || null,
     last_update_finished_at: state.last_update_finished_at || null,
     last_update_result: state.last_update_result || null,
-    target_version: normalizeVersion(state.target_version || '') || null,
+    target_version: busy ? targetVersion || latestVersion || null : null,
     manual_update_command: updateManualCommand(installMode),
     reason: support.reason,
   };
@@ -360,8 +384,16 @@ function checkForUpdates(home, { force = false, timeoutMs = 3500 } = {}) {
   const npmBinary = resolveNpmBinary();
   const launcherPath = resolveLauncherPath();
   const support = updateSupportSummary(installMode, npmBinary, launcherPath);
+  const existingBusyIsStale = Boolean(existing.busy) && !hasActiveBusyUpdate(existing, currentVersion);
 
   if (!force && existing.current_version === currentVersion && !isExpired(existing.last_checked_at, UPDATE_CHECK_TTL_MS)) {
+    if (existingBusyIsStale) {
+      const repaired = mergeUpdateState(home, {
+        busy: false,
+        target_version: null,
+      });
+      return buildUpdateStatus(home, repaired);
+    }
     return buildUpdateStatus(home);
   }
 
@@ -381,6 +413,13 @@ function checkForUpdates(home, { force = false, timeoutMs = 3500 } = {}) {
     last_checked_at: new Date().toISOString(),
     last_check_error: probe.ok ? null : probe.error,
   });
+  if (Boolean(patched.busy) && !hasActiveBusyUpdate(patched, currentVersion)) {
+    const repaired = mergeUpdateState(home, {
+      busy: false,
+      target_version: null,
+    });
+    return buildUpdateStatus(home, repaired);
+  }
   return buildUpdateStatus(home, patched);
 }
 
@@ -581,13 +620,14 @@ function pythonVersionText(probe) {
   return version;
 }
 
-function renderLaunchHints({ home, url, bindUrl, pythonSelection }) {
+function renderLaunchHints({ home, url, bindUrl, pythonSelection, yolo }) {
   const runtimeRows = [
     ['Version', packageJson.version],
     ['Home', truncateMiddle(home)],
     ['Browser URL', url],
     ['Bind URL', bindUrl],
     ['Python', truncateMiddle(pythonVersionText(pythonSelection))],
+    ['Codex mode', yolo ? 'YOLO (never + danger-full-access)' : 'Default (on-request + workspace-write)'],
   ];
   if (pythonSelection && pythonSelection.sourceLabel) {
     runtimeRows.push(['Python source', pythonSelection.sourceLabel]);
@@ -598,6 +638,7 @@ function renderLaunchHints({ home, url, bindUrl, pythonSelection }) {
 
   console.log(colorize('\u001B[1;38;5;39m', 'Quick Flags'));
   renderKeyValueRows([
+    ['ds --yolo --port 20999 --here', 'Start in the current directory with YOLO Codex access'],
     ['ds --port 21000', 'Change the web port'],
     ['ds --host 0.0.0.0 --port 21000', 'Bind on all interfaces'],
     ['ds --here', 'Use the current directory as home'],
@@ -622,6 +663,7 @@ function printLaunchCard({
   daemonOnly,
   home,
   pythonSelection,
+  yolo,
 }) {
   const width = Math.max(72, Math.min(process.stdout.columns || 100, 108));
   const divider = colorize('\u001B[38;5;245m', '─'.repeat(Math.max(36, width - 6)));
@@ -680,7 +722,7 @@ function printLaunchCard({
   console.log(centerText('Run ds --stop to stop the managed daemon.', width));
   console.log(centerText('Need to move this installation later? Use ds migrate /new/path.', width));
   console.log('');
-  renderLaunchHints({ home, url, bindUrl, pythonSelection });
+  renderLaunchHints({ home, url, bindUrl, pythonSelection, yolo });
 }
 
 function escapeHtml(value) {
@@ -803,7 +845,7 @@ function writeCodexPreflightReport(home, probe) {
   };
 }
 
-function readCodexBootstrapState(home, runtimePython) {
+function readCodexBootstrapState(home, runtimePython, envOverrides = {}) {
   const snippet = [
     'import json, pathlib, sys',
     'from deepscientist.config import ConfigManager',
@@ -811,7 +853,14 @@ function readCodexBootstrapState(home, runtimePython) {
     'manager = ConfigManager(home)',
     'print(json.dumps(manager.codex_bootstrap_state(), ensure_ascii=False))',
   ].join('\n');
-  const result = runSync(runtimePython, ['-c', snippet, home], { capture: true, allowFailure: true });
+  const result = runSync(runtimePython, ['-c', snippet, home], {
+    capture: true,
+    allowFailure: true,
+    env: {
+      ...process.env,
+      ...envOverrides,
+    },
+  });
   if (result.status !== 0) {
     return { codex_ready: false, codex_last_checked_at: null, codex_last_result: {} };
   }
@@ -822,7 +871,7 @@ function readCodexBootstrapState(home, runtimePython) {
   }
 }
 
-function probeCodexBootstrap(home, runtimePython) {
+function probeCodexBootstrap(home, runtimePython, envOverrides = {}) {
   const snippet = [
     'import json, pathlib, sys',
     'from deepscientist.config import ConfigManager',
@@ -830,7 +879,14 @@ function probeCodexBootstrap(home, runtimePython) {
     'manager = ConfigManager(home)',
     'print(json.dumps(manager.probe_codex_bootstrap(persist=True), ensure_ascii=False))',
   ].join('\n');
-  const result = runSync(runtimePython, ['-c', snippet, home], { capture: true, allowFailure: true });
+  const result = runSync(runtimePython, ['-c', snippet, home], {
+    capture: true,
+    allowFailure: true,
+    env: {
+      ...process.env,
+      ...envOverrides,
+    },
+  });
   let payload = null;
   try {
     payload = JSON.parse(result.stdout || '{}');
@@ -881,6 +937,7 @@ function parseLauncherArgs(argv) {
   let status = false;
   let daemonOnly = false;
   let skipUpdateCheck = false;
+  let yolo = false;
 
   if (args[0] === 'ui') {
     args.shift();
@@ -899,6 +956,7 @@ function parseLauncherArgs(argv) {
     else if (arg === '--open-browser') openBrowser = true;
     else if (arg === '--daemon-only') daemonOnly = true;
     else if (arg === '--skip-update-check') skipUpdateCheck = true;
+    else if (arg === '--yolo') yolo = true;
     else if (arg === '--host' && args[index + 1]) host = args[++index];
     else if (arg === '--port' && args[index + 1]) port = Number(args[++index]);
     else if (arg === '--home' && args[index + 1]) home = path.resolve(args[++index]);
@@ -923,6 +981,7 @@ function parseLauncherArgs(argv) {
     questId,
     daemonOnly,
     skipUpdateCheck,
+    yolo,
   };
 }
 
@@ -1111,10 +1170,56 @@ function buildGlobalWrapperScript({ installDir, home, commandName }) {
   return [
     '#!/usr/bin/env bash',
     'set -euo pipefail',
+    'WRAPPER_PATH="${BASH_SOURCE[0]}"',
+    'WRAPPER_DIR="$(cd "$(dirname "$WRAPPER_PATH")" && pwd)"',
+    `PREFERRED_COMMAND="${commandName}"`,
+    'LOOKUP_PATH=""',
+    'OLD_IFS="$IFS"',
+    'IFS=:',
+    'for ENTRY in $PATH; do',
+    '  if [ -z "$ENTRY" ]; then',
+    '    continue',
+    '  fi',
+    '  ENTRY_REAL="$ENTRY"',
+    '  if ENTRY_CANONICAL="$(cd "$ENTRY" 2>/dev/null && pwd)"; then',
+    '    ENTRY_REAL="$ENTRY_CANONICAL"',
+    '  fi',
+    '  if [ "$ENTRY_REAL" = "$WRAPPER_DIR" ]; then',
+    '    continue',
+    '  fi',
+    '  if [ -z "$LOOKUP_PATH" ]; then',
+    '    LOOKUP_PATH="$ENTRY"',
+    '  else',
+    '    LOOKUP_PATH="$LOOKUP_PATH:$ENTRY"',
+    '  fi',
+    'done',
+    'IFS="$OLD_IFS"',
+    'if [ -n "$LOOKUP_PATH" ]; then',
+    '  if RESOLVED_LAUNCHER="$(PATH="$LOOKUP_PATH" command -v "$PREFERRED_COMMAND" 2>/dev/null)"; then',
+    '    if [ -n "$RESOLVED_LAUNCHER" ] && [ "$RESOLVED_LAUNCHER" != "$WRAPPER_PATH" ]; then',
+    '      if [ -z "${DEEPSCIENTIST_HOME:-}" ]; then',
+    `        export DEEPSCIENTIST_HOME="${home}"`,
+    '      fi',
+    '      exec "$RESOLVED_LAUNCHER" "$@"',
+    '    fi',
+    '  fi',
+    'fi',
     'if [ -z "${DEEPSCIENTIST_HOME:-}" ]; then',
     `  export DEEPSCIENTIST_HOME="${home}"`,
     'fi',
     `exec "${path.join(installDir, 'bin', commandName)}" "$@"`,
+    '',
+  ].join('\n');
+}
+
+function buildLauncherWrapperScript({ launcherPath, home }) {
+  return [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'if [ -z "${DEEPSCIENTIST_HOME:-}" ]; then',
+    `  export DEEPSCIENTIST_HOME="${home}"`,
+    'fi',
+    `exec "${launcherPath}" "$@"`,
     '',
   ].join('\n');
 }
@@ -1153,6 +1258,94 @@ function candidateWrapperPathsForCommand(commandName) {
     }
   }
   return candidates;
+}
+
+function parseLegacyWrapperCandidate(candidatePath) {
+  let stat = null;
+  try {
+    stat = fs.lstatSync(candidatePath);
+  } catch {
+    return null;
+  }
+
+  if (stat.isSymbolicLink()) {
+    let resolved = null;
+    try {
+      resolved = fs.realpathSync(candidatePath);
+    } catch {
+      return null;
+    }
+    if (!/[\\/]cli[\\/]bin[\\/](?:ds|ds-cli|research|resear)(?:\.cmd)?$/.test(resolved)) {
+      return null;
+    }
+    return {
+      source: 'symlink',
+      execPath: resolved,
+      home: path.dirname(path.dirname(path.dirname(resolved))),
+    };
+  }
+
+  if (!stat.isFile()) {
+    return null;
+  }
+
+  let text = '';
+  try {
+    text = fs.readFileSync(candidatePath, 'utf8');
+  } catch {
+    return null;
+  }
+
+  const execMatch = text.match(/exec "([^"\n]+[\\/]bin[\\/](?:ds|ds-cli|research|resear))" "\$@"/);
+  if (!execMatch) {
+    return null;
+  }
+  const execPath = execMatch[1];
+  if (!/[\\/]cli[\\/]bin[\\/](?:ds|ds-cli|research|resear)$/.test(execPath)) {
+    return null;
+  }
+  const homeMatch = text.match(/export DEEPSCIENTIST_HOME="([^"\n]+)"/);
+  return {
+    source: 'script',
+    execPath,
+    home: homeMatch ? homeMatch[1] : path.dirname(path.dirname(path.dirname(execPath))),
+  };
+}
+
+function repairLegacyPathWrappers({ home, launcherPath, force = false }) {
+  if (process.platform === 'win32') {
+    return [];
+  }
+  if (!launcherPath || !fs.existsSync(launcherPath)) {
+    return [];
+  }
+  if (!force && detectInstallMode(repoRoot) !== 'npm-package') {
+    return [];
+  }
+
+  const rewritten = [];
+  const seen = new Set();
+  for (const commandName of launcherWrapperCommands) {
+    for (const candidate of candidateWrapperPathsForCommand(commandName)) {
+      if (seen.has(candidate)) {
+        continue;
+      }
+      seen.add(candidate);
+      const legacy = parseLegacyWrapperCandidate(candidate);
+      if (!legacy) {
+        continue;
+      }
+      writeExecutableScript(
+        candidate,
+        buildLauncherWrapperScript({
+          launcherPath,
+          home: legacy.home || home,
+        })
+      );
+      rewritten.push(candidate);
+    }
+  }
+  return rewritten;
 }
 
 function rewriteLauncherWrappersIfPointingAtSource({ sourceHome, targetHome }) {
@@ -2074,6 +2267,9 @@ function normalizePythonCliArgs(args, home) {
     if (arg === '--here') {
       continue;
     }
+    if (arg === '--yolo') {
+      continue;
+    }
     normalized.push(arg);
   }
   return ['--home', home, ...normalized];
@@ -2588,19 +2784,45 @@ function spawnDetachedNode(args, options = {}) {
 async function performSelfUpdate(home, options = {}) {
   const status = checkForUpdates(home, { force: true });
   if (!status.update_available) {
+    const message = `DeepScientist is already on the latest version (${status.current_version}).`;
+    mergeUpdateState(home, {
+      current_version: status.current_version,
+      latest_version: status.latest_version,
+      busy: false,
+      target_version: null,
+      last_update_finished_at: new Date().toISOString(),
+      last_update_result: {
+        ok: true,
+        target_version: null,
+        message,
+      },
+    });
     return {
       ok: true,
       updated: false,
       status,
-      message: `DeepScientist is already on the latest version (${status.current_version}).`,
+      message,
     };
   }
   if (!status.can_self_update) {
+    const message = status.reason || `Manual update required: ${status.manual_update_command}`;
+    mergeUpdateState(home, {
+      current_version: status.current_version,
+      latest_version: status.latest_version,
+      busy: false,
+      target_version: null,
+      last_update_finished_at: new Date().toISOString(),
+      last_update_result: {
+        ok: false,
+        target_version: status.latest_version || null,
+        message,
+      },
+    });
     return {
       ok: false,
       updated: false,
       status,
-      message: status.reason || `Manual update required: ${status.manual_update_command}`,
+      message,
     };
   }
 
@@ -2662,6 +2884,11 @@ async function performSelfUpdate(home, options = {}) {
       log_path: installResult.logPath,
     };
   }
+
+  repairLegacyPathWrappers({
+    home,
+    launcherPath: resolveLauncherPath(),
+  });
 
   const restartDaemon =
     options.restartDaemon === true
@@ -2765,6 +2992,22 @@ async function startBackgroundUpdateWorker(home, options = {}) {
     };
   }
   const status = checkForUpdates(home, { force: false });
+  if (!status.update_available) {
+    return {
+      ok: true,
+      started: false,
+      message: `DeepScientist is already on the latest version (${status.current_version}).`,
+      status,
+    };
+  }
+  if (!status.can_self_update) {
+    return {
+      ok: false,
+      started: false,
+      message: status.reason || `Manual update required: ${status.manual_update_command}`,
+      status,
+    };
+  }
   mergeUpdateState(home, {
     current_version: status.current_version,
     latest_version: status.latest_version,
@@ -2856,7 +3099,7 @@ function readConfiguredUiAddressFromFile(home, fallbackHost, fallbackPort) {
   }
 }
 
-async function startDaemon(home, runtimePython, host, port, proxy = null) {
+async function startDaemon(home, runtimePython, host, port, proxy = null, envOverrides = {}) {
   const browserUrl = browserUiUrl(host, port);
   const daemonBindUrl = bindUiUrl(host, port);
   const state = readDaemonState(home);
@@ -2880,10 +3123,10 @@ async function startDaemon(home, runtimePython, host, port, proxy = null) {
     removeDaemonState(home);
   }
 
-  const bootstrapState = readCodexBootstrapState(home, runtimePython);
+  const bootstrapState = readCodexBootstrapState(home, runtimePython, envOverrides);
   if (!bootstrapState.codex_ready) {
     console.log('Codex is not marked ready yet. Running startup probe...');
-    const probe = probeCodexBootstrap(home, runtimePython);
+    const probe = probeCodexBootstrap(home, runtimePython, envOverrides);
     if (!probe || probe.ok !== true) {
       throw createCodexPreflightError(home, probe);
     }
@@ -2915,6 +3158,7 @@ async function startDaemon(home, runtimePython, host, port, proxy = null) {
       stdio: ['ignore', out, out],
       env: {
         ...process.env,
+        ...envOverrides,
         DEEPSCIENTIST_REPO_ROOT: repoRoot,
         DEEPSCIENTIST_NODE_BINARY: process.execPath,
         DEEPSCIENTIST_LAUNCHER_PATH: path.join(repoRoot, 'bin', 'ds.js'),
@@ -3276,6 +3520,10 @@ async function launcherMain(rawArgs) {
   const home = options.home || resolveHome(rawArgs);
   applyLauncherProxy(options.proxy);
   ensureDir(home);
+  repairLegacyPathWrappers({
+    home,
+    launcherPath: resolveLauncherPath(),
+  });
 
   if (options.stop) {
     await stopDaemon(home);
@@ -3309,6 +3557,7 @@ async function launcherMain(rawArgs) {
 
   const pythonRuntime = ensurePythonRuntime(home);
   const runtimePython = pythonRuntime.runtimePython;
+  const codexOverrideEnv = buildCodexOverrideEnv({ yolo: options.yolo });
   ensureInitialized(home, runtimePython);
   if (await maybeHandleStartupUpdate(home, rawArgs, options)) {
     return true;
@@ -3331,7 +3580,7 @@ async function launcherMain(rawArgs) {
   step(4, 4, 'Starting local daemon and UI surfaces');
   let started;
   try {
-    started = await startDaemon(home, runtimePython, host, port, options.proxy);
+    started = await startDaemon(home, runtimePython, host, port, options.proxy, codexOverrideEnv);
   } catch (error) {
     if (handleCodexPreflightFailure(error)) return true;
     throw error;
@@ -3346,6 +3595,7 @@ async function launcherMain(rawArgs) {
     daemonOnly: options.daemonOnly,
     home,
     pythonSelection: pythonRuntime.runtimeProbe,
+    yolo: options.yolo,
   });
 
   if (options.daemonOnly) {
@@ -3381,14 +3631,15 @@ async function main() {
     const home = resolveHome(args);
     const pythonRuntime = ensurePythonRuntime(home);
     const runtimePython = pythonRuntime.runtimePython;
+    const codexOverrideEnv = buildCodexOverrideEnv({ yolo: args.includes('--yolo') });
     if (positional.value === 'run' || positional.value === 'daemon') {
       maybePrintOptionalLatexNotice(home);
     }
     if (positional.value === 'run' || positional.value === 'daemon') {
-      const bootstrapState = readCodexBootstrapState(home, runtimePython);
+      const bootstrapState = readCodexBootstrapState(home, runtimePython, codexOverrideEnv);
       if (!bootstrapState.codex_ready) {
         try {
-          const probe = probeCodexBootstrap(home, runtimePython);
+          const probe = probeCodexBootstrap(home, runtimePython, codexOverrideEnv);
           if (!probe || probe.ok !== true) {
             throw createCodexPreflightError(home, probe);
           }
@@ -3398,7 +3649,10 @@ async function main() {
         }
       }
     }
-    const result = runPythonCli(runtimePython, normalizePythonCliArgs(args, home), { allowFailure: true });
+    const result = runPythonCli(runtimePython, normalizePythonCliArgs(args, home), {
+      allowFailure: true,
+      env: codexOverrideEnv,
+    });
     process.exit(result.status ?? 0);
     return;
   }
@@ -3419,6 +3673,8 @@ module.exports = {
     parseLauncherArgs,
     normalizeProxyUrl,
     parseMigrateArgs,
+    parseLegacyWrapperCandidate,
+    repairLegacyPathWrappers,
     useEditableProjectInstall,
     compareVersions,
     detectInstallMode,

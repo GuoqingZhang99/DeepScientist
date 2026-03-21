@@ -36,6 +36,13 @@ def test_init_creates_required_files(temp_home: Path) -> None:
     assert config["bootstrap"]["locale_initialized_from_browser"] is False
     assert config["bootstrap"]["locale_initialized_at"] is None
     assert config["bootstrap"]["locale_initialized_browser_locale"] is None
+    assert config["connectors"]["system_enabled"]["qq"] is True
+    assert config["connectors"]["system_enabled"]["telegram"] is False
+    assert config["connectors"]["system_enabled"]["discord"] is False
+    assert config["connectors"]["system_enabled"]["slack"] is False
+    assert config["connectors"]["system_enabled"]["feishu"] is False
+    assert config["connectors"]["system_enabled"]["whatsapp"] is False
+    assert config["connectors"]["system_enabled"]["lingzhu"] is False
     assert runners["codex"]["model"] == "gpt-5.4"
     assert runners["codex"]["model_reasoning_effort"] == "xhigh"
     assert runners["codex"]["retry_initial_backoff_sec"] == 10.0
@@ -83,6 +90,8 @@ def test_new_creates_standalone_git_repo(temp_home: Path) -> None:
     assert (quest_root / "quest.yaml").exists()
     assert (quest_root / "tmp").exists()
     assert (quest_root / "userfiles").exists()
+    assert (quest_root / ".codex" / "prompts" / "system.md").exists()
+    assert (quest_root / ".codex" / "prompts" / "connectors" / "qq.md").exists()
     assert (quest_root / ".codex" / "skills").exists()
     assert (quest_root / ".claude" / "agents").exists()
     assert (quest_root / ".claude" / "agents" / "deepscientist-decision.md").exists()
@@ -137,7 +146,9 @@ def test_skill_installer_can_resync_existing_quests_after_version_change(temp_ho
     snapshot = service.create("sync existing quest skills")
     quest_root = Path(snapshot["quest_root"])
     stale_file = quest_root / ".codex" / "skills" / "deepscientist-scout" / "obsolete.txt"
+    stale_prompt = quest_root / ".codex" / "prompts" / "obsolete.txt"
     stale_file.write_text("stale", encoding="utf-8")
+    stale_prompt.write_text("stale", encoding="utf-8")
 
     result = installer.ensure_release_sync(
         installed_version="9.9.9",
@@ -150,6 +161,8 @@ def test_skill_installer_can_resync_existing_quests_after_version_change(temp_ho
     assert result["existing_quests_synced"] is True
     assert result["existing_quests"]["count"] == 1
     assert not stale_file.exists()
+    assert not stale_prompt.exists()
+    assert (quest_root / ".codex" / "prompts" / "system.md").exists()
     assert (quest_root / ".codex" / "skills" / "deepscientist-scout" / "SKILL.md").exists()
     state_path = temp_home / "runtime" / "skill-sync-state.json"
     assert state_path.exists()

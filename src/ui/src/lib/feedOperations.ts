@@ -53,9 +53,24 @@ function normalizeOperationArgs(args?: string) {
   return String(args || '').replace(/\s+/g, ' ').trim()
 }
 
+export function buildOperationIdentity(
+  item: Pick<OperationFeedItem, 'id' | 'runId' | 'toolCallId'>
+) {
+  const runId = item.runId?.trim() || ''
+  const toolCallId = item.toolCallId?.trim() || ''
+  if (runId && toolCallId) {
+    return `tool:${runId}:${toolCallId}`
+  }
+  if (toolCallId) {
+    return `tool:${toolCallId}`
+  }
+  return item.id
+}
+
 function resolveOperationMergeKey(item: OperationFeedItem) {
   const toolCallId = item.toolCallId?.trim() || ''
-  if (toolCallId) return `tool:${toolCallId}`
+  const runId = item.runId?.trim() || ''
+  if (toolCallId) return buildOperationIdentity(item)
   const toolName = String(item.toolName || '').trim().toLowerCase()
   const mcpServer = String(item.mcpServer || '').trim().toLowerCase()
   const mcpTool = String(item.mcpTool || '').trim().toLowerCase()
@@ -66,9 +81,9 @@ function resolveOperationMergeKey(item: OperationFeedItem) {
     (mcpServer === 'bash_exec' && mcpTool === 'bash_exec')
   if (!isBashExec) return ''
   const bashId = deriveOperationBashId(item)
-  if (bashId) return `bash:${bashId}`
+  if (bashId) return `bash:${runId || 'unknown'}:${bashId}`
   const normalizedArgs = normalizeOperationArgs(item.args)
-  if (normalizedArgs) return `bash-args:${toolName || 'bash_exec'}:${normalizedArgs}`
+  if (normalizedArgs) return `bash-args:${runId || 'unknown'}:${toolName || 'bash_exec'}:${normalizedArgs}`
   return ''
 }
 
@@ -86,11 +101,10 @@ function mergeMetadata(
 }
 
 function createRenderOperation(item: OperationFeedItem): RenderOperationFeedItem {
-  const toolCallId = item.toolCallId?.trim() || ''
   const isResult = item.label === 'tool_result'
   return {
     ...item,
-    renderId: toolCallId || item.id,
+    renderId: buildOperationIdentity(item),
     startedAt: isResult ? undefined : item.createdAt,
     completedAt: isResult ? item.createdAt : undefined,
     hasResult: isResult,
@@ -111,6 +125,8 @@ function mergeRenderOperation(
     ...primary,
     id: current.id,
     renderId: current.renderId,
+    eventId: resultItem?.eventId ?? callItem?.eventId ?? current.eventId ?? next.eventId,
+    runId: callItem?.runId ?? resultItem?.runId ?? current.runId ?? next.runId,
     label: resultItem ? 'tool_result' : 'tool_call',
     content: resultItem?.content || callItem?.content || current.content || next.content,
     toolName: callItem?.toolName || resultItem?.toolName || current.toolName || next.toolName,
@@ -191,7 +207,7 @@ export function findLatestRenderedOperationId(
     const item = items[index]
     if (item.type !== 'operation') continue
     if (predicate && !predicate(item)) continue
-    return item.toolCallId || item.renderId
+    return item.renderId
   }
   return null
 }

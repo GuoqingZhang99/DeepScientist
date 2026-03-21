@@ -9,19 +9,13 @@ Use this skill to turn the current baseline and problem frame into concrete, lit
 
 ## Interaction discipline
 
-- Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before selecting or refining ideas.
-- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` when there is real user-visible progress: the first meaningful signal of long work, a meaningful checkpoint, or a concise keepalive if active work has drifted beyond roughly 10 to 30 tool calls without a user-visible update.
-- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
-- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
+- Follow the shared interaction contract injected by the system prompt.
+- For ordinary active work, prefer a concise progress update once work has crossed roughly 10 tool calls with a human-meaningful delta, and do not drift beyond roughly 20 tool calls or about 15 minutes without a user-visible update.
 - Keep ordinary subtask completions concise. When the idea stage actually finishes a meaningful deliverable such as a selected idea package, a rejected-ideas summary, or a route-shaping ideation checkpoint, upgrade to a richer `artifact.interact(kind='milestone', reply_mode='threaded', ...)` report.
 - That richer idea-stage milestone report should normally cover: the final selected or rejected direction, why it won or lost, the main remaining risk, and the exact recommended next stage or experiment.
 - That richer milestone report is still normally non-blocking. If the next experiment or route is already clear from durable evidence, continue automatically after reporting instead of waiting.
 - If the runtime starts an auto-continue turn with no new user message, keep advancing from the active requirements and current durable state instead of re-answering the previous user turn.
 - Message templates are references only. Adapt to the actual context and vary wording so updates feel natural and non-robotic.
-- Use `reply_mode='blocking'` only for real user decisions that cannot be resolved from local evidence.
-- For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, and wait up to 1 day when feasible. If the blocker is a missing external credential or secret that only the user can provide, keep the quest waiting, ask the user to supply it or choose an alternative, and do not self-resolve; if resumed without that credential and no other work is possible, a long low-frequency wait such as `bash_exec(command='sleep 3600', mode='await', timeout_seconds=3700)` is acceptable. Otherwise choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest idea progress update before assuming the task changed completely.
 
 ## Stage purpose

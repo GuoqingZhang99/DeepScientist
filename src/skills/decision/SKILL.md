@@ -9,17 +9,12 @@ Use this skill whenever continuation is non-trivial.
 
 ## Interaction discipline
 
-- Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before making the next decision.
-- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` when there is real user-visible progress: a meaningful checkpoint, a route-shaping update, or a concise keepalive if active work has drifted beyond roughly 10 to 30 tool calls without a user-visible update.
+- Follow the shared interaction contract injected by the system prompt.
+- For ordinary active work, prefer a concise progress update once work has crossed roughly 10 tool calls with a human-meaningful delta, and do not drift beyond roughly 20 tool calls or about 15 minutes without a user-visible update.
 - Message templates are references only. Adapt to context and vary wording so updates feel natural and non-robotic.
-- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
-- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
 - If the runtime starts an auto-continue turn with no new user message, continue from the active requirements and durable quest state instead of replaying the previous user turn.
 - If `startup_contract.decision_policy = autonomous`, do not emit ordinary `artifact.interact(kind='decision_request', ...)` calls; decide the route yourself, record the reason, and continue.
 - Use `reply_mode='blocking'` for the actual decision request only when the user must choose before safe continuation and the quest contract still allows a user-gated decision.
-- For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, and wait up to 1 day when feasible. If the blocker is a missing external credential or secret that only the user can provide, keep the quest waiting, ask the user to supply it or choose an alternative, and do not self-resolve; if resumed without that credential and no other work is possible, a long low-frequency wait such as `bash_exec(command='sleep 3600', mode='await', timeout_seconds=3700)` is acceptable. Otherwise choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest decision or progress interaction before assuming the task changed completely.
 - Quest completion is a special terminal decision: first ask for explicit completion approval with `artifact.interact(kind='decision_request', reply_mode='blocking', reply_schema={'decision_type': 'quest_completion_approval'}, ...)`, and only after an explicit approval reply should you call `artifact.complete_quest(...)`.
 
@@ -74,6 +69,7 @@ Use the following canonical actions:
 - `launch_analysis_campaign`
 - `branch`
 - `prepare_branch`
+- `activate_branch`
 - `reuse_baseline`
 - `attach_baseline`
 - `publish_baseline`
@@ -91,6 +87,8 @@ In the current runtime, prefer these concrete flow actions:
 - accepted idea -> `artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)`
 - maintenance-only in-place cleanup of the same branch -> `artifact.submit_idea(mode='revise', ...)`
 - compare branch foundations before a new round -> `artifact.list_research_branches(...)`
+- return to an older durable branch without creating a new node -> `artifact.activate_branch(...)`
+- materialize the concrete main-result node when a real main experiment line is about to be or was just durably recorded -> dedicated child `run/*` branch/worktree
 - start the next optimization round from a measured result -> `artifact.record(kind='decision', action='iterate', ...)`
 - launch analysis campaign -> `artifact.create_analysis_campaign(...)`
 - finish one analysis slice -> `artifact.record_analysis_slice(...)`
@@ -104,8 +102,12 @@ If the chosen action is baseline reuse, the decision is not complete until one o
 - or the quest recorded an explicit blocker or waiver explaining why reuse could not be completed safely
 
 Treat `prepare_branch` as a compatibility or recovery action, not the normal path.
+Treat `activate_branch` as the correct recovery or revisit action when the quest should resume on an existing older durable branch while preserving the newer research head.
 Treat each accepted branch as one durable research round.
 If a branch already has a durable main-experiment result, a genuinely new optimization round should normally create a child branch from a chosen foundation rather than keep revising that old branch in place.
+Treat each durable main experiment as its own child `run/*` branch/node, not as another mutable state on the idea branch.
+When paper mode is enabled and the necessary analysis for a strong run is done, the next default route is `write` on a dedicated `paper/*` branch/worktree derived from that run branch.
+Do not approve `launch_analysis_campaign` casually; analysis usually carries extra resource cost and should require clear academic or claim-level value before spending that budget.
 
 ## Truth sources
 
@@ -146,7 +148,7 @@ Typical mapping:
 - `good`
   - continue, branch, launch experiment, write, finalize
 - `neutral`
-  - branch, launch analysis campaign, request user decision
+  - branch, activate branch, launch analysis campaign, request user decision
 - `bad`
   - reset, stop
 - `blocked`
@@ -301,6 +303,7 @@ This is especially useful for:
 - idea branch selection
 - experiment package selection
 - launch of an analysis campaign
+- reactivation of an older durable branch
 - post-campaign routing
 - stop / pivot / finalize choices
 
@@ -341,6 +344,7 @@ Good decisions:
 - say what happens next
 - say why the alternative was not chosen
 - explicitly identify the winning candidate when choosing among multiple packages
+- do not launch analysis campaigns unless the expected information gain clearly justifies the extra resource cost
 
 Weak decisions:
 

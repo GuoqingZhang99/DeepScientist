@@ -21,6 +21,8 @@ export type WorkspaceDocumentMode =
   | 'rendered'
   | 'source'
   | 'preview'
+  | 'snapshot'
+  | 'diff'
 
 export type WorkspaceCompileState = 'idle' | 'saving' | 'compiling' | 'error'
 

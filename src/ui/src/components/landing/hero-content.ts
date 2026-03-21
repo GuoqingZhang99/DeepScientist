@@ -78,6 +78,8 @@ export const HERO_COPY = {
   primaryCta: 'Start Research',
   secondaryCta: 'List Quest',
   supportLine: 'DeepScientist keeps your full research loop local, reproducible, and continuously moving.',
+  moreContentUrl: 'https://deepscientist.cc',
+  moreContentLine: 'More content at',
 }
 
 export const HERO_RESEARCH_STEPS: HeroResearchStep[] = [

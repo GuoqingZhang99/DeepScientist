@@ -14,7 +14,7 @@ from ... import __version__ as DEEPSCIENTIST_VERSION
 from ...gitops import commit_detail, compare_refs, diff_file_between_refs, diff_file_for_commit, export_git_graph, list_branch_canvas, log_ref_history
 from ...memory import MemoryService
 from ...quest import QuestService
-from ...shared import generate_id, read_text, resolve_within, sha256_text, utc_now
+from ...shared import generate_id, read_json, read_text, resolve_within, run_command, sha256_text, utc_now
 from ...runners import RunRequest
 
 
@@ -171,9 +171,9 @@ npm --prefix src/ui run build</pre>
 
     def cli_health(self) -> dict:
         online_channels = [
-            channel.status()
-            for channel in self.app.channels.values()
-            if channel.status().get("enabled") is not False
+            snapshot
+            for snapshot in self.app.list_connector_statuses()
+            if snapshot.get("enabled") is not False
         ]
         return {
             "status": "ok",
@@ -220,6 +220,9 @@ npm --prefix src/ui run build</pre>
     def qq_inbound(self, body: dict) -> dict:
         return self.app.handle_qq_inbound(body)
 
+    def connector_profile_delete(self, connector: str, profile_id: str) -> dict | tuple[int, dict]:
+        return self.app.delete_connector_profile(connector, profile_id)
+
     def connector_inbound(self, connector: str, body: dict) -> dict:
         return self.app.handle_connector_inbound(connector, body)
 
@@ -245,12 +248,15 @@ npm --prefix src/ui run build</pre>
             else []
         )
         force_connector_rebind_raw = body.get("force_connector_rebind")
-        force_connector_rebind = bool(force_connector_rebind_raw) and str(force_connector_rebind_raw).strip().lower() not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
+        if force_connector_rebind_raw is None:
+            force_connector_rebind = True
+        else:
+            force_connector_rebind = bool(force_connector_rebind_raw) and str(force_connector_rebind_raw).strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
         requested_baseline_ref = body.get("requested_baseline_ref")
         startup_contract = body.get("startup_contract")
         auto_start = body.get("auto_start") is True
@@ -642,8 +648,6 @@ npm --prefix src/ui run build</pre>
             session = self.app.bash_exec_service.get_session(quest_root, session_id)
         except FileNotFoundError:
             return 404, {"ok": False, "message": f"Unknown terminal session `{session_id}`."}
-        if str(session.get("kind") or "").lower() != "terminal":
-            return 400, {"ok": False, "message": "not_terminal_session"}
         if str(session.get("status") or "").lower() in {"completed", "failed", "terminated"}:
             return 409, {"ok": False, "message": "terminal_session_inactive", "session": session}
         try:
@@ -744,6 +748,12 @@ npm --prefix src/ui run build</pre>
     def git_branches(self, quest_id: str) -> dict:
         quest_root = self._fresh_quest_service()._quest_root(quest_id)
         payload = list_branch_canvas(quest_root, quest_id=quest_id)
+        research_state = self.app.quest_service.read_research_state(quest_root)
+        active_workspace_branch = str(research_state.get("current_workspace_branch") or "").strip() or None
+        research_head_branch = str(research_state.get("research_head_branch") or "").strip() or None
+        payload["active_workspace_ref"] = active_workspace_branch
+        payload["research_head_ref"] = research_head_branch
+        payload["workspace_mode"] = str(research_state.get("workspace_mode") or "quest").strip() or "quest"
         try:
             branch_summary = self.app.artifact_service.list_research_branches(quest_root)
         except Exception:
@@ -758,6 +768,8 @@ npm --prefix src/ui run build</pre>
             if not ref:
                 continue
             summary = branch_summary_by_name.get(ref)
+            node["active_workspace"] = ref == active_workspace_branch
+            node["research_head"] = ref == research_head_branch
             if not isinstance(summary, dict):
                 continue
             node["branch_no"] = summary.get("branch_no")
@@ -814,6 +826,126 @@ npm --prefix src/ui run build</pre>
             return {"ok": False, "message": "`base`, `head`, and `path` are required."}
         quest_root = self._fresh_quest_service()._quest_root(quest_id)
         return diff_file_between_refs(quest_root, base=base, head=head, path=file_path)
+
+    def file_change_diff(self, quest_id: str, path: str) -> dict:
+        query = self.parse_query(path)
+        run_id = ((query.get("run_id") or [""])[0] or "").strip()
+        event_id = ((query.get("event_id") or [""])[0] or "").strip() or None
+        raw_path = ((query.get("path") or [""])[0] or "").strip()
+        if not run_id or not raw_path:
+            return self._file_change_diff_unavailable(
+                raw_path=raw_path,
+                run_id=run_id or None,
+                event_id=event_id,
+                message="`run_id` and `path` are required.",
+                ok=False,
+            )
+
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
+        run_artifact = read_json(quest_root / ".ds" / "runs" / run_id / "artifact.json", default={})
+        if not isinstance(run_artifact, dict):
+            return self._file_change_diff_unavailable(
+                raw_path=raw_path,
+                run_id=run_id,
+                event_id=event_id,
+                message="Historical patch unavailable. Run artifact metadata is missing.",
+                ok=False,
+            )
+
+        record = run_artifact.get("record") if isinstance(run_artifact.get("record"), dict) else {}
+        checkpoint = run_artifact.get("checkpoint") if isinstance(run_artifact.get("checkpoint"), dict) else {}
+        base = str(record.get("head_commit") or "").strip()
+        head = str(checkpoint.get("head") or "").strip()
+        branch = str(record.get("branch") or "").strip() or None
+        workspace_root = self._file_change_workspace_root(run_artifact, record)
+        relative_path = None
+        display_path = None
+
+        if not base or not head:
+            relative_path = self._relative_file_change_path(None, raw_path, workspace_root)
+            display_path = self._display_file_change_path(quest_root, raw_path, relative_path=relative_path)
+            return self._file_change_diff_unavailable(
+                raw_path=raw_path,
+                run_id=run_id,
+                event_id=event_id,
+                base=base,
+                head=head,
+                branch=branch,
+                relative_path=relative_path,
+                display_path=display_path,
+                message="Historical patch unavailable. Run artifact metadata is missing the recorded commit range.",
+                ok=True,
+            )
+
+        repo_root = self._resolve_git_repo_root_for_file_change(raw_path, workspace_root)
+        relative_path = self._relative_file_change_path(repo_root, raw_path, workspace_root)
+        display_path = self._display_file_change_path(quest_root, raw_path, relative_path=relative_path)
+
+        if repo_root is None or not relative_path:
+            return self._file_change_diff_unavailable(
+                raw_path=raw_path,
+                run_id=run_id,
+                event_id=event_id,
+                base=base,
+                head=head,
+                branch=branch,
+                relative_path=relative_path,
+                display_path=display_path,
+                message="Historical patch unavailable. DeepScientist could not map this file to a git worktree.",
+                ok=True,
+            )
+
+        try:
+            diff = diff_file_between_refs(repo_root, base=base, head=head, path=relative_path)
+        except Exception:
+            return self._file_change_diff_unavailable(
+                raw_path=raw_path,
+                run_id=run_id,
+                event_id=event_id,
+                base=base,
+                head=head,
+                branch=branch,
+                relative_path=relative_path,
+                display_path=display_path,
+                message=(
+                    "Historical patch unavailable. The saved run checkpoint does not match the git repository "
+                    "that currently owns this file."
+                ),
+                ok=True,
+            )
+
+        if (
+            not diff.get("binary")
+            and not diff.get("lines")
+            and int(diff.get("added") or 0) == 0
+            and int(diff.get("removed") or 0) == 0
+        ):
+            return self._file_change_diff_unavailable(
+                raw_path=raw_path,
+                run_id=run_id,
+                event_id=event_id,
+                base=base,
+                head=head,
+                branch=branch,
+                relative_path=relative_path,
+                display_path=display_path,
+                message=(
+                    "Historical patch unavailable. This event only preserved file-level metadata or the edit "
+                    "did not land in the run's final checkpoint."
+                ),
+                ok=True,
+            )
+
+        return {
+            **diff,
+            "available": True,
+            "source": "run_range",
+            "display_path": display_path or relative_path,
+            "run_id": run_id,
+            "event_id": event_id,
+            "branch": branch,
+            "message": None,
+        }
 
     def git_commit_file(self, quest_id: str, path: str) -> dict:
         query = self.parse_query(path)
@@ -1188,7 +1320,7 @@ npm --prefix src/ui run build</pre>
     def run_create(self, quest_id: str, body: dict) -> dict:
         quest_root = self.app.quest_service._quest_root(quest_id)
         config = self.app.config_manager.load_named("config")
-        runners = self.app.config_manager.load_named("runners")
+        runners = self.app.config_manager.load_runners_config()
         snapshot = self.app.quest_service.snapshot(quest_id)
         runner_name = str(body.get("runner") or snapshot.get("runner") or config.get("default_runner", "codex")).strip().lower()
         runner_cfg = runners.get(runner_name, {})
@@ -1204,6 +1336,16 @@ npm --prefix src/ui run build</pre>
                 "ok": False,
                 "message": str(exc),
             }
+        raw_reasoning_effort = (
+            body.get("model_reasoning_effort")
+            if "model_reasoning_effort" in body
+            else runner_cfg.get("model_reasoning_effort")
+        )
+        reasoning_effort = (
+            str(raw_reasoning_effort).strip()
+            if raw_reasoning_effort is not None and str(raw_reasoning_effort).strip()
+            else ("xhigh" if raw_reasoning_effort is None else None)
+        )
         request = RunRequest(
             quest_id=quest_id,
             quest_root=quest_root,
@@ -1215,8 +1357,7 @@ npm --prefix src/ui run build</pre>
             approval_policy=runner_cfg.get("approval_policy", "on-request"),
             sandbox_mode=runner_cfg.get("sandbox_mode", "workspace-write"),
             turn_reason=body.get("turn_reason") or "user_message",
-            reasoning_effort=body.get("model_reasoning_effort")
-            or runner_cfg.get("model_reasoning_effort", "xhigh"),
+            reasoning_effort=reasoning_effort,
         )
         result = runner.run(request)
         if result.output_text:
@@ -1352,8 +1493,12 @@ npm --prefix src/ui run build</pre>
             result = self.app.config_manager.save_named_payload(name, body["structured"])
         else:
             result = self.app.config_manager.save_named_text(name, body.get("content", ""))
+        if result.get("ok") and name == "config":
+            result["runtime_reload"] = self.app.reload_runtime_config()
         if result.get("ok") and name == "connectors":
             result["runtime_reload"] = self.app.reload_connectors_config()
+        if result.get("ok") and name == "runners":
+            result["runtime_reload"] = self.app.reload_runners_config()
         return result
 
     def config_validate(self, body: dict | None = None) -> dict:
@@ -1405,6 +1550,136 @@ npm --prefix src/ui run build</pre>
         if not raw:
             return {}
         return json.loads(raw.decode("utf-8"))
+
+    @staticmethod
+    def _file_change_workspace_root(run_artifact: dict, record: dict) -> Path | None:
+        workspace_root = str(run_artifact.get("workspace_root") or record.get("workspace_root") or "").strip()
+        if not workspace_root:
+            return None
+        return Path(workspace_root).expanduser()
+
+    @staticmethod
+    def _file_change_path_candidates(raw_path: str, workspace_root: Path | None) -> list[Path]:
+        text = str(raw_path or "").strip()
+        if not text:
+            return []
+        raw_candidate = Path(text).expanduser()
+        candidates: list[Path] = []
+        if raw_candidate.is_absolute():
+            candidates.append(raw_candidate)
+        elif workspace_root is not None:
+            candidates.append(workspace_root / raw_candidate)
+        else:
+            candidates.append(raw_candidate)
+        if workspace_root is not None:
+            candidates.append(workspace_root)
+
+        resolved: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            for variant in (candidate, candidate.resolve(strict=False)):
+                key = str(variant)
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved.append(variant)
+        return resolved
+
+    @staticmethod
+    def _git_probe_root(candidate: Path) -> Path:
+        if candidate.exists():
+            return candidate if candidate.is_dir() else candidate.parent
+        for parent in candidate.parents:
+            if parent.exists():
+                return parent
+        return candidate.parent
+
+    def _resolve_git_repo_root_for_file_change(self, raw_path: str, workspace_root: Path | None) -> Path | None:
+        for candidate in self._file_change_path_candidates(raw_path, workspace_root):
+            probe_root = self._git_probe_root(candidate)
+            if not str(probe_root).strip():
+                continue
+            result = run_command(["git", "rev-parse", "--show-toplevel"], cwd=probe_root, check=False)
+            if result.returncode != 0:
+                continue
+            top_level = result.stdout.strip()
+            if top_level:
+                return Path(top_level).resolve()
+        return None
+
+    def _relative_file_change_path(self, repo_root: Path | None, raw_path: str, workspace_root: Path | None) -> str | None:
+        if repo_root is None:
+            if Path(str(raw_path or "").strip()).is_absolute():
+                return None
+            normalized = str(raw_path or "").strip().replace("\\", "/").lstrip("/")
+            return normalized or None
+
+        repo_root_resolved = repo_root.resolve()
+        for candidate in self._file_change_path_candidates(raw_path, workspace_root):
+            try:
+                return candidate.relative_to(repo_root_resolved).as_posix()
+            except ValueError:
+                continue
+        if Path(str(raw_path or "").strip()).is_absolute():
+            return None
+        normalized = str(raw_path or "").strip().replace("\\", "/").lstrip("/")
+        return normalized or None
+
+    @staticmethod
+    def _display_file_change_path(quest_root: Path, raw_path: str, *, relative_path: str | None = None) -> str:
+        quest_root_resolved = quest_root.resolve()
+        for candidate in [Path(str(raw_path or "").strip()).expanduser()]:
+            for variant in (candidate, candidate.resolve(strict=False)):
+                try:
+                    relative = variant.relative_to(quest_root_resolved)
+                except ValueError:
+                    continue
+                parts = relative.parts
+                if len(parts) >= 3 and parts[0] == ".ds" and parts[1] == "worktrees":
+                    branch_root = parts[2]
+                    remainder = Path(*parts[3:]).as_posix() if len(parts) > 3 else ""
+                    return f"{branch_root}/{remainder}" if remainder else branch_root
+                return relative.as_posix()
+        if relative_path:
+            return relative_path
+        text = str(raw_path or "").strip()
+        return Path(text).name or text
+
+    @staticmethod
+    def _file_change_diff_unavailable(
+        *,
+        raw_path: str,
+        run_id: str | None,
+        event_id: str | None,
+        message: str,
+        ok: bool,
+        base: str = "",
+        head: str = "",
+        branch: str | None = None,
+        relative_path: str | None = None,
+        display_path: str | None = None,
+    ) -> dict:
+        normalized_path = relative_path or str(raw_path or "").strip()
+        return {
+            "ok": ok,
+            "available": False,
+            "source": "unavailable",
+            "run_id": run_id,
+            "event_id": event_id,
+            "branch": branch,
+            "display_path": display_path or normalized_path,
+            "base": base,
+            "head": head,
+            "path": normalized_path,
+            "old_path": None,
+            "status": "modified",
+            "binary": False,
+            "added": 0,
+            "removed": 0,
+            "lines": [],
+            "truncated": False,
+            "message": message,
+        }
 
     @staticmethod
     def _markdown_title(path: Path) -> str:

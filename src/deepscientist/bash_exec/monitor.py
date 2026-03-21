@@ -448,7 +448,7 @@ def run_monitor(session_dir: Path) -> int:
                 _terminate_process(process, process_group_id)
                 stop_requested = True
 
-            if session_kind == "terminal" and output_fd is not None and process.poll() is None:
+            if output_fd is not None and process.poll() is None:
                 cursor_payload = read_json(input_cursor_path, {}) or {}
                 offset = int(cursor_payload.get("offset") or 0)
                 input_entries = read_jsonl(input_path)

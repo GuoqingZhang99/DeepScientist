@@ -6,6 +6,7 @@ from pathlib import Path
 CONFIG_NAMES = ("config", "runners", "connectors", "plugins", "mcp_servers")
 REQUIRED_CONFIG_NAMES = ("config", "runners", "connectors")
 OPTIONAL_CONFIG_NAMES = ("plugins", "mcp_servers")
+SYSTEM_CONNECTOR_NAMES = ("qq", "telegram", "discord", "slack", "feishu", "whatsapp", "lingzhu")
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,10 @@ class ConfigFileInfo:
 
 def config_filename(name: str) -> str:
     return f"{name}.yaml"
+
+
+def default_system_enabled_connectors() -> dict[str, bool]:
+    return {name: name == "qq" for name in SYSTEM_CONNECTOR_NAMES}
 
 
 def default_config(home: Path) -> dict:
@@ -65,6 +70,7 @@ def default_config(home: Path) -> dict:
             "auto_ack": True,
             "milestone_push": True,
             "direct_chat_enabled": True,
+            "system_enabled": default_system_enabled_connectors(),
         },
         "cloud": {
             "enabled": False,
@@ -128,7 +134,7 @@ def default_connectors() -> dict:
             "profiles": [],
             "app_id": None,
             "app_secret": None,
-            "app_secret_env": "QQ_APP_SECRET",
+            "app_secret_env": None,
             "bot_name": "DeepScientist",
             "command_prefix": "/",
             "main_chat_id": None,
@@ -149,7 +155,7 @@ def default_connectors() -> dict:
             "bot_name": "DeepScientist",
             "command_prefix": "/",
             "bot_token": None,
-            "bot_token_env": "TELEGRAM_BOT_TOKEN",
+            "bot_token_env": None,
             "dm_policy": "pairing",
             "allow_from": [],
             "group_policy": "open",
@@ -165,7 +171,7 @@ def default_connectors() -> dict:
             "bot_name": "DeepScientist",
             "command_prefix": "/",
             "bot_token": None,
-            "bot_token_env": "DISCORD_BOT_TOKEN",
+            "bot_token_env": None,
             "application_id": None,
             "dm_policy": "pairing",
             "allow_from": [],
@@ -183,10 +189,10 @@ def default_connectors() -> dict:
             "bot_name": "DeepScientist",
             "command_prefix": "/",
             "bot_token": None,
-            "bot_token_env": "SLACK_BOT_TOKEN",
+            "bot_token_env": None,
             "bot_user_id": None,
             "app_token": None,
-            "app_token_env": "SLACK_APP_TOKEN",
+            "app_token_env": None,
             "dm_policy": "pairing",
             "allow_from": [],
             "group_policy": "open",
@@ -203,7 +209,7 @@ def default_connectors() -> dict:
             "command_prefix": "/",
             "app_id": None,
             "app_secret": None,
-            "app_secret_env": "FEISHU_APP_SECRET",
+            "app_secret_env": None,
             "api_base_url": "https://open.feishu.cn",
             "dm_policy": "pairing",
             "allow_from": [],

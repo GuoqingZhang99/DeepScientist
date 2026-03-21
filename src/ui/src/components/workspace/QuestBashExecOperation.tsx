@@ -22,20 +22,49 @@ import type { AgentComment } from '@/types'
 function parseStructuredValue(value?: string) {
   if (!value) return null
   try {
-    return JSON.parse(value) as Record<string, unknown>
+    return JSON.parse(value) as unknown
   } catch {
     return null
   }
 }
 
-function extractBashResult(value?: string) {
-  const parsed = parseStructuredValue(value)
-  if (!parsed) return null
-  const nested = parsed.result
-  if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
-    return nested as Record<string, unknown>
+function asRecord(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
   }
-  return parsed
+  return value as Record<string, unknown>
+}
+
+function unwrapStructuredRecord(value: unknown): Record<string, unknown> | null {
+  const record = asRecord(value)
+  if (!record) return null
+  if (record.structured_content && record.structured_content !== value) {
+    return unwrapStructuredRecord(record.structured_content)
+  }
+  if (record.structured_result && record.structured_result !== value) {
+    return unwrapStructuredRecord(record.structured_result)
+  }
+  if (record.result && record.result !== value) {
+    return unwrapStructuredRecord(record.result)
+  }
+  if (Array.isArray(record.content)) {
+    for (const entry of record.content) {
+      const contentRecord = asRecord(entry)
+      if (!contentRecord) continue
+      const nested = unwrapStructuredRecord(contentRecord)
+      if (nested) return nested
+      if (typeof contentRecord.text === 'string') {
+        const parsedText = parseStructuredValue(contentRecord.text)
+        const parsedRecord = unwrapStructuredRecord(parsedText)
+        if (parsedRecord) return parsedRecord
+      }
+    }
+  }
+  return record
+}
+
+function extractBashResult(value?: string) {
+  return unwrapStructuredRecord(parseStructuredValue(value))
 }
 
 function formatTime(value?: string) {
@@ -127,16 +156,30 @@ export function QuestBashExecOperation({
 }) {
   const timestamp = createdAt ? Date.parse(createdAt) : Date.now()
   const resolvedTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now()
-  const parsedArgs = parseStructuredValue(args)
+  const parsedArgs = asRecord(parseStructuredValue(args))
   const parsedOutput = extractBashResult(output)
   const initialProgress = extractInitialProgress(parsedOutput)
+  const mode = typeof parsedArgs?.mode === 'string' ? parsedArgs.mode.trim().toLowerCase() : ''
   const command =
     typeof parsedArgs?.command === 'string'
       ? parsedArgs.command
       : typeof parsedArgs?.cmd === 'string'
         ? parsedArgs.cmd
-        : ''
-  const workdir = typeof parsedArgs?.workdir === 'string' ? parsedArgs.workdir : ''
+        : typeof parsedOutput?.command === 'string'
+          ? parsedOutput.command
+          : typeof metadata?.command === 'string'
+            ? metadata.command
+            : ''
+  const workdir =
+    typeof parsedArgs?.workdir === 'string'
+      ? parsedArgs.workdir
+      : typeof parsedOutput?.workdir === 'string'
+        ? parsedOutput.workdir
+        : typeof parsedOutput?.cwd === 'string'
+          ? parsedOutput.cwd
+          : typeof metadata?.workdir === 'string'
+            ? metadata.workdir
+            : ''
   const bashId =
     typeof parsedOutput?.bash_id === 'string'
       ? parsedOutput.bash_id
@@ -200,17 +243,16 @@ export function QuestBashExecOperation({
     isRunning,
     workdir,
   })
-  const shouldHideGenericCompletedCard =
-    label === 'tool_result' &&
-    !command &&
-    !isFailed &&
-    !isStopped &&
-    !isRunning
+  const shouldHideGenericCompletedCard = label === 'tool_result' && mode === 'read'
   const progressPercent = getProgressPercent(liveProgress)
   const progressLabel = formatProgressLabel(liveProgress)
   const progressMeta = formatProgressMeta(liveProgress)
   const progressReason = liveStopReason.trim()
-  const summary = summarizeCommand(command) || title || 'bash_exec'
+  const summary =
+    summarizeCommand(command) ||
+    (typeof parsedArgs?.comment === 'string' ? parsedArgs.comment : '') ||
+    title ||
+    'bash_exec'
   const compactProgressLabel = formatPercentLabel(progressPercent)
   const progressSummary = [progressLabel, compactProgressLabel, progressMeta || progressReason]
     .filter(Boolean)

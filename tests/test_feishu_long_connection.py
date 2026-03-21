@@ -14,6 +14,9 @@ def test_feishu_long_connection_reports_missing_sdk_dependency(temp_home: Path, 
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["feishu"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["feishu"]["enabled"] = True
     connectors["feishu"]["transport"] = "long_connection"
@@ -36,6 +39,9 @@ def test_feishu_long_connection_payload_routes_via_existing_parser(temp_home: Pa
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["feishu"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["feishu"]["enabled"] = True
     connectors["feishu"]["transport"] = "long_connection"

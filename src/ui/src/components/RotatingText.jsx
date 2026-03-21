@@ -28,10 +28,30 @@ const RotatingText = forwardRef((props, ref) => {
     mainClassName,
     splitLevelClassName,
     elementLevelClassName,
+    maxWords,
     ...rest
   } = props;
 
   const [currentTextIndex, setCurrentTextIndex] = useState(0);
+
+  const truncateByWords = useCallback(
+    text => {
+      if (typeof maxWords !== 'number' || !Number.isFinite(maxWords) || maxWords <= 0) {
+        return text;
+      }
+      const normalizedText = String(text ?? '');
+      const trimmedText = normalizedText.trim();
+      if (!trimmedText) {
+        return normalizedText;
+      }
+      const words = trimmedText.split(/\s+/);
+      if (words.length <= maxWords) {
+        return normalizedText;
+      }
+      return `${words.slice(0, maxWords).join(' ')}...`;
+    },
+    [maxWords]
+  );
 
   const splitIntoCharacters = text => {
     if (typeof Intl !== 'undefined' && Intl.Segmenter) {
@@ -42,7 +62,7 @@ const RotatingText = forwardRef((props, ref) => {
   };
 
   const elements = useMemo(() => {
-    const currentText = texts[currentTextIndex];
+    const currentText = truncateByWords(texts[currentTextIndex]);
     if (splitBy === 'characters') {
       const words = currentText.split(' ');
       return words.map((word, i) => ({

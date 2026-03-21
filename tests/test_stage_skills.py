@@ -27,6 +27,12 @@ EXPECTED_COMPANION_SKILLS = {
     "rebuttal",
 }
 
+INTERACTION_CONTRACT_SKILLS = EXPECTED_STAGE_SKILLS | {
+    "intake-audit",
+    "review",
+    "rebuttal",
+}
+
 
 def test_src_stage_skills_exist_and_are_nontrivial() -> None:
     root = repo_root() / "src" / "skills"
@@ -66,6 +72,37 @@ def test_new_companion_skill_reference_files_exist() -> None:
     assert (root / "rebuttal" / "references" / "evidence-update-template.md").exists()
     assert (root / "rebuttal" / "references" / "review-matrix-template.md").exists()
     assert (root / "rebuttal" / "references" / "response-letter-template.md").exists()
+
+
+def test_stage_plan_and_checklist_templates_exist() -> None:
+    root = repo_root() / "src" / "skills"
+    assert (root / "baseline" / "references" / "baseline-plan-template.md").exists()
+    assert (root / "baseline" / "references" / "baseline-checklist-template.md").exists()
+    assert (root / "experiment" / "references" / "main-experiment-plan-template.md").exists()
+    assert (root / "experiment" / "references" / "main-experiment-checklist-template.md").exists()
+    assert (root / "analysis-campaign" / "references" / "campaign-plan-template.md").exists()
+    assert (root / "analysis-campaign" / "references" / "campaign-checklist-template.md").exists()
+
+
+def test_write_skill_venue_templates_exist_and_sync(temp_home: Path) -> None:
+    root = repo_root() / "src" / "skills" / "write" / "templates"
+    assert (root / "README.md").exists()
+    assert (root / "DEEPSCIENTIST_NOTES.md").exists()
+    assert (root / "UPSTREAM_LICENSE.txt").exists()
+    assert (root / "iclr2026" / "iclr2026_conference.tex").exists()
+    assert (root / "icml2026" / "example_paper.tex").exists()
+    assert (root / "neurips2025" / "main.tex").exists()
+    assert (root / "acl" / "acl_latex.tex").exists()
+
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create("write template sync quest")
+    quest_root = Path(quest["quest_root"])
+
+    synced_root = quest_root / ".codex" / "skills" / "deepscientist-write" / "templates"
+    assert (synced_root / "DEEPSCIENTIST_NOTES.md").exists()
+    assert (synced_root / "iclr2026" / "iclr2026_conference.tex").exists()
+    assert (synced_root / "acl" / "acl_latex.tex").exists()
 
 
 def test_idea_skill_requires_memory_first_literature_survey() -> None:
@@ -108,6 +145,9 @@ def test_quest_creation_syncs_all_stage_skills(temp_home: Path) -> None:
     assert EXPECTED_STAGE_SKILLS.issubset(synced_claude)
     assert EXPECTED_COMPANION_SKILLS.issubset(synced_codex)
     assert EXPECTED_COMPANION_SKILLS.issubset(synced_claude)
+    assert (quest_root / ".codex" / "prompts" / "system.md").exists()
+    assert (quest_root / ".codex" / "prompts" / "contracts" / "shared_interaction.md").exists()
+    assert (quest_root / ".codex" / "prompts" / "connectors" / "qq.md").exists()
 
 
 def test_skill_resync_repairs_frontmatter_and_removes_stale_files(temp_home: Path) -> None:
@@ -157,11 +197,32 @@ def test_baseline_skill_documents_confirm_or_waive_gate() -> None:
     assert "default to reuse-and-verify" in text
 
 
+def test_baseline_skill_documents_uv_first_python_setup() -> None:
+    text = (repo_root() / "src" / "skills" / "baseline" / "SKILL.md").read_text(encoding="utf-8")
+    assert "environment setup should be standardized around `uv`" in text
+    assert "### Python environment rule: use `uv`" in text
+    assert "uv sync" in text
+    assert "uv venv" in text
+    assert "uv pip install" in text
+    assert "uv run python" in text
+    assert "Only accept a non-`uv` environment route" in text
+
+
 def test_decision_skill_requires_reuse_baseline_to_land_on_attach_and_confirm() -> None:
     text = (repo_root() / "src" / "skills" / "decision" / "SKILL.md").read_text(encoding="utf-8")
     assert "artifact.attach_baseline(...)" in text
     assert "artifact.confirm_baseline(...)" in text
     assert "explicit blocker or waiver" in text
+
+
+def test_experiment_and_decision_skills_document_activate_branch_and_analysis_cost_gate() -> None:
+    experiment_text = (repo_root() / "src" / "skills" / "experiment" / "SKILL.md").read_text(encoding="utf-8")
+    decision_text = (repo_root() / "src" / "skills" / "decision" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "artifact.activate_branch(...)" in experiment_text
+    assert "clear academic or claim-level value" in experiment_text
+    assert "artifact.activate_branch(...)" in decision_text
+    assert "extra resource cost" in decision_text
 
 
 def test_prompt_builder_skill_paths_only_reference_existing_files(temp_home: Path) -> None:
@@ -182,30 +243,23 @@ def test_prompt_builder_skill_paths_only_reference_existing_files(temp_home: Pat
     assert f"- finalize: primary={finalize_primary}" in prompt
 
 
-def test_all_stage_skills_document_blocking_decision_request_options_and_timeout() -> None:
+def test_shared_interaction_contract_covers_blocking_and_mailbox_rules() -> None:
+    text = (repo_root() / "src" / "prompts" / "contracts" / "shared_interaction.md").read_text(encoding="utf-8")
+    assert "1 to 3 concrete options" in text
+    assert "wait up to 1 day" in text
+    assert "missing external credential or secret" in text
+    assert "sleep 3600" in text
+    assert "highest-priority user instruction bundle" in text
+    assert "Immediately follow any non-empty mailbox poll" in text
+    assert "real user-visible progress" in text
+    assert "roughly 20 tool calls or about 15 minutes" in text
+
+
+def test_stage_and_companion_skills_reference_shared_interaction_contract() -> None:
     root = repo_root() / "src" / "skills"
-    for skill_id in EXPECTED_STAGE_SKILLS:
+    for skill_id in INTERACTION_CONTRACT_SKILLS:
         text = (root / skill_id / "SKILL.md").read_text(encoding="utf-8")
-        assert "1 to 3 concrete options" in text
-        assert "wait up to 1 day" in text
-
-
-def test_all_stage_skills_document_credential_wait_exception() -> None:
-    root = repo_root() / "src" / "skills"
-    for skill_id in EXPECTED_STAGE_SKILLS:
-        text = (root / skill_id / "SKILL.md").read_text(encoding="utf-8")
-        assert "missing external credential or secret" in text
-        assert "sleep 3600" in text
-
-
-def test_all_stage_skills_document_mailbox_preemption_and_acknowledgement() -> None:
-    root = repo_root() / "src" / "skills"
-    for skill_id in EXPECTED_STAGE_SKILLS:
-        text = (root / skill_id / "SKILL.md").read_text(encoding="utf-8")
-        assert "highest-priority user instruction bundle" in text
-        assert "Immediately follow any non-empty mailbox poll" in text
-        assert "real user-visible progress" in text
-        assert "Do not update by tool-call cadence." in text
+        assert "Follow the shared interaction contract injected by the system prompt." in text
 
 
 def test_all_stage_skills_require_stage_start_memory_retrieval_and_stage_end_memory_write() -> None:
@@ -306,6 +360,9 @@ def test_figure_polish_skill_requires_render_inspect_revise_workflow_and_style_a
     assert "Do not treat a figure as final" in text
     assert "main message obvious" in text
     assert "color-vision-deficient" in text
+    assert "Publication-grade figure refinement is recommended with AutoFigure-Edit" in text
+    assert "https://github.com/ResearAI/AutoFigure-Edit" in text
+    assert "https://deepscientist" in text
     assert style_asset.exists()
 
 

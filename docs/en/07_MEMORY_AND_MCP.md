@@ -209,7 +209,44 @@ Example:
 Do not replace an experiment artifact with a memory card.
 Do not replace a reusable lesson with a progress artifact.
 
-## 4. Bash exec usage
+## 4. Artifact metric-contract rules
+
+Use `artifact` as the authoritative submission surface for baseline and main-experiment metrics.
+
+### `artifact.confirm_baseline(...)`
+
+For a confirmed baseline:
+
+- the canonical metric contract should live in `<baseline_root>/json/metric_contract.json`
+- the canonical `metrics_summary` should be a flat top-level dictionary keyed by the paper-facing metric ids
+- if the raw evaluator output is nested, map each required canonical metric through explicit `origin_path` fields inside `metric_contract.metrics`
+- every canonical baseline metric entry should explain where the number came from:
+  - `description`
+  - either `derivation` or `origin_path`
+  - `source_ref`
+- keep `primary_metric` as the headline metric only; do not use it to erase the rest of the accepted paper-facing comparison surface
+
+### `artifact.record_main_experiment(...)`
+
+For a main experiment recorded against a confirmed baseline:
+
+- use the confirmed baseline metric-contract JSON as the canonical comparison contract
+- report every required baseline metric id in the main experiment submission
+- extra metrics are allowed, but missing required baseline metrics are not
+- keep the original evaluation code and metric definitions for the canonical baseline metrics
+- if an extra evaluator is genuinely necessary, record it as supplementary evidence instead of replacing the canonical comparator
+
+### Validation and temporary notes
+
+- when the MCP tool runs strict validation, contract failures return structured error payloads such as:
+  - `missing_metric_ids`
+  - `baseline_metric_ids`
+  - `baseline_metric_details`
+  - `evaluation_protocol_mismatch`
+- `Result/metric.md` may be used as temporary scratch memory while working, but it is optional and not authoritative
+- if `Result/metric.md` exists, reconcile it against the final baseline or main-experiment submission before calling the artifact tool
+
+## 5. Bash exec usage
 
 Use `bash_exec` for monitored commands:
 
@@ -226,7 +263,7 @@ bash_exec.bash_exec(mode="read", id="<bash_id>")
 
 Use `kill` only when the quest truly needs to stop the session.
 
-## 5. Prompt-level expectations
+## 6. Prompt-level expectations
 
 The agent should normally follow this discipline:
 
@@ -237,7 +274,7 @@ The agent should normally follow this discipline:
 5. `bash_exec` for durable shell work
 6. `memory.write(...)` only after a real durable finding appears
 
-## 6. UI expectation
+## 7. UI expectation
 
 In `/projects/{id}` Studio trace:
 

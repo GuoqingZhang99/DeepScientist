@@ -67,6 +67,10 @@ export interface QuestSummary {
       key?: string
       value?: string | number
       delta_vs_baseline?: string | number
+      label?: string | null
+      direction?: string | null
+      unit?: string | null
+      decimals?: number | null
     }
     latest_bash_session?: Record<string, unknown> | null
   }
@@ -162,12 +166,16 @@ export interface ConnectorProfileSnapshot {
   label?: string | null
   bot_name?: string | null
   app_id?: string | null
+  transport?: string | null
   main_chat_id?: string | null
   default_conversation_id?: string | null
   last_conversation_id?: string | null
   connection_state?: string | null
   auth_state?: string | null
   last_error?: string | null
+  inbox_count?: number
+  outbox_count?: number
+  ignored_count?: number
   discovered_targets?: ConnectorTargetSnapshot[]
   recent_conversations?: ConnectorRecentConversation[]
   bindings?: ConnectorBindingSnapshot[]
@@ -378,6 +386,8 @@ export interface OpenDocumentPayload {
     tags?: string[]
     source_kind?: string
     renderer_hint?: string
+    git_revision?: string
+    git_path?: string
     help_markdown?: string
     system_testable?: boolean
     structured_config?: Record<string, unknown>
@@ -522,7 +532,7 @@ export interface MainExperimentResultPayload {
   updated_at?: string
   paths?: Record<string, string>
   details?: Record<string, unknown>
-  metrics_summary?: Record<string, string | number>
+  metrics_summary?: Record<string, unknown>
   metric_rows?: Array<Record<string, unknown>>
   metric_contract?: MetricContractPayload
   baseline_ref?: {
@@ -561,6 +571,8 @@ export interface GitBranchNode {
   parent_ref?: string | null
   compare_base?: string | null
   current?: boolean
+  active_workspace?: boolean
+  research_head?: boolean
   head?: string
   updated_at?: string
   subject?: string
@@ -576,6 +588,10 @@ export interface GitBranchNode {
     key?: string
     value?: string | number
     delta_vs_baseline?: string | number
+    label?: string | null
+    direction?: string | null
+    unit?: string | null
+    decimals?: number | null
   }
   latest_summary?: string
   latest_result?: MainExperimentResultPayload | null
@@ -608,6 +624,9 @@ export interface GitBranchesPayload {
   quest_id: string
   default_ref: string
   current_ref?: string
+  active_workspace_ref?: string | null
+  research_head_ref?: string | null
+  workspace_mode?: string
   head?: string
   nodes: GitBranchNode[]
   edges: GitBranchEdge[]
@@ -707,6 +726,16 @@ export interface GitDiffPayload {
   removed?: number
   lines: string[]
   truncated?: boolean
+}
+
+export interface FileChangeDiffPayload extends GitDiffPayload {
+  available: boolean
+  source: 'patch_store' | 'run_range' | 'unavailable'
+  display_path?: string
+  run_id?: string
+  event_id?: string
+  branch?: string | null
+  message?: string | null
 }
 
 export interface GitLogPayload {
@@ -1062,6 +1091,8 @@ export type FeedItem =
   | {
       id: string
       type: 'operation'
+      eventId?: string
+      runId?: string | null
       label: 'tool_call' | 'tool_result'
       content: string
       toolName?: string

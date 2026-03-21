@@ -1469,6 +1469,10 @@
   color: var(--ds-copilot-text-muted);
 }
 
+.ds-copilot-status-text {
+  font-size: 0.825rem;
+}
+
 .ds-copilot-drag-area {
   touch-action: none;
   cursor: grab;
@@ -2442,64 +2446,80 @@
 
 .ds-stage-diff-shell {
   --diff-background-color: transparent;
-  --diff-text-color: rgb(31 41 55);
+  --diff-text-color: #24292f;
   --diff-font-family: var(--font-mono);
-  --diff-selection-background-color: rgba(191, 219, 254, 0.75);
-  --diff-gutter-insert-background-color: rgba(203, 232, 212, 0.72);
-  --diff-gutter-delete-background-color: rgba(238, 210, 214, 0.7);
-  --diff-gutter-selected-background-color: rgba(239, 232, 214, 0.72);
-  --diff-code-insert-background-color: rgba(224, 243, 230, 0.72);
-  --diff-code-delete-background-color: rgba(246, 226, 229, 0.7);
-  --diff-code-insert-edit-background-color: rgba(180, 214, 189, 0.9);
-  --diff-code-delete-edit-background-color: rgba(227, 180, 186, 0.9);
-  --diff-code-selected-background-color: rgba(239, 232, 214, 0.74);
-  --diff-omit-gutter-line-color: rgba(149, 63, 81, 0.72);
+  --diff-selection-background-color: rgba(84, 174, 255, 0.22);
+  --diff-gutter-insert-background-color: #ccffd8;
+  --diff-gutter-delete-background-color: #ffd7d5;
+  --diff-gutter-selected-background-color: #f6f8fa;
+  --diff-code-insert-background-color: #dafbe1;
+  --diff-code-delete-background-color: #ffebe9;
+  --diff-code-insert-edit-background-color: #aceebb;
+  --diff-code-delete-edit-background-color: #ffcecb;
+  --diff-code-selected-background-color: #f6f8fa;
+  --diff-omit-gutter-line-color: #cf222e;
 }
 
 .dark .ds-stage-diff-shell {
-  --diff-text-color: rgb(226 232 240);
-  --diff-selection-background-color: rgba(71, 85, 105, 0.72);
-  --diff-gutter-insert-background-color: rgba(56, 94, 72, 0.42);
-  --diff-gutter-delete-background-color: rgba(100, 56, 68, 0.4);
-  --diff-gutter-selected-background-color: rgba(99, 88, 68, 0.48);
-  --diff-code-insert-background-color: rgba(44, 74, 57, 0.42);
-  --diff-code-delete-background-color: rgba(84, 46, 58, 0.4);
-  --diff-code-insert-edit-background-color: rgba(76, 120, 92, 0.52);
-  --diff-code-delete-edit-background-color: rgba(128, 78, 90, 0.52);
-  --diff-code-selected-background-color: rgba(99, 88, 68, 0.48);
-  --diff-omit-gutter-line-color: rgba(194, 115, 133, 0.7);
+  --diff-text-color: #e6edf3;
+  --diff-selection-background-color: rgba(56, 139, 253, 0.2);
+  --diff-gutter-insert-background-color: rgba(47, 129, 81, 0.18);
+  --diff-gutter-delete-background-color: rgba(248, 81, 73, 0.18);
+  --diff-gutter-selected-background-color: rgba(110, 118, 129, 0.14);
+  --diff-code-insert-background-color: rgba(46, 160, 67, 0.15);
+  --diff-code-delete-background-color: rgba(248, 81, 73, 0.15);
+  --diff-code-insert-edit-background-color: rgba(70, 149, 74, 0.32);
+  --diff-code-delete-edit-background-color: rgba(219, 67, 67, 0.3);
+  --diff-code-selected-background-color: rgba(110, 118, 129, 0.14);
+  --diff-omit-gutter-line-color: #ff7b72;
 }
 
 .ds-github-diff-table {
   font-size: 12px;
+  width: max-content;
+  min-width: 100%;
 }
 
 .ds-github-diff-table .diff {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
 }
 
 .ds-github-diff-table .diff-gutter {
-  min-width: 46px;
-  padding: 0 10px;
-  color: rgba(93, 90, 85, 0.9);
+  min-width: 54px;
+  padding: 0 12px;
+  color: rgba(87, 96, 106, 0.96);
+  border-right: 1px solid rgba(31, 35, 40, 0.08);
 }
 
 .dark .ds-github-diff-table .diff-gutter {
-  color: rgba(200, 192, 181, 0.9);
+  color: rgba(139, 148, 158, 0.96);
+  border-right-color: rgba(240, 246, 252, 0.08);
 }
 
 .ds-github-diff-table .diff-code {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
   padding: 0 14px;
   line-height: 1.65;
-  word-break: break-word;
+}
+
+.ds-github-diff-table .diff-line {
+  white-space: pre;
+}
+
+.ds-github-diff-table .diff-code-edit {
+  border-radius: 2px;
 }
 
 .ds-github-diff-hunk {
   padding: 4px 14px;
   border-top: 1px solid rgba(17, 24, 39, 0.06);
   border-bottom: 1px solid rgba(17, 24, 39, 0.06);
-  background: rgba(47, 52, 55, 0.045);
-  color: rgba(93, 90, 85, 0.95);
+  background: #ddf4ff;
+  color: #0969da;
   font-family: var(--font-mono);
   font-size: 11px;
 }
@@ -2507,6 +2527,6 @@
 .dark .ds-github-diff-hunk {
   border-top-color: rgba(255, 255, 255, 0.08);
   border-bottom-color: rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(200, 192, 181, 0.95);
+  background: rgba(56, 139, 253, 0.16);
+  color: #79c0ff;
 }

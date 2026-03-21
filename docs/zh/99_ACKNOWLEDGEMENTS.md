@@ -11,6 +11,7 @@ DeepScientist 的构思、架构设计与实现过程中，受到了许多优秀
 - AlphaEvolve
 - OpenEvolve
 - EvoScientist
+- Orchestra-Research
 - Orchestra-Research/AI-Research-SKILLs
 
 这些项目在自动化科研、开放式探索、进化式搜索、实验组织与智能研究代理等方向上的探索，为 DeepScientist 的设计提供了重要参照。

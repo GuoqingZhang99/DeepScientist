@@ -360,6 +360,22 @@ export function QuestSettingsSurface({
                                 </SelectContent>
                               </Select>
                             </div>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              onClick={() =>
+                                setSelection((current) => ({
+                                  ...current,
+                                  [connector.name]: '',
+                                }))
+                              }
+                              disabled={!chosen}
+                              className="shrink-0"
+                            >
+                              <Unlink2 className="mr-1.5 h-3.5 w-3.5" />
+                              Close
+                            </Button>
                           </div>
 
                           {chosenTarget ? (

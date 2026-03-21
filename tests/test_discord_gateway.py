@@ -22,6 +22,9 @@ def test_discord_gateway_identify_and_message_normalization(temp_home: Path) -> 
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
     manager.ensure_files()
+    config = manager.load_named("config")
+    config["connectors"]["system_enabled"]["discord"] = True
+    write_yaml(manager.path_for("config"), config)
     connectors = manager.load_named("connectors")
     connectors["discord"]["enabled"] = True
     connectors["discord"]["transport"] = "gateway"

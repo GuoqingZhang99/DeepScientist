@@ -19,13 +19,9 @@ Do not invent a separate experiment system for those cases.
 
 ## Interaction discipline
 
-- Treat `artifact.interact(...)` as the main long-lived communication thread across TUI, web, and bound connectors.
-- If `artifact.interact(...)` returns queued user requirements, treat them as the highest-priority user instruction bundle before continuing the campaign.
-- Immediately follow any non-empty mailbox poll with another `artifact.interact(...)` update that confirms receipt; if the request is directly answerable, answer there, otherwise say the current subtask is paused, give a short plan plus nearest report-back point, and handle that request first.
-- Emit `artifact.interact(kind='progress', reply_mode='threaded', ...)` when there is real user-visible progress: the first meaningful signal of long work, a meaningful checkpoint, or a concise keepalive if active work has drifted beyond roughly 10 to 30 tool calls without a user-visible update.
+- Follow the shared interaction contract injected by the system prompt.
+- For ordinary active work, prefer a concise progress update once work has crossed roughly 10 tool calls with a human-meaningful delta, and do not drift beyond roughly 20 tool calls or about 15 minutes without a user-visible update.
 - Prefer `bash_exec` for campaign slice commands so each run has a durable session id, quest-local log folder, and later `read/list/kill` control.
-- Keep progress updates chat-like and easy to understand: say what changed, what it means, and what happens next.
-- Default to plain-language summaries. Do not mention file paths, artifact ids, branch/worktree ids, session ids, raw commands, or raw logs unless the user asks or needs them to act.
 - Keep ordinary subtask completions concise. When an analysis campaign or a stage-significant campaign checkpoint is complete, upgrade to a richer `artifact.interact(kind='milestone', reply_mode='threaded', ...)` report.
 - That richer campaign milestone report should normally cover: which slices completed, the main takeaway, whether the claim got stronger or weaker, and the exact recommended next route.
 - That richer milestone report is still normally non-blocking. If the post-campaign route is already clear, continue automatically after reporting instead of waiting for explicit acknowledgment.
@@ -52,8 +48,6 @@ Do not invent a separate experiment system for those cases.
 - If plotting in Python, reuse the fixed Morandi plotting starter from the system prompt and keep the same palette discipline across the whole campaign.
 - If the runtime starts an auto-continue turn with no new user message, resume from the current campaign state and active requirements instead of replaying the previous user turn.
 - Progress message templates are references only. Adapt to the actual context and vary wording so messages feel human, respectful, and non-robotic.
-- Use `reply_mode='blocking'` only for real user decisions that cannot be resolved from local evidence.
-- For any blocking decision request, provide 1 to 3 concrete options, put the recommended option first, explain each option's actual content plus pros and cons, and wait up to 1 day when feasible. If the blocker is a missing external credential or secret that only the user can provide, keep the quest waiting, ask the user to supply it or choose an alternative, and do not self-resolve; if resumed without that credential and no other work is possible, a long low-frequency wait such as `bash_exec(command='sleep 3600', mode='await', timeout_seconds=3700)` is acceptable. Otherwise choose the best option yourself and notify the user of the chosen option if the timeout expires.
 - If a threaded user reply arrives, interpret it relative to the latest campaign progress update before assuming the task changed completely.
 
 ## Stage purpose
@@ -69,6 +63,17 @@ It preserves the core old DeepScientist analysis-experimenter discipline:
 The campaign should behave like a disciplined evidence program, not an unstructured pile of extra runs.
 
 For campaign prioritization and writing-facing slice design, read `references/campaign-design.md`.
+
+## Quick workflow
+
+Treat this as the compressed campaign map. The authoritative slice protocol and aggregation rules remain in `Workflow`.
+
+1. Bind the campaign to the parent run or idea and, when writing-facing, to the selected outline.
+2. Before launching slices, create `PLAN.md` and `CHECKLIST.md`.
+3. Use `PLAN.md` as the durable charter and `CHECKLIST.md` as the living execution surface while launching, monitoring, recording, and aggregating slices.
+4. Run claim-critical slices first and smoke-test long slices before their real runs.
+5. Revise the plan if slice feasibility, ordering, comparators, or campaign interpretation changes materially, and record every slice durably, including honest non-success states.
+6. Close meaningful campaign milestones with a concise `1-2` sentence summary that says whether the claim gained stable support, partial support, contradiction, or unresolved ambiguity, and what happens next.
 
 ## Non-negotiable rules
 
@@ -113,6 +118,17 @@ Treat quest files, attached user assets, checkpoints, configs, extracted texts, 
 Do not design slices around hypothetical resources that the current system cannot actually access or run.
 If a slice cannot be executed with the current system, redesign it around available assets or explicitly report that the task cannot currently be completed.
 If infeasibility appears mid-run, attempt bounded recovery first; if still blocked, record the slice with a non-success status and explain why.
+
+## Required plan and checklist
+
+Before launching any real campaign slice, create a quest-visible `PLAN.md` and `CHECKLIST.md`.
+
+- Use `references/campaign-plan-template.md` as the canonical structure for `PLAN.md`.
+- Use `references/campaign-checklist-template.md` as the canonical structure for `CHECKLIST.md`.
+- `PLAN.md` is the durable campaign charter and should cover the claim under test, slice table, comparability boundary, available assets, required comparators, smoke and main-run strategy, monitoring and sleep rules, reporting expectations, and a revision log.
+- `CHECKLIST.md` is the living campaign execution list; update it during launch, asset preparation, slice execution, aggregation, and route changes.
+- If slice ordering, feasibility, required baselines, campaign interpretation, or the writing-facing outline mapping changes materially, revise `PLAN.md` before continuing.
+- The later charter report, slice artifacts, and aggregate report remain required, but `PLAN.md` and `CHECKLIST.md` should be the canonical campaign-control surface during execution.
 
 ## Truth sources
 
@@ -166,6 +182,7 @@ Before launching any slice, record the campaign start through artifacts:
 3. update `plan.md` if the campaign materially changes the quest path
 
 Do not start a multi-slice campaign from chat-only intent.
+Do not start it from chat-only intent plus vague notes either: write `PLAN.md` and `CHECKLIST.md` first, using `references/campaign-plan-template.md` and `references/campaign-checklist-template.md` as the default structures.
 
 After the charter and launch decision are durably recorded, send one threaded `artifact.interact(kind='milestone', ...)` update naming:
 
@@ -215,6 +232,8 @@ The charter should also include:
 - whether any slice requires isolated code changes or only reruns/config changes
 - the top-level success condition for ending the campaign
 - the top-level abandonment condition for stopping it early
+
+Prefer to keep this charter in `PLAN.md` first and mirror the execution frontier in `CHECKLIST.md`.
 
 For each analysis question, also state:
 
@@ -321,6 +340,8 @@ For slices that run longer than a quick smoke check:
 
 - first run a bounded smoke test so the slice command, outputs, and metric path are validated cheaply
 - once the smoke test passes, launch the real slice with `bash_exec(mode='detach', ...)` and normally leave `timeout_seconds` unset for that long run
+- `bash_exec(mode='read', id=...)` returns the full rendered log when it is 2000 lines or fewer; for longer logs it returns the first 500 lines plus the last 1500 lines and a hint to inspect omitted sections with `start` and `tail`
+- if you need a middle section that was omitted from that default preview, use `bash_exec(mode='read', id=..., start=..., tail=...)`
 - monitor them with `bash_exec(mode='list')` and `bash_exec(mode='read', id=..., tail_limit=..., order='desc')`
 - after the first read, prefer `bash_exec(mode='read', id=..., after_seq=last_seen_seq, tail_limit=..., order='asc')` for incremental monitoring
 - if ids become unclear, recover them through `bash_exec(mode='history')`
@@ -328,6 +349,10 @@ For slices that run longer than a quick smoke check:
 - use `silent_seconds`, `progress_age_seconds`, `signal_age_seconds`, and `watchdog_overdue` from `bash_exec(mode='list'|'read', ...)` as the default stall checks
 - use an explicit wait-and-check cadence of about `60s`, `120s`, `300s`, `600s`, `1800s`, then every `1800s` while still running
 - if needed, use an explicit bounded wait such as `bash_exec(command='sleep 60', mode='await', timeout_seconds=70)` or `bash_exec(mode='await', id=..., timeout_seconds=...)` between checks
+- canonical sleep choice:
+  - if you only need wall-clock waiting between checks, use `bash_exec(command='sleep N', mode='await', timeout_seconds=N+buffer, ...)`
+  - keep a real buffer on that sleep timeout; do not set `timeout_seconds` exactly equal to `N`
+  - if you are waiting on an already running managed session, prefer `bash_exec(mode='await', id=..., timeout_seconds=...)` instead of starting a new sleep command
 - after the first meaningful signal and then at real checkpoints (e.g., completion, or roughly every ~30 minutes if still running), send `artifact.interact(kind='progress', ...)` so the user sees slice status, latest evidence, and the next check point
 - after each completed sleep / await monitoring cycle for an active slice, send another concise `artifact.interact(kind='progress', ...)` update rather than going silent
 - include the estimated next reply time or next check time in those monitoring updates
@@ -429,6 +454,7 @@ The aggregated report should also answer:
 - which planned slices were intentionally skipped because earlier results made them low value?
 
 When the aggregated campaign report is complete, send a richer threaded `artifact.interact(kind='milestone', ...)` update.
+Lead that milestone with a concise `1-2` sentence campaign outcome summary before expanding into slice-level detail.
 
 If QQ milestone media is enabled and the aggregated report materially changes the claim boundary, you may attach one campaign summary PNG to that closing milestone update.
 That update should explicitly classify the campaign outcome in the same language as the report:

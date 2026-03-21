@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 
 from deepscientist.artifact import ArtifactService
+from deepscientist.bash_exec import BashExecService
 from deepscientist.config import ConfigManager
 from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.mcp.context import McpContext
 from deepscientist.mcp.server import build_artifact_server, build_bash_exec_server, build_memory_server
 from deepscientist.quest import QuestService
-from deepscientist.shared import read_jsonl, write_yaml
+from deepscientist.shared import read_jsonl, write_json, write_yaml
 from deepscientist.skills import SkillInstaller
 
 
@@ -20,6 +21,68 @@ def _unwrap_tool_result(result):
     if isinstance(result, tuple) and len(result) == 2:
         return result[1]
     return result
+
+
+def _detailed_metric_contract(
+    metric_ids: list[str],
+    *,
+    primary_metric_id: str | None = None,
+    directions: dict[str, str] | None = None,
+    evaluation_protocol: dict[str, object] | None = None,
+) -> dict[str, object]:
+    resolved_directions = directions or {}
+    payload: dict[str, object] = {
+        "primary_metric_id": primary_metric_id or (metric_ids[0] if metric_ids else None),
+        "metrics": [
+            {
+                "metric_id": metric_id,
+                "label": metric_id,
+                "direction": resolved_directions.get(metric_id, "maximize"),
+                "description": f"Canonical metric `{metric_id}`.",
+                "derivation": f"Read `{metric_id}` from the canonical evaluation output.",
+                "source_ref": "paper table + eval.py",
+                "required": True,
+            }
+            for metric_id in metric_ids
+        ],
+    }
+    if evaluation_protocol:
+        payload["evaluation_protocol"] = evaluation_protocol
+    return payload
+
+
+def _write_fake_bash_session(
+    temp_home: Path,
+    quest_root: Path,
+    bash_id: str,
+    *,
+    log_lines: list[str],
+    status: str = "completed",
+) -> None:
+    service = BashExecService(temp_home)
+    session_dir = service.session_dir(quest_root, bash_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    write_json(
+        service.meta_path(quest_root, bash_id),
+        {
+            "id": bash_id,
+            "bash_id": bash_id,
+            "quest_id": quest_root.name,
+            "status": status,
+            "kind": "exec",
+            "command": "printf 'fixture\\n'",
+            "workdir": "",
+            "started_at": "2026-03-20T00:00:00+00:00",
+            "finished_at": "2026-03-20T00:00:01+00:00",
+            "updated_at": "2026-03-20T00:00:01+00:00",
+        },
+    )
+    terminal_log = service.terminal_log_path(quest_root, bash_id)
+    terminal_log.write_text(
+        "\n".join(log_lines) + ("\n" if log_lines else ""),
+        encoding="utf-8",
+    )
+    service.log_path(quest_root, bash_id).write_text("", encoding="utf-8")
 
 
 def test_memory_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
@@ -113,6 +176,14 @@ def test_artifact_mcp_server_interact_delivers_to_bound_qq_connector(
         manager.ensure_files()
         connectors = manager.load_named("connectors")
         connectors["qq"]["enabled"] = True
+        connectors["qq"]["profiles"] = [
+            {
+                "profile_id": "qq-main",
+                "app_id": "test-app",
+                "app_secret": "test-secret",
+                "main_chat_id": "CF8D2D559AA956B48751539ADFB98865",
+            }
+        ]
         write_yaml(manager.path_for("connectors"), connectors)
 
         quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create("mcp artifact qq quest")
@@ -213,6 +284,7 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
             "record",
             "checkpoint",
             "prepare_branch",
+            "activate_branch",
             "submit_idea",
             "list_research_branches",
             "resolve_runtime_refs",
@@ -287,6 +359,14 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
                         "summary": "published from mcp server test",
                         "primary_metric": {"name": "accuracy", "value": 0.9},
                         "metrics_summary": {"accuracy": 0.9},
+                        "metric_contract": _detailed_metric_contract(
+                            ["accuracy"],
+                            primary_metric_id="accuracy",
+                            evaluation_protocol={
+                                "scope_id": "full",
+                                "code_paths": ["eval.py"],
+                            },
+                        ),
                         "baseline_variants": [{"variant_id": "main", "label": "Main"}],
                         "default_variant_id": "main",
                     }
@@ -419,6 +499,23 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         assert by_branch[second_idea_result["branch"]]["foundation_ref"]["kind"] == "run"
         assert by_branch[second_idea_result["branch"]]["foundation_reason"] == "Carry forward the strongest measured branch."
 
+        activated = _unwrap_tool_result(
+            await server.call_tool(
+                "activate_branch",
+                {
+                    "branch": idea_result["branch"],
+                },
+            )
+        )
+        assert activated["ok"] is True
+        assert activated["branch"] == idea_result["branch"]
+        assert activated["idea_id"] == idea_result["idea_id"]
+        assert activated["next_anchor"] == "decision"
+
+        refs_after_activate = _unwrap_tool_result(await server.call_tool("resolve_runtime_refs", {}))
+        assert refs_after_activate["current_workspace_branch"] == idea_result["branch"]
+        assert refs_after_activate["research_head_branch"] == second_idea_result["branch"]
+
         outlines_before = _unwrap_tool_result(await server.call_tool("list_paper_outlines", {}))
         assert outlines_before["selected_outline_ref"] is None
         assert outlines_before["count"] == 0
@@ -497,7 +594,7 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         )
         assert slice_result["ok"] is True
         assert slice_result["completed"] is True
-        assert slice_result["returned_to_branch"] == second_idea_result["branch"]
+        assert slice_result["returned_to_branch"] == idea_result["branch"]
         assert Path(slice_result["result_json_path"]).exists()
         assert slice_result["evaluation_summary"]["takeaway"].startswith("Removing the adapter")
 
@@ -552,6 +649,98 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         )
         assert completion_result["ok"] is True
         assert completion_result["snapshot"]["status"] == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_artifact_mcp_server_returns_structured_metric_contract_failures(temp_home: Path) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create("mcp metric validation quest")
+        quest_root = Path(quest["quest_root"])
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            run_id="run-mcp-metrics",
+            active_anchor="baseline",
+            conversation_id="quest:test",
+            agent_role="pi",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+        server = build_artifact_server(context)
+
+        baseline_root = quest_root / "baselines" / "local" / "mcp-local-baseline"
+        baseline_root.mkdir(parents=True, exist_ok=True)
+        (baseline_root / "README.md").write_text("# MCP Local Baseline\n", encoding="utf-8")
+
+        baseline_failure = _unwrap_tool_result(
+            await server.call_tool(
+                "confirm_baseline",
+                {
+                    "baseline_path": "baselines/local/mcp-local-baseline",
+                    "baseline_id": "mcp-local-baseline",
+                    "summary": "Missing metric explanations should fail.",
+                    "metrics_summary": {"acc": 0.9},
+                    "primary_metric": {"metric_id": "acc", "value": 0.9},
+                    "metric_contract": {
+                        "primary_metric_id": "acc",
+                        "metrics": [{"metric_id": "acc", "direction": "maximize"}],
+                    },
+                },
+            )
+        )
+        assert baseline_failure["ok"] is False
+        assert baseline_failure["error_code"] == "baseline_metric_explanations_missing"
+        assert baseline_failure["validation_stage"] == "baseline"
+        assert baseline_failure["baseline_metric_details"][0]["metric_id"] == "acc"
+
+        baseline_success = _unwrap_tool_result(
+            await server.call_tool(
+                "confirm_baseline",
+                {
+                    "baseline_path": "baselines/local/mcp-local-baseline",
+                    "baseline_id": "mcp-local-baseline",
+                    "summary": "Strict baseline should now succeed.",
+                    "metrics_summary": {"acc": 0.9, "f1": 0.87},
+                    "primary_metric": {"metric_id": "acc", "value": 0.9},
+                    "metric_contract": _detailed_metric_contract(
+                        ["acc", "f1"],
+                        primary_metric_id="acc",
+                        evaluation_protocol={
+                            "scope_id": "full",
+                            "code_paths": ["eval.py"],
+                        },
+                    ),
+                },
+            )
+        )
+        assert baseline_success["ok"] is True
+
+        main_failure = _unwrap_tool_result(
+            await server.call_tool(
+                "record_main_experiment",
+                {
+                    "run_id": "main-missing-f1",
+                    "title": "Missing F1",
+                    "hypothesis": "This run omits one canonical metric.",
+                    "setup": "Reuse accepted baseline settings.",
+                    "execution": "Run evaluation once.",
+                    "results": "Only accuracy was reported.",
+                    "conclusion": "Should fail strict validation.",
+                    "metric_rows": [{"metric_id": "acc", "value": 0.93, "scope_id": "full"}],
+                },
+            )
+        )
+        assert main_failure["ok"] is False
+        assert main_failure["error_code"] == "main_experiment_metric_validation_failed"
+        assert main_failure["validation_stage"] == "main_experiment"
+        assert main_failure["baseline_metric_ids"] == ["acc", "f1"]
+        assert main_failure["missing_metric_ids"] == ["f1"]
+        assert main_failure["extra_metric_ids"] == []
 
     asyncio.run(scenario())
 
@@ -709,5 +898,241 @@ def test_bash_exec_mcp_server_supports_detach_read_list_and_kill(temp_home: Path
         assert stopped["bash_id"] == bash_id
         assert stopped["status"] == "terminated"
         assert Path(quest_root / stopped["log_path"]).exists()
+
+    asyncio.run(scenario())
+
+
+def test_bash_exec_sleep_protocol_supports_sleep_and_existing_session_waits(temp_home: Path) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create("mcp bash sleep quest")
+        quest_root = Path(quest["quest_root"])
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            run_id="run-mcp-bash-sleep",
+            active_anchor="experiment",
+            conversation_id=f"quest:{quest['quest_id']}",
+            agent_role="pi",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+        server = build_bash_exec_server(context)
+
+        sleep_ok = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "command": "sleep 1",
+                    "mode": "await",
+                    "timeout_seconds": 3,
+                    "comment": {"stage": "experiment", "goal": "sleep-check"},
+                },
+            )
+        )
+        assert sleep_ok["status"] == "completed"
+        assert sleep_ok["exit_code"] == 0
+
+        sleep_timeout = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "command": "sleep 3",
+                    "mode": "await",
+                    "timeout_seconds": 1,
+                    "comment": {"stage": "experiment", "goal": "sleep-timeout-check"},
+                },
+            )
+        )
+        timeout_bash_id = sleep_timeout["bash_id"]
+        timeout_final = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "mode": "await",
+                    "id": timeout_bash_id,
+                    "timeout_seconds": 5,
+                },
+            )
+        )
+        assert timeout_final["status"] == "terminated"
+        assert timeout_final["stop_reason"] == "timeout"
+
+        detached = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "command": "sleep 2; printf 'done\\n'",
+                    "mode": "detach",
+                    "comment": {"stage": "experiment", "goal": "await-existing-session"},
+                },
+            )
+        )
+        detached_bash_id = detached["bash_id"]
+
+        early_wait = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "mode": "await",
+                    "id": detached_bash_id,
+                    "timeout_seconds": 1,
+                },
+            )
+        )
+        assert early_wait["bash_id"] == detached_bash_id
+        assert early_wait["status"] == "running"
+
+        final_wait = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "mode": "await",
+                    "id": detached_bash_id,
+                    "timeout_seconds": 5,
+                },
+            )
+        )
+        assert final_wait["status"] == "completed"
+        assert final_wait["exit_code"] == 0
+
+        read_back = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "mode": "read",
+                    "id": detached_bash_id,
+                    "tail_limit": 10,
+                    "order": "desc",
+                },
+            )
+        )
+        assert any("done" in str(item.get("line") or "") for item in read_back["tail"])
+
+    asyncio.run(scenario())
+
+
+def test_bash_exec_mcp_server_default_read_truncates_long_logs_with_hint(temp_home: Path) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create(
+            "mcp bash long log quest"
+        )
+        quest_root = Path(quest["quest_root"])
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            run_id="run-mcp-bash-long-log",
+            active_anchor="experiment",
+            conversation_id=f"quest:{quest['quest_id']}",
+            agent_role="pi",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+        _write_fake_bash_session(
+            temp_home,
+            quest_root,
+            "bash-long-preview",
+            log_lines=[f"line-{index}" for index in range(1, 2301)],
+        )
+        server = build_bash_exec_server(context)
+
+        result = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "mode": "read",
+                    "id": "bash-long-preview",
+                },
+            )
+        )
+
+        assert result["bash_id"] == "bash-long-preview"
+        assert result["log_truncated"] is True
+        assert result["log_line_count"] == 2300
+        assert result["log_preview_head_lines"] == 500
+        assert result["log_preview_tail_lines"] == 1500
+        assert result["log_preview_omitted_lines"] == 300
+        assert "line-1" in result["log"]
+        assert "line-500" in result["log"]
+        assert "line-501" not in result["log"]
+        assert "line-800" not in result["log"]
+        assert "line-801" in result["log"]
+        assert "line-2300" in result["log"]
+        assert "start=..., tail=..." in result["log_read_hint"]
+
+    asyncio.run(scenario())
+
+
+def test_bash_exec_mcp_server_read_supports_start_and_tail_windows(temp_home: Path) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create(
+            "mcp bash start window quest"
+        )
+        quest_root = Path(quest["quest_root"])
+        context = McpContext(
+            home=temp_home,
+            quest_id=quest["quest_id"],
+            quest_root=quest_root,
+            run_id="run-mcp-bash-start-window",
+            active_anchor="experiment",
+            conversation_id=f"quest:{quest['quest_id']}",
+            agent_role="pi",
+            worker_id="worker-main",
+            worktree_root=None,
+            team_mode="single",
+        )
+        _write_fake_bash_session(
+            temp_home,
+            quest_root,
+            "bash-window-preview",
+            log_lines=[f"line-{index}" for index in range(1, 41)],
+        )
+        server = build_bash_exec_server(context)
+
+        result = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "mode": "read",
+                    "id": "bash-window-preview",
+                    "start": 11,
+                    "tail": 5,
+                },
+            )
+        )
+
+        assert result["bash_id"] == "bash-window-preview"
+        assert result["log_windowed"] is True
+        assert result["log_line_count"] == 40
+        assert result["line_start"] == 11
+        assert result["line_end"] == 15
+        assert result["line_limit"] == 5
+        assert result["returned_line_count"] == 5
+        assert result["has_more_before"] is True
+        assert result["has_more_after"] is True
+        assert result["log"] == "\n".join([f"line-{index}" for index in range(11, 16)])
+
+        latest = _unwrap_tool_result(
+            await server.call_tool(
+                "bash_exec",
+                {
+                    "mode": "read",
+                    "id": "bash-window-preview",
+                    "tail": 3,
+                },
+            )
+        )
+        assert latest["line_start"] == 38
+        assert latest["line_end"] == 40
+        assert latest["log"] == "line-38\nline-39\nline-40"
 
     asyncio.run(scenario())

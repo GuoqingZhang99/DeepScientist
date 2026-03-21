@@ -1887,6 +1887,41 @@ function LeftPanel({
       onExitHome?.()
       const normalizedPath = normalizeExplorerScopePath(file.path)
       const diffEntry = normalizedPath ? diffFileByPath.get(normalizedPath) ?? null : null
+      if (
+        file.type !== 'folder' &&
+        activeExplorer === 'scope' &&
+        explorerLocation.sourceMode === 'snapshot' &&
+        explorerLocation.revision &&
+        normalizedPath
+      ) {
+        openTab({
+          pluginId: BUILTIN_PLUGINS.GIT_DIFF_VIEWER,
+          context: {
+            type: 'custom',
+            customData: {
+              projectId,
+              resolver: 'git',
+              initialMode: 'snapshot',
+              snapshotRevision: explorerLocation.revision,
+              snapshotDocumentId: `git::${explorerLocation.revision}::${normalizedPath}`,
+              displayPath: normalizedPath,
+              path: normalizedPath,
+              base: diffCompareBase,
+              head: diffCompareHead,
+              status: diffEntry?.status ?? null,
+              oldPath: diffEntry?.oldPath || null,
+              added: diffEntry?.added ?? null,
+              removed: diffEntry?.removed ?? null,
+              allowSnapshot: true,
+              allowDiff: Boolean(diffEntry && diffCompareBase && diffCompareHead),
+              quest_stage_selection: activeQuestStageSelection || graphSelection || null,
+              scoped_selection_source: 'snapshot-viewer',
+            },
+          },
+          title: file.name,
+        })
+        return
+      }
       if (file.type !== 'folder' && diffEntry && diffCompareBase && diffCompareHead) {
         await handleOpenDiffFile(diffEntry)
         return
@@ -1925,9 +1960,14 @@ function LeftPanel({
       })
     },
     [
+      activeExplorer,
+      activeQuestStageSelection,
       diffCompareBase,
       diffCompareHead,
       diffFileByPath,
+      explorerLocation.revision,
+      explorerLocation.sourceMode,
+      graphSelection,
       handleOpenDiffFile,
       onExitHome,
       openFileInTab,

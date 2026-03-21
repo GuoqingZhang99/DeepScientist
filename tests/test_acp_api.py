@@ -23,7 +23,7 @@ def test_acp_session_descriptor_exposes_quest_root_and_commands(temp_home: Path)
     assert payload["acp_session"]["protocol"] == "agent-client-protocol"
     assert payload["acp_session"]["quest_id"] == quest_id
     assert payload["acp_session"]["cwd"] == payload["snapshot"]["quest_root"]
-    assert {item["name"] for item in payload["acp_session"]["mcp_servers"]} == {"memory", "artifact"}
+    assert {item["name"] for item in payload["acp_session"]["mcp_servers"]} == {"memory", "artifact", "bash_exec"}
     assert any(command["name"] == "/status" for command in payload["acp_session"]["slash_commands"])
 
 

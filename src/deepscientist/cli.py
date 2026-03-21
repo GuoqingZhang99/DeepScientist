@@ -236,7 +236,7 @@ def run_command(home: Path, quest_id: str, skill_id: str, message: str, model: s
     config_manager = ConfigManager(home)
     config_manager.ensure_files()
     config = config_manager.load_named("config")
-    runners = config_manager.load_named("runners")
+    runners = config_manager.load_runners_config()
     quest_root = home / "quests" / quest_id
     codex_cfg = runners.get("codex", {})
     logger = JsonlLogger(home / "logs", level=config.get("logging", {}).get("level", "info"))

@@ -19,6 +19,7 @@ import type {
   ConnectorSnapshot,
   Locale,
   OpenDocumentPayload,
+  QuestSummary,
 } from '@/types'
 
 export type ConfigDocumentName = 'config' | 'runners' | 'connectors' | 'plugins' | 'mcp_servers'
@@ -68,6 +69,8 @@ const copy = {
     reference: 'Notes',
     loading: 'Loading',
     qqAutoBound: 'QQ openid detected and saved automatically.',
+    connectorDeleted: 'Connector profile deleted.',
+    connectorBindingSaved: 'Connector binding updated.',
   },
   zh: {
     title: '设置',
@@ -85,6 +88,8 @@ const copy = {
     reference: '说明',
     loading: '加载中',
     qqAutoBound: '已自动检测并保存 QQ openid。',
+    connectorDeleted: '已删除该 Connector。',
+    connectorBindingSaved: '已更新该 Connector 绑定。',
   },
 } satisfies Record<Locale, Record<string, string>>
 
@@ -173,6 +178,7 @@ export function SettingsPage({
   const navigate = useNavigate()
   const [files, setFiles] = useState<ConfigFileEntry[]>([])
   const [connectors, setConnectors] = useState<ConnectorSnapshot[]>([])
+  const [quests, setQuests] = useState<QuestSummary[]>([])
   const [selectedName, setSelectedName] = useState<ConfigDocumentName | null>(requestedConfigName || null)
   const [document, setDocument] = useState<OpenDocumentPayload | null>(null)
   const [structuredDraft, setStructuredDraft] = useState<Record<string, unknown>>({})
@@ -180,6 +186,8 @@ export function SettingsPage({
   const [saving, setSaving] = useState(false)
   const [validating, setValidating] = useState(false)
   const [testingAll, setTestingAll] = useState(false)
+  const [deletingProfileKey, setDeletingProfileKey] = useState('')
+  const [bindingProfileKey, setBindingProfileKey] = useState('')
   const [validation, setValidation] = useState<ConfigValidationPayload | null>(null)
   const [testResult, setTestResult] = useState<ConfigTestPayload | null>(null)
   const [saveMessage, setSaveMessage] = useState('')
@@ -192,13 +200,14 @@ export function SettingsPage({
     const load = async () => {
       setLoading(true)
       try {
-        const [filePayload, connectorPayload] = await Promise.all([client.configFiles(), client.connectors()])
+        const [filePayload, connectorPayload, questPayload] = await Promise.all([client.configFiles(), client.connectors(), client.quests()])
         if (!mounted) {
           return
         }
         const sorted = [...filePayload].sort(compareConfig)
         setFiles(sorted)
         setConnectors(connectorPayload)
+        setQuests(questPayload)
         const preferred = requestedConfigName || (sorted[0]?.name as ConfigDocumentName | undefined) || null
         if (preferred) {
           setSelectedName(preferred)
@@ -252,7 +261,18 @@ export function SettingsPage({
   }, [onRequestedConfigConsumed, requestedConfigName])
 
   const isConnectorDocument = selectedName === 'connectors'
-  const selectedConnectorName = isConnectorDocument ? requestedConnectorName ?? null : null
+  const visibleConnectorNames = useMemo(
+    () => new Set(connectors.filter((item) => item.name !== 'local').map((item) => item.name as ConnectorName)),
+    [connectors]
+  )
+  const visibleConnectorEntries = useMemo(
+    () => connectorCatalog.filter((entry) => visibleConnectorNames.has(entry.name)),
+    [visibleConnectorNames]
+  )
+  const selectedConnectorName =
+    isConnectorDocument && requestedConnectorName && visibleConnectorNames.has(requestedConnectorName)
+      ? requestedConnectorName
+      : null
   const isDirty = Boolean(
     document && JSON.stringify(document.meta?.structured_config || {}) !== JSON.stringify(structuredDraft)
   )
@@ -344,11 +364,37 @@ export function SettingsPage({
   }, [document?.revision, loading, location.hash, selectedName])
 
   useEffect(() => {
+    if (!isConnectorDocument || !requestedConnectorName) {
+      return
+    }
+    if (visibleConnectorNames.has(requestedConnectorName)) {
+      return
+    }
+    navigate(
+      {
+        pathname: settingsConfigPath('connectors'),
+        hash: '',
+      },
+      { replace: true }
+    )
+  }, [isConnectorDocument, navigate, requestedConnectorName, visibleConnectorNames])
+
+  useEffect(() => {
     if (!isConnectorDocument || selectedConnectorName) {
       return
     }
     const anchorConnectorName = connectorNameFromAnchor(location.hash)
     if (!anchorConnectorName) {
+      return
+    }
+    if (!visibleConnectorNames.has(anchorConnectorName)) {
+      navigate(
+        {
+          pathname: settingsConfigPath('connectors'),
+          hash: '',
+        },
+        { replace: true }
+      )
       return
     }
     navigate(
@@ -358,7 +404,7 @@ export function SettingsPage({
       },
       { replace: true }
     )
-  }, [isConnectorDocument, location.hash, navigate, selectedConnectorName])
+  }, [isConnectorDocument, location.hash, navigate, selectedConnectorName, visibleConnectorNames])
 
   const handleSelectName = (name: ConfigDocumentName) => {
     setSelectedName(name)
@@ -421,7 +467,7 @@ export function SettingsPage({
 
   const connectorSummary = useMemo(() => {
     const snapshotByName = new Map(connectors.map((item) => [item.name, item]))
-    return connectorCatalog.map((entry) => {
+    return visibleConnectorEntries.map((entry) => {
       const configured = structuredDraft[entry.name]
       const configEnabled =
         configured && typeof configured === 'object' ? Boolean((configured as Record<string, unknown>).enabled) : false
@@ -432,7 +478,7 @@ export function SettingsPage({
         enabled: selectedName === 'connectors' ? configEnabled : Boolean(snapshot?.enabled),
       }
     })
-  }, [connectors, locale, selectedName, structuredDraft])
+  }, [connectors, locale, selectedName, structuredDraft, visibleConnectorEntries])
 
   const refreshSelected = async () => {
     if (!selectedName) {
@@ -505,6 +551,73 @@ export function SettingsPage({
     }
   }
 
+  const handleDeleteConnectorProfile = async (connectorName: ConnectorName, profileId: string) => {
+    setDeletingProfileKey(`${connectorName}:${profileId}`)
+    try {
+      await client.deleteConnectorProfile(connectorName, profileId)
+      setSaveMessage(t.connectorDeleted)
+      await refreshSelected()
+      const [connectorPayload, questPayload] = await Promise.all([client.connectors(), client.quests()])
+      setConnectors(connectorPayload)
+      setQuests(questPayload)
+    } catch (error) {
+      setSaveMessage(error instanceof Error ? error.message : String(error || 'Failed to delete connector profile.'))
+    } finally {
+      setDeletingProfileKey('')
+    }
+  }
+
+  const handleManageConnectorBinding = async ({
+    connectorName,
+    profileId,
+    conversationId,
+    currentQuestId,
+    nextQuestId,
+  }: {
+    connectorName: ConnectorName
+    profileId: string
+    conversationId: string
+    currentQuestId?: string | null
+    nextQuestId?: string | null
+  }) => {
+    const actionKey = `${connectorName}:${profileId}`
+    setBindingProfileKey(actionKey)
+    try {
+      const normalizedNextQuestId = String(nextQuestId || '').trim() || null
+      const normalizedCurrentQuestId = String(currentQuestId || '').trim() || null
+      if (!normalizedNextQuestId && !normalizedCurrentQuestId) {
+        return
+      }
+      let result: Record<string, unknown>
+      if (normalizedNextQuestId) {
+        result = await client.updateQuestBindings(normalizedNextQuestId, {
+          connector: connectorName,
+          conversation_id: conversationId,
+          force: true,
+        })
+      } else {
+        result = await client.updateQuestBindings(normalizedCurrentQuestId as string, {
+          connector: connectorName,
+          conversation_id: null,
+          force: true,
+        })
+      }
+      if (!result.ok) {
+        throw new Error(String(result.message || 'Unable to update connector binding.'))
+      }
+      setSaveMessage(t.connectorBindingSaved)
+      const [connectorPayload, questPayload] = await Promise.all([client.connectors(), client.quests()])
+      setConnectors(connectorPayload)
+      setQuests(questPayload)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'Unable to update connector binding.')
+      setSaveMessage(message)
+      throw error
+    } finally {
+      setBindingProfileKey('')
+    }
+  }
+
   return (
     <div className="font-project flex h-screen flex-col overflow-hidden px-4 pb-4 pt-4 sm:px-6 sm:pb-6">
       <ProjectsAppBar title={t.title} />
@@ -554,7 +667,7 @@ export function SettingsPage({
               ) : (
                 <div className="space-y-2">
                   {connectorSummary.map((connector) => {
-                    const entry = connectorCatalog.find((item) => item.name === connector.name)
+                    const entry = visibleConnectorEntries.find((item) => item.name === connector.name)
                     const Icon = entry?.icon
                     return (
                       <button
@@ -642,11 +755,17 @@ export function SettingsPage({
                       locale={locale}
                       value={structuredConnectors}
                       connectors={connectors}
+                      quests={quests}
                       saving={saving}
                       isDirty={isDirty}
+                      deletingProfileKey={deletingProfileKey}
+                      bindingProfileKey={bindingProfileKey}
+                      visibleConnectorNames={visibleConnectorEntries.map((entry) => entry.name)}
                       selectedConnectorName={selectedConnectorName}
                       onChange={setStructuredConnectors}
                       onSave={() => void handleSave()}
+                      onDeleteProfile={(connectorName, profileId) => void handleDeleteConnectorProfile(connectorName, profileId)}
+                      onManageProfileBinding={(payload) => handleManageConnectorBinding(payload)}
                       onSelectConnector={(connectorName) =>
                         navigate({
                           pathname: settingsConfigPath('connectors', connectorName),

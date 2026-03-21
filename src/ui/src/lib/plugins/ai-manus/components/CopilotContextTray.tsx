@@ -105,6 +105,10 @@ function getDocumentModeLabel(
       return t('context_mode_source')
     case 'preview':
       return t('context_mode_preview')
+    case 'snapshot':
+      return t('context_mode_snapshot', undefined, 'Snapshot')
+    case 'diff':
+      return t('context_mode_diff', undefined, 'Diff')
     default:
       return null
   }

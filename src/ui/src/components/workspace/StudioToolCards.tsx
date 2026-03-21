@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Database,
+  FileCode2,
   GitBranch,
   Globe2,
   Loader2,
@@ -19,6 +20,9 @@ import {
 import { WebSearchQueryPills, WebSearchResults } from '@/components/chat/toolViews/WebSearchCards'
 import { deriveMcpIdentity } from '@/lib/mcpIdentity'
 import type { RenderOperationFeedItem } from '@/lib/feedOperations'
+import { useTabsStore } from '@/lib/stores/tabs'
+import { BUILTIN_PLUGINS } from '@/lib/types/plugin'
+import { extractFileChangeEntries } from '@/lib/toolOperations'
 import { cn } from '@/lib/utils'
 import {
   asRecord,
@@ -47,7 +51,7 @@ function formatTime(value?: string) {
 function parseStructuredValue(value?: string) {
   if (!value) return null
   try {
-    return JSON.parse(value) as Record<string, unknown>
+    return JSON.parse(value) as unknown
   } catch {
     return null
   }
@@ -65,7 +69,76 @@ function unwrapToolResult(value: unknown): unknown {
   if (record.result && record.result !== value) {
     return unwrapToolResult(record.result)
   }
+  if (Array.isArray(record.content)) {
+    for (const entry of record.content) {
+      const contentRecord = asRecord(entry)
+      if (!contentRecord) continue
+      const nested = unwrapToolResult(contentRecord)
+      if (nested && nested !== contentRecord) {
+        return nested
+      }
+      if (typeof contentRecord.text === 'string') {
+        const parsedText = parseStructuredValue(contentRecord.text)
+        const parsedNested = unwrapToolResult(parsedText)
+        if (parsedNested) {
+          return parsedNested
+        }
+      }
+    }
+  }
   return value
+}
+
+function formatFileChangePath(path: string, questId: string) {
+  const normalized = String(path || '').trim().replace(/\\/g, '/')
+  if (!normalized) return 'Untitled file'
+  if (!normalized.startsWith('/')) {
+    return normalized
+  }
+  const worktreeToken = `/quests/${questId}/.ds/worktrees/`
+  const questToken = `/quests/${questId}/`
+  const worktreeIndex = normalized.indexOf(worktreeToken)
+  if (worktreeIndex >= 0) {
+    const relative = normalized.slice(worktreeIndex + worktreeToken.length)
+    const [worktreeRoot, ...parts] = relative.split('/').filter(Boolean)
+    if (worktreeRoot) {
+      return parts.length > 0 ? `${worktreeRoot}/${parts.join('/')}` : worktreeRoot
+    }
+  }
+  const questIndex = normalized.indexOf(questToken)
+  if (questIndex >= 0) {
+    return normalized.slice(questIndex + questToken.length)
+  }
+  return normalized
+}
+
+function formatFileChangeKind(kind?: string) {
+  const normalized = String(kind || 'update').trim().toLowerCase()
+  if (normalized === 'add' || normalized === 'added' || normalized === 'create' || normalized === 'new') {
+    return {
+      label: 'Added',
+      className:
+        'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:border-emerald-300/20 dark:bg-emerald-300/10 dark:text-emerald-200',
+    }
+  }
+  if (normalized === 'delete' || normalized === 'deleted' || normalized === 'remove' || normalized === 'removed') {
+    return {
+      label: 'Deleted',
+      className:
+        'border-rose-500/20 bg-rose-500/10 text-rose-700 dark:border-rose-300/20 dark:bg-rose-300/10 dark:text-rose-200',
+    }
+  }
+  return {
+    label: 'Updated',
+    className:
+      'border-amber-500/20 bg-amber-500/10 text-amber-700 dark:border-amber-300/20 dark:bg-amber-300/10 dark:text-amber-200',
+  }
+}
+
+type StudioFileChangeEntry = {
+  path: string
+  displayPath: string
+  kind?: string
 }
 
 function normalizeStatus(value?: string, active = false) {
@@ -135,6 +208,7 @@ type StudioToolCardModel = {
   rawArgs?: string
   rawOutput?: string
   webSearch?: NormalizedWebSearchPayload | null
+  fileChanges?: StudioFileChangeEntry[]
 }
 
 function extractArtifactRecord(resultRecord: Record<string, unknown> | null) {
@@ -156,13 +230,15 @@ function summarizeMetricEntries(value: unknown) {
 function buildArtifactModel(item: RenderOperationFeedItem): StudioToolCardModel {
   const active = item.label === 'tool_call'
   const tool = item.mcpTool || deriveMcpIdentity(item.toolName, item.mcpServer, item.mcpTool).tool || 'artifact'
-  const args = parseStructuredValue(item.args)
+  const args = asRecord(parseStructuredValue(item.args))
   const resultRecord = asRecord(unwrapToolResult(parseStructuredValue(item.output)))
   const artifactRecord = extractArtifactRecord(resultRecord)
+  const interactionRecord = asRecord(resultRecord?.interaction)
   const titleMap: Record<string, string> = {
     record: active ? 'Recording artifact' : 'Recorded artifact',
     checkpoint: active ? 'Creating checkpoint' : 'Created checkpoint',
     prepare_branch: active ? 'Preparing branch' : 'Prepared branch',
+    activate_branch: active ? 'Activating branch' : 'Activated branch',
     publish_baseline: active ? 'Publishing baseline' : 'Published baseline',
     attach_baseline: active ? 'Attaching baseline' : 'Attached baseline',
     confirm_baseline: active ? 'Confirming baseline' : 'Confirmed baseline',
@@ -189,16 +265,29 @@ function buildArtifactModel(item: RenderOperationFeedItem): StudioToolCardModel 
     asString(asRecord(resultRecord?.branch_record)?.branch) ||
     asString(args?.branch)
   const worktreeRoot = asString(resultRecord?.worktree_root)
+  const ideaId = asString(resultRecord?.idea_id)
+  const latestMainRunId = asString(resultRecord?.latest_main_run_id)
+  const nextAnchor = asString(resultRecord?.next_anchor)
+  const workspaceMode = asString(resultRecord?.workspace_mode)
+  const interactionReplyMode =
+    asString(tool === 'interact' ? resultRecord?.reply_mode : interactionRecord?.reply_mode)
+  const interactionOpenRequestCount =
+    tool === 'interact' ? resultRecord?.open_request_count : interactionRecord?.open_request_count
+  const deliveryTargets = asStringArray(
+    tool === 'interact' ? resultRecord?.delivery_targets : interactionRecord?.delivery_targets
+  )
   const title =
-    paperTitle ||
-    asString(resultRecord?.summary) ||
-    asString(resultRecord?.guidance) ||
-    asString(artifactRecord?.summary) ||
-    asString(artifactRecord?.reason) ||
-    asString(resultRecord?.agent_instruction) ||
-    item.subject ||
-    titleMap[tool] ||
-    'Artifact update'
+    tool === 'activate_branch'
+      ? [active ? 'Activating' : 'Activated', branch || 'branch'].filter(Boolean).join(' ')
+      : paperTitle ||
+        asString(resultRecord?.summary) ||
+        asString(resultRecord?.guidance) ||
+        asString(artifactRecord?.summary) ||
+        asString(artifactRecord?.reason) ||
+        asString(resultRecord?.agent_instruction) ||
+        item.subject ||
+        titleMap[tool] ||
+        'Artifact update'
   const subtitle =
     tool === 'arxiv'
       ? [
@@ -212,6 +301,15 @@ function buildArtifactModel(item: RenderOperationFeedItem): StudioToolCardModel 
         ? [baselineId, asString(resultRecord?.variant_id), asString(resultRecord?.status)]
             .filter(Boolean)
             .join(' · ')
+        : tool === 'activate_branch'
+          ? [
+              workspaceMode ? `${workspaceMode} workspace` : '',
+              ideaId ? `idea ${ideaId}` : '',
+              nextAnchor ? `next: ${nextAnchor}` : '',
+              deliveryTargets.length > 0 ? 'connector notified' : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')
         : tool === 'prepare_branch'
           ? [branch, worktreeRoot].filter(Boolean).join(' · ')
           : asString(resultRecord?.reason) ||
@@ -224,19 +322,33 @@ function buildArtifactModel(item: RenderOperationFeedItem): StudioToolCardModel 
   const lines = [
     ...summarizeMetricEntries(resultRecord?.metrics_summary),
     ...summarizeMetricEntries(artifactRecord?.metrics_summary),
-    ...(tool === 'interact'
+    ...(tool === 'interact' || interactionRecord
       ? [
-          asString(resultRecord?.reply_mode)
-            ? `reply mode: ${String(resultRecord?.reply_mode)}`
+          interactionReplyMode
+            ? `reply mode: ${interactionReplyMode}`
             : '',
-          typeof resultRecord?.open_request_count === 'number'
-            ? `open requests: ${String(resultRecord?.open_request_count)}`
+          typeof interactionOpenRequestCount === 'number'
+            ? `open requests: ${String(interactionOpenRequestCount)}`
             : '',
-          ...asStringArray(resultRecord?.delivery_targets).slice(0, 2).map((target) => `delivered to: ${target}`),
+          ...deliveryTargets.slice(0, 2).map((target) => `delivered to: ${target}`),
         ]
       : []),
     ...(tool === 'arxiv' && asString(resultRecord?.content)
       ? [truncateText(String(resultRecord?.content), 220)]
+      : []),
+    ...(tool === 'activate_branch'
+      ? [
+          ideaId ? `active idea: ${ideaId}` : '',
+          latestMainRunId ? `latest main run: ${latestMainRunId}` : '',
+          nextAnchor ? `next anchor: ${nextAnchor}` : '',
+          workspaceMode ? `workspace mode: ${workspaceMode}` : '',
+          typeof resultRecord?.promote_to_head === 'boolean'
+            ? `promoted to head: ${resultRecord.promote_to_head ? 'yes' : 'no'}`
+            : '',
+          typeof resultRecord?.worktree_created === 'boolean'
+            ? `worktree created: ${resultRecord.worktree_created ? 'yes' : 'no'}`
+            : '',
+        ].filter(Boolean)
       : []),
     ...(branch ? [`branch: ${branch}`] : []),
     ...(worktreeRoot ? [`worktree: ${worktreeRoot}`] : []),
@@ -272,7 +384,7 @@ function buildArtifactModel(item: RenderOperationFeedItem): StudioToolCardModel 
 function buildMemoryModel(item: RenderOperationFeedItem): StudioToolCardModel {
   const active = item.label === 'tool_call'
   const tool = item.mcpTool || deriveMcpIdentity(item.toolName, item.mcpServer, item.mcpTool).tool || 'memory'
-  const args = parseStructuredValue(item.args)
+  const args = asRecord(parseStructuredValue(item.args))
   const resultRecord = asRecord(unwrapToolResult(parseStructuredValue(item.output)))
   const memoryCard = asRecord(resultRecord?.record) ?? resultRecord
   const items = Array.isArray(resultRecord?.items)
@@ -355,34 +467,122 @@ function buildMemoryModel(item: RenderOperationFeedItem): StudioToolCardModel {
   }
 }
 
+function buildFileChangeModel(item: RenderOperationFeedItem, questId: string): StudioToolCardModel {
+  const active = item.label === 'tool_call'
+  const entries = extractFileChangeEntries(parseStructuredValue(item.args), parseStructuredValue(item.output))
+  const deduped = new Map<string, StudioFileChangeEntry>()
+  for (const entry of entries) {
+    const normalizedPath = String(entry.path || '').trim()
+    if (!normalizedPath) continue
+    const key = `${normalizedPath}:${entry.kind || ''}`
+    if (!deduped.has(key)) {
+      deduped.set(key, {
+        path: normalizedPath,
+        displayPath: formatFileChangePath(normalizedPath, questId),
+        kind: entry.kind,
+      })
+    }
+  }
+  const fileChanges = Array.from(deduped.values())
+  const title =
+    fileChanges.length === 0
+      ? item.subject || 'Code edit'
+      : fileChanges.length === 1
+      ? fileChanges[0].displayPath
+      : `${active ? 'Updating' : 'Updated'} ${fileChanges.length || 0} files`
+  const subtitle =
+    fileChanges.length > 1
+      ? `${fileChanges.length} file changes recorded`
+      : fileChanges.length === 1
+        ? `${formatFileChangeKind(fileChanges[0].kind).label} file`
+        : null
+
+  return {
+    label: 'code edit',
+    tooltip: 'file_change',
+    title,
+    subtitle,
+    Icon: FileCode2,
+    accentClassName: 'bg-[rgba(151,164,179,0.16)] text-[var(--text-primary)] dark:bg-[rgba(231,223,210,0.08)]',
+    statusLabel: normalizeStatus(item.status, active).label,
+    statusChipClassName: normalizeStatus(item.status, active).chipClassName,
+    statusIcon: normalizeStatus(item.status, active).Icon,
+    statusSpinning: normalizeStatus(item.status, active).spinning,
+    badges: ['file_change', fileChanges.length > 0 ? `${fileChanges.length} files` : ''].filter(Boolean) as string[],
+    lines: [],
+    paths: [],
+    rawArgs: item.args,
+    rawOutput: item.output,
+    webSearch: null,
+    fileChanges,
+  }
+}
+
 function buildBashModel(item: RenderOperationFeedItem): StudioToolCardModel {
   const active = item.label === 'tool_call'
-  const args = parseStructuredValue(item.args)
+  const args = asRecord(parseStructuredValue(item.args))
   const resultRecord = asRecord(unwrapToolResult(parseStructuredValue(item.output)))
+  const mode = asString(resultRecord?.mode) || asString(args?.mode)
   const command =
     asString(args?.command) ||
     asString(args?.cmd) ||
+    asString(resultRecord?.command) ||
     asString(item.metadata?.command) ||
     item.subject ||
     'bash command'
   const workdir = asString(args?.workdir) || asString(item.metadata?.workdir)
   const bashId = asString(resultRecord?.bash_id) || asString(item.metadata?.bash_id)
   const logPath = asString(resultRecord?.log_path) || asString(item.metadata?.log_path)
-  const lines = [
-    workdir ? `workdir: ${workdir}` : '',
-    bashId ? `bash id: ${bashId}` : '',
-    typeof resultRecord?.exit_code === 'number' ? `exit code: ${String(resultRecord?.exit_code)}` : '',
-    asString(resultRecord?.last_progress)
-      ? truncateText(String(resultRecord?.last_progress), 160)
-      : '',
-    asString(resultRecord?.stop_reason) ? `stop: ${String(resultRecord?.stop_reason)}` : '',
-  ].filter(Boolean) as string[]
+  const listItems = Array.isArray(resultRecord?.items)
+    ? resultRecord.items.map((entry) => asRecord(entry)).filter(Boolean)
+    : []
+  const historyLines = asStringArray(resultRecord?.lines)
+  const listCount =
+    typeof resultRecord?.count === 'number'
+      ? resultRecord.count
+      : listItems.length
+  const title =
+    mode === 'list'
+      ? active
+        ? 'Inspecting managed bash sessions'
+        : 'Managed bash sessions'
+      : mode === 'history'
+        ? active
+          ? 'Inspecting bash history'
+          : 'Recent bash history'
+        : truncateText(command, 180)
+  const subtitle =
+    mode === 'list'
+      ? [typeof listCount === 'number' ? `${listCount} sessions` : '', workdir].filter(Boolean).join(' · ') || null
+      : mode === 'history'
+        ? [typeof resultRecord?.count === 'number' ? `${resultRecord.count} entries` : '', asString(args?.comment)]
+            .filter(Boolean)
+            .join(' · ') || null
+        : workdir
+          ? truncateText(workdir, 160)
+          : null
+  const lines =
+    mode === 'list'
+      ? listItems.slice(0, 3).map((entry) => {
+          const statusText = asString(entry?.status)
+          const sessionCommand = truncateText(asString(entry?.command) || asString(entry?.id) || 'bash session', 140)
+          return [statusText, sessionCommand].filter(Boolean).join(' · ')
+        })
+      : mode === 'history'
+        ? historyLines.slice(0, 3).map((line) => truncateText(line, 180))
+        : ([
+            workdir ? `workdir: ${workdir}` : '',
+            bashId ? `bash id: ${bashId}` : '',
+            typeof resultRecord?.exit_code === 'number' ? `exit code: ${String(resultRecord?.exit_code)}` : '',
+            resultRecord?.last_progress != null ? truncateText(JSON.stringify(resultRecord.last_progress), 160) : '',
+            asString(resultRecord?.stop_reason) ? `stop: ${String(resultRecord?.stop_reason)}` : '',
+          ].filter(Boolean) as string[])
 
   return {
     label: 'bash exec',
     tooltip: 'bash_exec',
-    title: truncateText(command, 180),
-    subtitle: workdir ? truncateText(workdir, 160) : null,
+    title,
+    subtitle,
     Icon: TerminalSquare,
     accentClassName: 'bg-[rgba(151,164,179,0.14)] text-[var(--text-primary)] dark:bg-[rgba(231,223,210,0.08)]',
     statusLabel: normalizeStatus(
@@ -401,7 +601,7 @@ function buildBashModel(item: RenderOperationFeedItem): StudioToolCardModel {
       asString(resultRecord?.status) || item.status,
       active
     ).spinning,
-    badges: ['bash_exec', asString(resultRecord?.mode) || asString(args?.mode) || ''].filter(Boolean) as string[],
+    badges: ['bash_exec', mode || ''].filter(Boolean) as string[],
     lines,
     paths: logPath ? [{ label: 'log', path: logPath }] : [],
     rawArgs: item.args,
@@ -471,7 +671,11 @@ function buildGenericModel(item: RenderOperationFeedItem): StudioToolCardModel {
   }
 }
 
-function buildToolCardModel(item: RenderOperationFeedItem) {
+function buildToolCardModel(item: RenderOperationFeedItem, questId: string) {
+  const toolName = String(item.toolName || '').trim().toLowerCase()
+  if (toolName === 'file_change') {
+    return buildFileChangeModel(item, questId)
+  }
   const resolvedIdentity = deriveMcpIdentity(item.toolName, item.mcpServer, item.mcpTool)
   if (resolvedIdentity.server === 'artifact') {
     return buildArtifactModel(item)
@@ -550,20 +754,104 @@ function StudioWebSearchPanel({
   )
 }
 
+function StudioFileChangePanel({
+  questId,
+  item,
+  entries,
+}: {
+  questId: string
+  item: RenderOperationFeedItem
+  entries: StudioFileChangeEntry[]
+}) {
+  const openTab = useTabsStore((state) => state.openTab)
+  const canOpenDiff = Boolean(questId && item.runId)
+
+  const handleOpenDiff = React.useCallback(
+    (entry: StudioFileChangeEntry) => {
+      if (!questId || !item.runId) return
+      openTab({
+        pluginId: BUILTIN_PLUGINS.GIT_DIFF_VIEWER,
+        context: {
+          type: 'custom',
+          customData: {
+            resolver: 'file_change',
+            projectId: questId,
+            runId: item.runId,
+            eventId: item.eventId || null,
+            queryPath: entry.path,
+            displayPath: entry.displayPath,
+            initialMode: 'diff',
+            allowSnapshot: false,
+            allowDiff: true,
+          },
+        },
+        title: entry.displayPath,
+      })
+    },
+    [item.eventId, item.runId, openTab, questId]
+  )
+
+  if (entries.length === 0) {
+    return (
+      <div className="text-[12px] leading-6 text-muted-foreground">
+        No structured file changes were recorded for this edit.
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      {entries.map((entry) => {
+        const kindMeta = formatFileChangeKind(entry.kind)
+        return (
+          <div
+            key={`${entry.path}:${entry.kind || ''}`}
+            className="flex flex-wrap items-center gap-2 rounded-[14px] border border-black/[0.06] bg-white/[0.74] px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.03]"
+          >
+            <span
+              className={cn(
+                'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em]',
+                kindMeta.className
+              )}
+            >
+              {kindMeta.label}
+            </span>
+            <div className="min-w-0 flex-1 break-all text-[12px] leading-6 text-foreground">
+              {entry.displayPath}
+            </div>
+            <button
+              type="button"
+              disabled={!canOpenDiff}
+              onClick={() => handleOpenDiff(entry)}
+              className="inline-flex h-8 items-center rounded-full border border-black/[0.08] bg-white/[0.86] px-3 text-[11px] font-medium text-foreground transition hover:bg-black/[0.03] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.10] dark:bg-white/[0.04] dark:hover:bg-white/[0.08]"
+            >
+              Open Diff
+            </button>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function StudioToolCard({
+  questId,
   item,
   isLatest = false,
 }: {
+  questId: string
   item: RenderOperationFeedItem
   isLatest?: boolean
 }) {
-  const model = React.useMemo(() => buildToolCardModel(item), [item])
+  const model = React.useMemo(() => buildToolCardModel(item, questId), [item, questId])
   const [expanded, setExpanded] = React.useState(() => isLatest)
   const expandModeRef = React.useRef<'auto' | 'manual-open' | 'manual-close'>('auto')
   const StatusIcon = model.statusIcon
   const fallbackOutput = model.rawOutput?.trim() || ''
   const showSubtitle = Boolean(model.subtitle && model.subtitle !== model.title)
-  const hasStructuredBody = Boolean(showSubtitle || model.webSearch || model.lines.length > 0 || model.paths.length > 0)
+  const hasStructuredBody = Boolean(
+    showSubtitle || model.webSearch || model.fileChanges || model.lines.length > 0 || model.paths.length > 0
+  )
 
   React.useEffect(() => {
     if (isLatest) {
@@ -644,6 +932,8 @@ export function StudioToolCard({
 
           {model.webSearch ? (
             <StudioWebSearchPanel payload={model.webSearch} isSearching={item.label === 'tool_call'} />
+          ) : model.fileChanges ? (
+            <StudioFileChangePanel questId={questId} item={item} entries={model.fileChanges} />
           ) : model.lines.length > 0 ? (
             <div className="space-y-1.5 text-[12px] leading-6 text-muted-foreground">
               {model.lines.slice(0, 3).map((line, index) => (

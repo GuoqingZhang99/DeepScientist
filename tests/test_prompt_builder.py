@@ -31,6 +31,7 @@ def test_prompt_builder_includes_layered_runtime_context(temp_home: Path) -> Non
     )
 
     assert "# DeepScientist Core System Prompt" in prompt
+    assert "# Shared Interaction Contract" in prompt
     assert "## Runtime Context" in prompt
     assert "## Active Communication Surface" in prompt
     assert "## Continuation Guard" in prompt
@@ -47,6 +48,7 @@ def test_prompt_builder_includes_layered_runtime_context(temp_home: Path) -> Non
     assert "current_workspace_root:" in prompt
     assert "built_in_mcp_namespaces: memory, artifact, bash_exec" in prompt
     assert "artifact.arxiv(paper_id=..., full_text=False)" in prompt
+    assert "artifact.activate_branch(...)" in prompt
     assert "artifact.confirm_baseline(...)" in prompt
     assert "artifact.complete_quest(...)" in prompt
     assert "Canonical stage skills root:" in prompt
@@ -66,6 +68,65 @@ def test_prompt_builder_includes_layered_runtime_context(temp_home: Path) -> Non
     assert "fog-blue" in prompt
     assert "plt.rcParams.update" in prompt
     assert 'fig.savefig("summary_line.png"' in prompt
+    assert "AutoFigure-Edit" in prompt
+    assert "https://github.com/ResearAI/AutoFigure-Edit" in prompt
+    assert "https://deepscientist" in prompt
+    assert "information gain is clearly worth the added compute" in prompt
+
+
+def test_prompt_builder_includes_stage_plan_first_protocols(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="experiment",
+        user_message="Please plan and run the next experiment carefully.",
+        model="gpt-5.4",
+    )
+
+    assert "stage_plan_protocol:" in prompt
+    assert "baseline_plan_protocol:" in prompt
+    assert "experiment_plan_protocol:" in prompt
+    assert "analysis_plan_protocol:" in prompt
+    assert "checklist_maintenance_protocol:" in prompt
+    assert "plan_revision_protocol:" in prompt
+    assert "plan_execution_stability_protocol:" in prompt
+    assert "stage_milestone_summary_protocol:" in prompt
+    assert "Before substantial baseline setup, code edits, or a real baseline run:" in prompt
+    assert "Before substantial implementation work or a real main run:" in prompt
+    assert "Before launching real campaign slices:" in prompt
+
+
+def test_prompt_builder_prefers_synced_quest_prompt_copy(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+    quest_root = Path(snapshot["quest_root"])
+    prompt_copy = quest_root / ".codex" / "prompts" / "system.md"
+    original = prompt_copy.read_text(encoding="utf-8")
+    prompt_copy.write_text(original + "\n\nQUEST_LOCAL_PROMPT_SENTINEL\n", encoding="utf-8")
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="decision",
+        user_message="Use the current system prompt.",
+        model="gpt-5.4",
+    )
+
+    assert "QUEST_LOCAL_PROMPT_SENTINEL" in prompt
+
+
+def test_prompt_builder_includes_shared_interaction_contract(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="baseline",
+        user_message="Continue the current baseline work.",
+        model="gpt-5.4",
+    )
+
+    assert "# Shared Interaction Contract" in prompt
+    assert "Treat `artifact.interact(...)` as the main long-lived communication thread" in prompt
+    assert "Immediately follow any non-empty mailbox poll" in prompt
+    assert "1 to 3 concrete options" in prompt
 
 
 def test_prompt_builder_includes_surface_and_attachment_summary_for_connector_turn(temp_home: Path) -> None:
@@ -143,6 +204,25 @@ def test_prompt_builder_loads_qq_connector_contract_when_bound(temp_home: Path) 
     assert "connector_hints={\"qq\": {\"render_mode\": \"markdown\"}}" in prompt
     assert "automatically reuse the most recent inbound QQ message id" in prompt
     assert "/absolute/path/to/main_summary.png" in prompt
+
+
+def test_prompt_builder_prefers_synced_quest_connector_contract_copy(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest_service.bind_source(snapshot["quest_id"], "qq:direct:openid-qq-1")
+    quest_root = Path(snapshot["quest_root"])
+    prompt_copy = quest_root / ".codex" / "prompts" / "connectors" / "qq.md"
+    original = prompt_copy.read_text(encoding="utf-8")
+    prompt_copy.write_text(original + "\n\nQUEST_LOCAL_CONNECTOR_PROMPT_SENTINEL\n", encoding="utf-8")
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="decision",
+        user_message="Continue the quest.",
+        model="gpt-5.4",
+    )
+
+    assert "QUEST_LOCAL_CONNECTOR_PROMPT_SENTINEL" in prompt
 
 
 def test_prompt_builder_loads_lingzhu_connector_contract_when_bound(temp_home: Path) -> None:
@@ -431,6 +511,7 @@ def test_prompt_builder_mentions_record_main_experiment_protocol(temp_home: Path
     assert "RESULT.json" in prompt
     assert "whether primary performance improved / worsened / stayed mixed" in prompt
     assert "never make the user infer performance improvement only from raw metrics" in prompt
+    assert "one bounded smoke or pilot validation and then one real run" in prompt
 
 
 def test_prompt_builder_mentions_submit_idea_milestone_protocol(temp_home: Path) -> None:
@@ -446,6 +527,28 @@ def test_prompt_builder_mentions_submit_idea_milestone_protocol(temp_home: Path)
     assert "artifact.submit_idea" in prompt
     assert "immediately after a successful accepted artifact.submit_idea(...)" in prompt
     assert "whether it currently looks valid, research-worthy, and insight-bearing" in prompt
+
+
+def test_prompt_builder_mentions_analysis_and_paper_milestone_protocols(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+
+    analysis_prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="analysis-campaign",
+        user_message="Finish the analysis campaign and explain the consequence for the claim.",
+        model="gpt-5.4",
+    )
+    write_prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="write",
+        user_message="Advance the draft and report the milestone clearly.",
+        model="gpt-5.4",
+    )
+
+    assert "analysis_milestone_protocol:" in analysis_prompt
+    assert "claim boundary became stronger / weaker / mixed" in analysis_prompt
+    assert "paper_milestone_protocol:" in write_prompt
+    assert "which claims are now supportable" in write_prompt
 
 
 def test_prompt_builder_mentions_idea_divergence_and_why_now_protocol(temp_home: Path) -> None:
@@ -732,6 +835,9 @@ def test_prompt_builder_mentions_long_running_bash_exec_monitoring_protocol(temp
     assert "sleep about `1800s`" in prompt
     assert "artifact.interact(kind='progress', ...)" in prompt
     assert "bash_exec(mode='read', id=...)" in prompt
+    assert "2000 lines or fewer" in prompt
+    assert "first 500 lines plus the last 1500 lines" in prompt
+    assert "bash_exec(mode='read', id=..., start=..., tail=...)" in prompt
     assert "bash_exec(mode='read', id=..., tail_limit=..., order='desc')" in prompt
     assert "bash_exec(mode='read', id=..., after_seq=last_seen_seq" in prompt
     assert "include a structured `comment`" in prompt
@@ -743,6 +849,10 @@ def test_prompt_builder_mentions_long_running_bash_exec_monitoring_protocol(temp
     assert "use bash_exec(mode='detach', ...) and monitor" in prompt
     assert "first run a bounded smoke test or pilot" in prompt
     assert "stop it with `bash_exec(mode='kill', id=..., wait=true, timeout_seconds=...)`" in prompt
+    assert "Use this canonical sleep protocol when you need to wait" in prompt
+    assert "bash_exec(command='sleep N', mode='await', timeout_seconds=N+buffer, ...)" in prompt
+    assert "do not set `timeout_seconds` exactly equal to `N`" in prompt
+    assert "prefer `bash_exec(mode='await', id=..., timeout_seconds=...)` instead of starting a new sleep command" in prompt
     assert "wait=true" in prompt
     assert "force=true" in prompt
     assert "bash_exec(mode='history')" in prompt
@@ -838,6 +948,9 @@ def test_prompt_builder_mentions_outline_first_paper_flow(temp_home: Path) -> No
     assert "artifact.submit_paper_outline(mode='select'|'revise', ...)" in prompt
     assert "artifact.submit_paper_bundle(...)" in prompt
     assert "The selected outline is the authoritative blueprint" in prompt
+    assert "paper/latex/" in prompt
+    assert "templates/iclr2026/" in prompt
+    assert "default to `templates/iclr2026/` for general ML" in prompt
     assert "motivation" in prompt
     assert "challenge" in prompt
     assert "resolution" in prompt

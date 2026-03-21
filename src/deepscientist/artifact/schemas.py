@@ -18,6 +18,7 @@ DECISION_ACTIONS = {
     "launch_analysis_campaign",
     "branch",
     "prepare_branch",
+    "activate_branch",
     "reuse_baseline",
     "attach_baseline",
     "publish_baseline",

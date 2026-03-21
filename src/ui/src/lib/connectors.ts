@@ -47,9 +47,13 @@ function withProfileLabel(profileLabel?: string | null, label?: string | null) {
 
 export function parseConversationId(value?: string | null) {
   const raw = String(value || '').trim()
-  const parts = raw.split(':', 3)
-  if (parts.length !== 3) return null
-  const [connector, chatType, chatId] = parts
+  const firstSeparator = raw.indexOf(':')
+  if (firstSeparator < 0) return null
+  const secondSeparator = raw.indexOf(':', firstSeparator + 1)
+  if (secondSeparator < 0) return null
+  const connector = raw.slice(0, firstSeparator)
+  const chatType = raw.slice(firstSeparator + 1, secondSeparator)
+  const chatId = raw.slice(secondSeparator + 1)
   if (!connector || !chatType || !chatId) return null
   const separatorIndex = chatId.indexOf(CONNECTOR_PROFILE_CHAT_ID_SEPARATOR)
   const profileId = separatorIndex >= 0 ? chatId.slice(0, separatorIndex).trim() : ''
@@ -109,13 +113,35 @@ function mergeTargetEntry(
   }
   const key = conversationIdentityKey(normalizedTarget.conversation_id)
   const existing = merged.get(key)
+  const normalizedBoundQuestId = String(normalizedTarget.bound_quest_id || '').trim() || null
+  const normalizedBoundQuestTitle =
+    normalizedBoundQuestId && String(normalizedTarget.bound_quest_title || '').trim()
+      ? String(normalizedTarget.bound_quest_title || '').trim()
+      : null
+  const normalizedWarning =
+    normalizedBoundQuestId && String(normalizedTarget.warning || '').trim() ? String(normalizedTarget.warning || '').trim() : null
   if (!existing) {
-    merged.set(key, normalizedTarget)
+    merged.set(key, {
+      ...normalizedTarget,
+      bound_quest_id: normalizedBoundQuestId,
+      bound_quest_title: normalizedBoundQuestTitle,
+      is_bound: Boolean(normalizedBoundQuestId),
+      warning: normalizedWarning,
+    })
     return
   }
   const nextSources = Array.from(
     new Set([...(existing.sources || []), ...(normalizedTarget.sources || []), existing.source, normalizedTarget.source].filter(Boolean))
   )
+  const resolvedBoundQuestId = String(normalizedTarget.bound_quest_id || existing.bound_quest_id || '').trim() || null
+  const resolvedBoundQuestTitle =
+    resolvedBoundQuestId && String(normalizedTarget.bound_quest_title || existing.bound_quest_title || '').trim()
+      ? String(normalizedTarget.bound_quest_title || existing.bound_quest_title || '').trim()
+      : null
+  const resolvedWarning =
+    resolvedBoundQuestId && String(normalizedTarget.warning || existing.warning || '').trim()
+      ? String(normalizedTarget.warning || existing.warning || '').trim()
+      : null
   merged.set(key, {
     ...existing,
     ...normalizedTarget,
@@ -126,9 +152,10 @@ function mergeTargetEntry(
     sources: nextSources.length ? nextSources : undefined,
     is_default: Boolean(existing.is_default || normalizedTarget.is_default),
     selectable: existing.selectable ?? normalizedTarget.selectable ?? true,
-    bound_quest_id: normalizedTarget.bound_quest_id || existing.bound_quest_id || null,
-    bound_quest_title: normalizedTarget.bound_quest_title || existing.bound_quest_title || null,
-    warning: normalizedTarget.warning || existing.warning || null,
+    bound_quest_id: resolvedBoundQuestId,
+    bound_quest_title: resolvedBoundQuestTitle,
+    is_bound: Boolean(resolvedBoundQuestId),
+    warning: resolvedWarning,
     updated_at:
       String(normalizedTarget.updated_at || '') >= String(existing.updated_at || '')
         ? normalizedTarget.updated_at || existing.updated_at
@@ -177,18 +204,20 @@ function normalizeRecentConversationTarget(item: ConnectorRecentConversation): C
     profile_label: item.profile_label || null,
     label: baseRecentConversationLabel(item),
     updated_at: item.updated_at || null,
-    bound_quest_id: item.quest_id || null,
-    is_bound: Boolean(item.quest_id),
+    quest_id: item.quest_id || null,
   })
 }
 
 function normalizeKnownTarget(target: ConnectorTargetSnapshot): ConnectorTargetSnapshot {
   const source = String(target.source || '').trim() || 'known_target'
   const sources = Array.from(new Set([...(target.sources || []), source].map((item) => String(item || '').trim()).filter(Boolean)))
+  const boundQuestId = String(target.bound_quest_id || '').trim() || null
   return {
     ...target,
     source,
     sources,
+    is_bound: Boolean(boundQuestId),
+    warning: boundQuestId ? target.warning || null : null,
   }
 }
 

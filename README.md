@@ -17,6 +17,8 @@ Install DeepScientist:
 npm install -g @researai/deepscientist
 ```
 
+For the best experience, we recommend using GPT-5.4 in `xhigh` mode (for example, via the $20 GPT Plus plan or the $200 GPT Pro plan); if you are in China, we recommend the MiniMax-M2.7 Token Plan (Max plan): https://platform.minimaxi.com/subscribe/token-plan
+
 ## Start
 
 ```bash
@@ -24,6 +26,20 @@ ds
 ```
 
 DeepScientist starts the local web workspace at `http://127.0.0.1:20999` by default.
+
+By default, DeepScientist keeps Codex on the standard profile: `approval_policy=on-request` and `sandbox_mode=workspace-write`. Use `--yolo` only when you want explicit full-access execution.
+
+Recommended command when you want the current directory as the home and Codex full-access execution:
+
+```bash
+ds --yolo --port 20999 --here
+```
+
+Parameter meanings:
+
+- `--yolo`: run Codex in YOLO mode, which sets `approval_policy=never` and `sandbox_mode=danger-full-access`
+- `--port 20999`: bind the local web workspace to port `20999`
+- `--here`: use the current working directory as the DeepScientist home
 
 On first start, `ds` will:
 
@@ -35,6 +51,12 @@ If you want another port:
 
 ```bash
 ds --port 21000
+```
+
+If you want YOLO mode on another port:
+
+```bash
+ds --yolo --port 21000
 ```
 
 If you want to bind on all interfaces:
@@ -59,6 +81,14 @@ ds --here
 ```
 
 This is equivalent to launching with `ds --home "$PWD"`.
+
+Useful launch examples:
+
+```bash
+ds --yolo --port 20999 --here
+ds --host 0.0.0.0 --port 21000
+ds --yolo --host 0.0.0.0 --port 21000 --here
+```
 
 If you want to install the bundled CLI tree into another base path from a source checkout:
 
@@ -96,6 +126,8 @@ This installs a lightweight TinyTeX `pdflatex` runtime for local paper compilati
 - [快速开始（中文）](docs/zh/00_QUICK_START.md)
 - [QQ Connector Guide (English)](docs/en/03_QQ_CONNECTOR_GUIDE.md)
 - [QQ Connector Guide (中文)](docs/zh/03_QQ_CONNECTOR_GUIDE.md)
+- [Memory and MCP Guide (English)](docs/en/07_MEMORY_AND_MCP.md)
+- [Memory 与 MCP 指南（中文）](docs/zh/07_MEMORY_AND_MCP.md)
 
 ## Maintainers
 

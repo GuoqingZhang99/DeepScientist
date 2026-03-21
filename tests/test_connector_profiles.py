@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from deepscientist.config import ConfigManager
 from deepscientist.config.models import default_connectors
 from deepscientist.connector_profiles import (
     connector_profile_label,
@@ -10,9 +11,11 @@ from deepscientist.connector_profiles import (
     normalize_connector_config,
 )
 from deepscientist.connector_runtime import conversation_identity_key, format_conversation_id, parse_conversation_id
+from deepscientist.channels.qq import QQRelayChannel
 from deepscientist.channels.relay import GenericRelayChannel
 from deepscientist.daemon.app import DaemonApp
 from deepscientist.home import ensure_home_layout
+from deepscientist.qq_profiles import normalize_qq_connector_config
 from deepscientist.shared import write_json, write_yaml
 
 
@@ -68,6 +71,112 @@ def test_merge_connector_profile_config_keeps_shared_policies_and_profile_creden
     assert merged["require_mention_in_groups"] is False
     assert merged["enabled"] is True
     assert connector_profile_label("slack", profile) == "Alpha Slack"
+
+
+def test_normalize_qq_connector_config_prefers_direct_secret_and_clears_env_placeholder() -> None:
+    connectors = default_connectors()
+    qq = connectors["qq"]
+    qq["enabled"] = True
+    qq["app_id"] = "1903299925"
+    qq["app_secret"] = "qq-secret"
+    qq["app_secret_env"] = "QQ_APP_SECRET"
+
+    normalized = normalize_qq_connector_config(qq)
+    profiles = normalized["profiles"]
+
+    assert len(profiles) == 1
+    assert normalized["app_secret"] == "qq-secret"
+    assert normalized["app_secret_env"] is None
+    assert profiles[0]["app_secret"] == "qq-secret"
+    assert profiles[0]["app_secret_env"] is None
+
+
+def test_normalize_connector_config_prefers_direct_secret_and_clears_env_placeholder() -> None:
+    connectors = default_connectors()
+    slack = connectors["slack"]
+    slack["enabled"] = True
+    slack["bot_name"] = "Alpha Slack"
+    slack["bot_token"] = "xoxb-alpha"
+    slack["bot_token_env"] = "SLACK_BOT_TOKEN"
+    slack["app_token"] = "xapp-alpha"
+    slack["app_token_env"] = "SLACK_APP_TOKEN"
+
+    normalized = normalize_connector_config("slack", slack)
+    profile = normalized["profiles"][0]
+
+    assert normalized["bot_token"] == "xoxb-alpha"
+    assert normalized["bot_token_env"] is None
+    assert normalized["app_token"] == "xapp-alpha"
+    assert normalized["app_token_env"] is None
+    assert profile["bot_token"] == "xoxb-alpha"
+    assert profile["bot_token_env"] is None
+    assert profile["app_token"] == "xapp-alpha"
+    assert profile["app_token_env"] is None
+
+
+def test_normalize_connector_config_preserves_env_only_credentials() -> None:
+    connectors = default_connectors()
+    telegram = connectors["telegram"]
+    telegram["enabled"] = True
+    telegram["bot_name"] = "Research Bot"
+    telegram["bot_token"] = None
+    telegram["bot_token_env"] = "TELEGRAM_BOT_TOKEN"
+
+    normalized = normalize_connector_config("telegram", telegram)
+    profile = normalized["profiles"][0]
+
+    assert normalized["bot_token"] is None
+    assert normalized["bot_token_env"] == "TELEGRAM_BOT_TOKEN"
+    assert profile["bot_token"] is None
+    assert profile["bot_token_env"] == "TELEGRAM_BOT_TOKEN"
+
+
+def test_default_connector_normalization_does_not_create_spurious_profiles() -> None:
+    connectors = default_connectors()
+
+    assert normalize_qq_connector_config(connectors["qq"])["profiles"] == []
+    assert normalize_connector_config("telegram", connectors["telegram"])["profiles"] == []
+
+
+def test_config_save_persists_direct_connector_secrets_without_env_placeholders(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["profiles"] = [
+        {
+            "profile_id": "qq-1903299925",
+            "enabled": True,
+            "app_id": "1903299925",
+            "app_secret": "qq-secret",
+            "app_secret_env": "QQ_APP_SECRET",
+            "bot_name": "DeepScientist",
+        }
+    ]
+    connectors["slack"]["enabled"] = True
+    connectors["slack"]["profiles"] = [
+        {
+            "profile_id": "slack-alpha",
+            "enabled": True,
+            "bot_name": "Alpha Slack",
+            "bot_token": "xoxb-alpha",
+            "bot_token_env": "SLACK_BOT_TOKEN",
+            "app_token": "xapp-alpha",
+            "app_token_env": "SLACK_APP_TOKEN",
+        }
+    ]
+
+    result = manager.save_named_payload("connectors", connectors)
+
+    assert result["ok"] is True
+    saved = manager.path_for("connectors").read_text(encoding="utf-8")
+    assert "qq-secret" in saved
+    assert "xoxb-alpha" in saved
+    assert "xapp-alpha" in saved
+    assert "QQ_APP_SECRET" not in saved
+    assert "SLACK_BOT_TOKEN" not in saved
+    assert "SLACK_APP_TOKEN" not in saved
 
 
 def test_profile_aware_conversation_identity_round_trips_for_non_qq_connector() -> None:
@@ -131,6 +240,12 @@ def test_generic_relay_status_exposes_profile_scoped_targets_and_bindings(temp_h
         }
     )
     channel.bind_conversation(alpha_conversation_id, "quest-alpha")
+    channel.send(
+        {
+            "conversation_id": alpha_conversation_id,
+            "message": "milestone sent to alpha",
+        }
+    )
     write_json(
         temp_home / "logs" / "connectors" / "telegram" / "profiles" / "telegram-alpha" / "runtime.json",
         {
@@ -162,9 +277,76 @@ def test_generic_relay_status_exposes_profile_scoped_targets_and_bindings(temp_h
     by_profile = {item["profile_id"]: item for item in snapshot["profiles"]}
     assert by_profile["telegram-alpha"]["binding_count"] == 1
     assert by_profile["telegram-alpha"]["target_count"] >= 1
+    assert by_profile["telegram-alpha"]["inbox_count"] == 1
+    assert by_profile["telegram-alpha"]["outbox_count"] == 1
     assert by_profile["telegram-beta"]["binding_count"] == 0
+    assert by_profile["telegram-beta"]["inbox_count"] == 1
+    assert by_profile["telegram-beta"]["outbox_count"] == 0
     assert any(item["conversation_id"] == alpha_conversation_id for item in by_profile["telegram-alpha"]["discovered_targets"])
     assert any(item["conversation_id"] == beta_conversation_id for item in by_profile["telegram-beta"]["discovered_targets"])
+
+
+def test_qq_status_exposes_profile_scoped_message_counts(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    connectors = default_connectors()
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["profiles"] = [
+        {
+            "profile_id": "qq-alpha",
+            "enabled": True,
+            "bot_name": "Alpha QQ",
+            "app_id": "1903299925",
+            "app_secret": "qq-secret-alpha",
+            "main_chat_id": "OPENID-ALPHA",
+        },
+        {
+            "profile_id": "qq-beta",
+            "enabled": True,
+            "bot_name": "Beta QQ",
+            "app_id": "1903299926",
+            "app_secret": "qq-secret-beta",
+        },
+    ]
+    channel = QQRelayChannel(temp_home, connectors["qq"])
+
+    alpha_conversation_id = format_conversation_id("qq", "direct", "OPENID-ALPHA", profile_id="qq-alpha")
+    beta_conversation_id = format_conversation_id("qq", "direct", "OPENID-BETA", profile_id="qq-beta")
+    channel.ingest(
+        {
+            "conversation_id": alpha_conversation_id,
+            "chat_type": "direct",
+            "sender_id": "OPENID-ALPHA",
+            "sender_name": "Alice",
+            "text": "/help",
+            "profile_id": "qq-alpha",
+            "profile_label": "Alpha QQ",
+        }
+    )
+    channel.ingest(
+        {
+            "conversation_id": beta_conversation_id,
+            "chat_type": "direct",
+            "sender_id": "OPENID-BETA",
+            "sender_name": "Bob",
+            "text": "/help",
+            "profile_id": "qq-beta",
+            "profile_label": "Beta QQ",
+        }
+    )
+    channel.send(
+        {
+            "conversation_id": alpha_conversation_id,
+            "message": "alpha outbound",
+        }
+    )
+
+    snapshot = channel.status()
+
+    by_profile = {item["profile_id"]: item for item in snapshot["profiles"]}
+    assert by_profile["qq-alpha"]["inbox_count"] == 1
+    assert by_profile["qq-alpha"]["outbox_count"] == 1
+    assert by_profile["qq-beta"]["inbox_count"] == 1
+    assert by_profile["qq-beta"]["outbox_count"] == 0
 
 
 def test_generic_relay_send_uses_profile_specific_credentials(

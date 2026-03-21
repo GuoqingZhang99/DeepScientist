@@ -30,6 +30,7 @@ QUEST_DIRECTORIES = (
     "memory/papers",
     "paper",
     "release/open_source",
+    ".codex/prompts",
     ".codex/skills",
     ".claude/agents",
     ".ds/bash_exec",

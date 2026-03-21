@@ -162,80 +162,89 @@ export function QuestMemorySurface({
           </Button>
         </div>
 
-        <div className="grid min-h-[720px] gap-6 xl:grid-cols-[190px_minmax(0,0.85fr)_minmax(0,1.15fr)]">
+        <div className="grid min-h-[720px] gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
           <aside className="min-w-0 border-r border-black/[0.06] pr-4 dark:border-white/[0.08]">
-            <div className="space-y-1">
-              {MEMORY_CATEGORY_META.map((category) => {
-                const active = activeCategory === category.key
-                return (
-                  <button
-                    key={category.key}
-                    type="button"
-                    onClick={() => setActiveCategory(category.key)}
-                    className={cn(
-                      'flex w-full items-center justify-between rounded-2xl px-3 py-2.5 text-left text-sm transition',
-                      active
-                        ? 'bg-black/[0.05] text-foreground dark:bg-white/[0.08]'
-                        : 'text-muted-foreground hover:bg-black/[0.03] hover:text-foreground dark:hover:bg-white/[0.04]'
-                    )}
-                  >
-                    <span>{category.label}</span>
-                    <span className="text-[11px]">{categoryCounts.get(category.key) || 0}</span>
-                  </button>
-                )
-              })}
+            <div className="flex flex-col gap-6">
+              <div>
+                <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  Categories
+                </div>
+                <div className="space-y-1">
+                  {MEMORY_CATEGORY_META.map((category) => {
+                    const active = activeCategory === category.key
+                    return (
+                      <button
+                        key={category.key}
+                        type="button"
+                        onClick={() => setActiveCategory(category.key)}
+                        className={cn(
+                          'flex w-full items-center justify-between rounded-2xl px-3 py-2.5 text-left text-sm transition',
+                          active
+                            ? 'bg-black/[0.05] text-foreground dark:bg-white/[0.08]'
+                            : 'text-muted-foreground hover:bg-black/[0.03] hover:text-foreground dark:hover:bg-white/[0.04]'
+                        )}
+                      >
+                        <span>{category.label}</span>
+                        <span className="text-[11px]">{categoryCounts.get(category.key) || 0}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="min-w-0">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    Entries
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">{filteredMemory.length} visible</div>
+                </div>
+                {loading && memory.length === 0 ? (
+                  <div className="py-4 text-sm leading-7 text-muted-foreground">Loading memory cards…</div>
+                ) : filteredMemory.length === 0 ? (
+                  <div className="py-4 text-sm leading-7 text-muted-foreground">
+                    No memory cards in this category yet.
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {filteredMemory.map((item, index) => {
+                      const isActive = item.document_id === selectedEntry?.document_id
+                      return (
+                        <button
+                          key={`${item.document_id || item.path || 'memory'}:${index}`}
+                          type="button"
+                          onClick={() => setSelectedDocumentId(item.document_id || null)}
+                          className={cn(
+                            'w-full rounded-[22px] px-3 py-3 text-left transition',
+                            isActive
+                              ? 'bg-black/[0.05] dark:bg-white/[0.08]'
+                              : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]'
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-medium leading-6 text-foreground [overflow-wrap:anywhere]">
+                                {item.title || item.path || 'Memory'}
+                              </div>
+                              <div className="mt-1 text-xs uppercase tracking-[0.12em] text-muted-foreground">
+                                {item.type || classifyMemoryCategory(item)}
+                              </div>
+                            </div>
+                            <div className="shrink-0 text-[11px] text-muted-foreground">
+                              {formatRelativeTime(item.updated_at)}
+                            </div>
+                          </div>
+                          <div className="mt-2 whitespace-normal text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">
+                            {summarizeMemory(item)}
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           </aside>
-
-          <section className="min-w-0 border-r border-black/[0.06] pr-4 dark:border-white/[0.08]">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                Entries
-              </div>
-              <div className="text-[11px] text-muted-foreground">{filteredMemory.length} visible</div>
-            </div>
-            {loading && memory.length === 0 ? (
-              <div className="py-4 text-sm leading-7 text-muted-foreground">Loading memory cards…</div>
-            ) : filteredMemory.length === 0 ? (
-              <div className="py-4 text-sm leading-7 text-muted-foreground">No memory cards in this category yet.</div>
-            ) : (
-              <div className="space-y-1.5">
-                {filteredMemory.map((item, index) => {
-                  const isActive = item.document_id === selectedEntry?.document_id
-                  return (
-                    <button
-                      key={`${item.document_id || item.path || 'memory'}:${index}`}
-                      type="button"
-                      onClick={() => setSelectedDocumentId(item.document_id || null)}
-                      className={cn(
-                        'w-full rounded-[22px] px-3 py-3 text-left transition',
-                        isActive
-                          ? 'bg-black/[0.05] dark:bg-white/[0.08]'
-                          : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]'
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium text-foreground">
-                            {item.title || item.path || 'Memory'}
-                          </div>
-                          <div className="mt-1 text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                            {item.type || classifyMemoryCategory(item)}
-                          </div>
-                        </div>
-                        <div className="shrink-0 text-[11px] text-muted-foreground">
-                          {formatRelativeTime(item.updated_at)}
-                        </div>
-                      </div>
-                      <div className="mt-2 text-sm leading-6 text-muted-foreground">
-                        {summarizeMemory(item)}
-                      </div>
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-          </section>
 
           <section className="min-w-0">
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3">

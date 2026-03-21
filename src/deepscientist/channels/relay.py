@@ -282,6 +282,19 @@ class GenericRelayChannel(BaseChannel):
             item_profile_id = str(item.get("profile_id") or "").strip()
             return item_profile_id == profile_id or (not item_profile_id and len(profiles) == 1)
 
+        def count_profile_records(path: Path, profile_id: str) -> int:
+            total = 0
+            for raw in read_jsonl(path):
+                if not isinstance(raw, dict):
+                    continue
+                record_profile_id = str(raw.get("profile_id") or "").strip()
+                if not record_profile_id:
+                    parsed = parse_conversation_id(str(raw.get("conversation_id") or "").strip())
+                    record_profile_id = str((parsed or {}).get("profile_id") or "").strip()
+                if record_profile_id == profile_id or (not record_profile_id and len(profiles) == 1):
+                    total += 1
+            return total
+
         profile_snapshots = []
         for profile in profiles:
             profile_id = str(profile.get("profile_id") or "").strip()
@@ -322,6 +335,9 @@ class GenericRelayChannel(BaseChannel):
                     "discovered_targets": profile_targets,
                     "recent_conversations": profile_recent_conversations,
                     "bindings": profile_bindings,
+                    "inbox_count": count_profile_records(self.inbox_path, profile_id),
+                    "outbox_count": count_profile_records(self.outbox_path, profile_id),
+                    "ignored_count": count_profile_records(self.ignored_path, profile_id),
                     "target_count": len(profile_targets),
                     "binding_count": len(profile_bindings),
                     "last_error": profile_runtime_state.get("last_error") if isinstance(profile_runtime_state, dict) else None,

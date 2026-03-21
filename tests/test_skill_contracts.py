@@ -7,6 +7,29 @@ def _skill_text(skill_id: str) -> str:
     return (repo_root() / "src" / "skills" / skill_id / "SKILL.md").read_text(encoding="utf-8")
 
 
+def _system_prompt_text() -> str:
+    return (repo_root() / "src" / "prompts" / "system.md").read_text(encoding="utf-8")
+
+
+def test_system_prompt_prioritizes_user_constraints_and_safe_efficiency() -> None:
+    text = _system_prompt_text()
+
+    assert "primary planning boundary" in text
+    assert "best evidence-per-time-and-compute ratio" in text
+    assert "larger safe batch size" in text
+    assert "do not weaken comparability, trust, or the meaning of the final result" in text
+    assert "safe efficiency levers that preserve those constraints and the comparability contract" in text
+
+
+def test_system_prompt_defines_metric_contract_rules_and_optional_metric_md() -> None:
+    text = _system_prompt_text()
+
+    assert "make the canonical `metrics_summary` flat at the top level" in text
+    assert "every canonical baseline metric entry should explain where it came from" in text
+    assert "every main experiment submission must cover all required baseline metric ids" in text
+    assert "`Result/metric.md` may be used as temporary scratch memory" in text
+
+
 def test_idea_skill_requires_survey_delta_and_memory_reuse_contract() -> None:
     text = _skill_text("idea")
 
@@ -22,9 +45,41 @@ def test_idea_skill_requires_survey_delta_and_memory_reuse_contract() -> None:
     assert "exploration_score" in text
 
 
+def test_baseline_skill_requires_plan_checklist_and_source_reading() -> None:
+    text = _skill_text("baseline")
+
+    assert "## Quick workflow" in text
+    assert "## Required plan and checklist" in text
+    assert "source paper and source repo first" in text
+    assert "`PLAN.md` and `CHECKLIST.md`" in text
+    assert "references/baseline-plan-template.md" in text
+    assert "references/baseline-checklist-template.md" in text
+    assert "ModelScope" in text
+    assert "compatibility alias" in text
+    assert "concise `1-2` sentence summary" in text
+    assert "user's explicit requirements and non-negotiable constraints" in text
+    assert "equivalence-preserving efficiency gains" in text
+    assert "larger safe batch size" in text
+    assert "accepted baseline meaning, effective evaluation contract, or trust judgment" in text
+    assert "one clean implementation pass, one smoke test, and then one normal baseline run" in text
+    assert "original paper's evaluation protocol as the canonical baseline contract" in text
+    assert "multiple metrics, datasets, subtasks, or splits" in text
+    assert "flat top-level dictionary keyed by the paper-facing metric ids" in text
+    assert "`Result/metric.md` is optional temporary scratch memory only" in text
+
+
 def test_experiment_skill_requires_incremental_seven_field_recording() -> None:
     text = _skill_text("experiment")
 
+    assert "## Quick workflow" in text
+    assert "## Required plan and checklist" in text
+    assert "`PLAN.md` and `CHECKLIST.md`" in text
+    assert "references/main-experiment-plan-template.md" in text
+    assert "references/main-experiment-checklist-template.md" in text
+    assert "selected idea summarized in `1-2` sentences" in text
+    assert "minimal code-change map" in text
+    assert "revise `PLAN.md` before spending more code or compute" in text
+    assert "concise `1-2` sentence outcome summary" in text
     assert "rolling run log" in text or "rolling durable experiment log" in text
     assert "null hypothesis" in text
     assert "alternative hypothesis" in text
@@ -44,11 +99,27 @@ def test_experiment_skill_requires_incremental_seven_field_recording() -> None:
     assert "baseline_relation" in text
     assert "failure_mode" in text
     assert "next_action" in text
+    assert "maximize valid evidence per unit time and compute" in text
+    assert "equivalence-preserving efficiency upgrades" in text
+    assert "larger safe batch size" in text
+    assert "baseline comparability, treat it as a real experiment change" in text
+    assert "one clean implementation pass, one bounded smoke or pilot run, and then one normal main run" in text
+    assert "implement according to the current `PLAN.md`" in text
+    assert "extra metrics are allowed, but missing required metrics are not" in text
+    assert "record it as supplementary output rather than replacing the canonical comparator" in text
+    assert "artifact.record_main_experiment(...)" in text
 
 
 def test_analysis_campaign_skill_requires_outline_bound_campaign_fields() -> None:
     text = _skill_text("analysis-campaign")
 
+    assert "## Quick workflow" in text
+    assert "## Required plan and checklist" in text
+    assert "`PLAN.md` and `CHECKLIST.md`" in text
+    assert "references/campaign-plan-template.md" in text
+    assert "references/campaign-checklist-template.md" in text
+    assert "slice feasibility, ordering, comparators, or campaign interpretation changes materially" in text
+    assert "concise `1-2` sentence summary" in text
     assert "do not launch it until a selected outline exists" in text
     assert "selected_outline_ref" in text
     assert "research_questions" in text
@@ -73,6 +144,9 @@ def test_write_skill_prefers_flexible_outline_flow_and_bundle_submission() -> No
     assert "artifact.submit_paper_outline(mode='select'|'revise', ...)" in text
     assert "artifact.submit_paper_bundle(...)" in text
     assert "do not force extra outline rounds" in text
+    assert "paper/latex/" in text
+    assert "templates/iclr2026/" in text
+    assert "general ML or AI writing with no stronger venue constraint, default to `templates/iclr2026/`" in text
     assert "motivation" in text
     assert "challenge" in text
     assert "resolution" in text
@@ -90,6 +164,9 @@ def test_write_skill_prefers_flexible_outline_flow_and_bundle_submission() -> No
     assert "running example -> intuition -> formalism" in text
     assert "This paper is organized as follows" in text
     assert "do not attack prior work merely to make the current line look more novel" in text
+    assert "Publication-grade figure refinement is recommended with AutoFigure-Edit" in text
+    assert "https://github.com/ResearAI/AutoFigure-Edit" in text
+    assert "https://deepscientist" in text
 
 
 def test_idea_skill_adds_problem_importance_and_first_principles_memo() -> None:
@@ -227,7 +304,7 @@ def test_stage_skill_progress_contracts_match_tool_call_keepalive_policy() -> No
 
     for skill_id in aligned_skills:
         text = _skill_text(skill_id)
-        assert "roughly 10 to 30 tool calls" in text
+        assert "roughly 20 tool calls or about 15 minutes" in text
         assert "Do not update by tool-call cadence." not in text
 
 
@@ -239,11 +316,18 @@ def test_experiment_and_analysis_skills_require_smoke_then_detach_tail_monitorin
     for text in (baseline_text, experiment_text, analysis_text):
         assert "smoke test" in text
         assert "bash_exec(mode='detach', ...)" in text
+        assert "2000 lines or fewer" in text
+        assert "first 500 lines plus the last 1500 lines" in text
+        assert "bash_exec(mode='read', id=..., start=..., tail=...)" in text
         assert "tail_limit=..., order='desc'" in text
         assert "after_seq=last_seen_seq" in text
         assert "bash_exec(mode='history')" in text
         assert "watchdog_overdue" in text
         assert "bash_exec(mode='kill', id=..., wait=true, timeout_seconds=...)" in text
+        assert "canonical sleep choice" in text
+        assert "bash_exec(command='sleep N', mode='await', timeout_seconds=N+buffer, ...)" in text
+        assert "do not set `timeout_seconds` exactly equal to `N`" in text
+        assert "prefer `bash_exec(mode='await', id=..., timeout_seconds=...)` instead of starting a new sleep command" in text
 
     assert "tqdm" in baseline_text
     assert "tqdm" in experiment_text

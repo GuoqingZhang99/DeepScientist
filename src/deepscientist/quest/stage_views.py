@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..memory.frontmatter import load_markdown_document
@@ -117,7 +117,7 @@ class QuestStageViewBuilder:
         self.snapshot = dict(snapshot or {})
         self.selection = dict(selection or {})
         self.trace = dict(trace or {})
-        self.workspace_root = Path(str(self.snapshot.get("active_workspace_root") or quest_root))
+        self.workspace_root = self._resolve_workspace_root()
         self.branch_name = (
             str(
                 self.selection.get("branch_name")
@@ -134,6 +134,24 @@ class QuestStageViewBuilder:
         )
         self.stage_status = str(self.selection.get("status") or self.trace.get("status") or "").strip() or None
         self.artifacts = sorted(list(self.quest_service._collect_artifacts(quest_root)), key=_artifact_sort_key)
+
+    def _resolve_workspace_root(self) -> Path:
+        for raw in (
+            self.selection.get("worktree_rel_path"),
+            self.trace.get("worktree_rel_path"),
+            self.selection.get("worktree_root"),
+            self.trace.get("worktree_root"),
+            self.snapshot.get("active_workspace_root"),
+        ):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            candidate = Path(text)
+            if not candidate.is_absolute():
+                candidate = (self.quest_root / text).resolve()
+            if candidate.exists():
+                return candidate
+        return self.quest_root
 
     def build(self) -> dict[str, Any]:
         if str(self.selection.get("selection_type") or "").strip() == "branch_node":
@@ -208,7 +226,7 @@ class QuestStageViewBuilder:
             "idea": self._idea_scope_paths(),
             "experiment": self._experiment_scope_paths(None),
             "analysis": self._analysis_scope_paths(None),
-            "paper": ["paper"],
+            "paper": self._paper_scope_paths(),
         }
         return defaults.get(self.stage_key, [])
 
@@ -356,8 +374,28 @@ class QuestStageViewBuilder:
         }
 
     def _paper_bundle_manifest(self) -> dict[str, Any]:
-        payload = read_json(self.quest_root / "paper" / "paper_bundle_manifest.json", {})
+        payload = read_json(self._paper_root() / "paper_bundle_manifest.json", {})
         return payload if isinstance(payload, dict) else {}
+
+    def _paper_root(self) -> Path:
+        candidates = [self.workspace_root / "paper", self.quest_root / "paper"]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
+
+    def _paper_scope_paths(self) -> list[str]:
+        try:
+            return [self._paper_root().relative_to(self.quest_root).as_posix()]
+        except ValueError:
+            return ["paper"]
+
+    def _open_source_root(self) -> Path:
+        candidates = [self.workspace_root / "release" / "open_source", self.quest_root / "release" / "open_source"]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
 
     def _paper_relative_path(self, raw_path: object) -> str | None:
         resolved = self._path_in_quest(raw_path)
@@ -370,9 +408,10 @@ class QuestStageViewBuilder:
         preferred = self._paper_relative_path(bundle_manifest.get("latex_root_path"))
         if preferred:
             return preferred
-        for candidate in ("paper/latex", "paper/tex"):
-            if (self.quest_root / candidate).exists():
-                return candidate
+        paper_root = self._paper_root()
+        for candidate in (paper_root / "latex", paper_root / "tex"):
+            if candidate.exists():
+                return candidate.relative_to(self.quest_root).as_posix()
         return None
 
     def _paper_main_tex(self, latex_root_rel: str | None) -> str | None:
@@ -401,7 +440,7 @@ class QuestStageViewBuilder:
             guessed = str(PurePosixPath(main_tex_rel).with_suffix(".pdf"))
             if (self.quest_root / guessed).exists():
                 candidates.append(guessed)
-        for path in sorted((self.quest_root / "paper").glob("*.pdf")):
+        for path in sorted(self._paper_root().glob("*.pdf")):
             candidates.append(path.relative_to(self.quest_root).as_posix())
         deduped: list[str] = []
         seen: set[str] = set()
@@ -948,7 +987,7 @@ class QuestStageViewBuilder:
                         description="Merged analysis summary for this branch.",
                     ),
                     self._file_entry(
-                        "paper/selected_outline.json" if (self.quest_root / "paper" / "selected_outline.json").exists() else None,
+                        (self._paper_root() / "selected_outline.json") if (self._paper_root() / "selected_outline.json").exists() else None,
                         label="Selected Outline",
                         description="Current selected paper outline.",
                     ),
@@ -1264,23 +1303,25 @@ class QuestStageViewBuilder:
         latex_root_rel = self._paper_latex_root(bundle_manifest)
         main_tex_rel = self._paper_main_tex(latex_root_rel)
         pdf_candidates = self._paper_pdf_candidates(bundle_manifest, main_tex_rel=main_tex_rel)
-        candidates = sorted((self.quest_root / "paper" / "outlines" / "candidates").glob("*.json"))
+        paper_root = self._paper_root()
+        open_source_root = self._open_source_root()
+        candidates = sorted((paper_root / "outlines" / "candidates").glob("*.json"))
         files: list[dict[str, Any] | None] = [
             *[
                 self._file_entry(path, label=f"Outline Candidate · {path.stem}", description="Paper outline candidate JSON.")
                 for path in candidates
             ],
-            self._file_entry("paper/selected_outline.json", label="Selected Outline", description="Chosen paper outline."),
-            self._file_entry("paper/outline_selection.md", label="Outline Selection Note", description="Outline selection rationale."),
-            self._file_entry("paper/draft.md", label="Draft Markdown", description="Current paper draft."),
-            self._file_entry("paper/writing_plan.md", label="Writing Plan", description="Paper writing plan."),
-            self._file_entry("paper/references.bib", label="References", description="Bibliography file."),
-            self._file_entry("paper/claim_evidence_map.json", label="Claim-Evidence Map", description="Claim to evidence mapping."),
-            self._file_entry("paper/baseline_inventory.json", label="Baseline Inventory", description="Canonical and supplementary baseline inventory for writing."),
-            self._file_entry("paper/build/compile_report.json", label="Compile Report", description="Paper build/compile report."),
-            self._file_entry("paper/paper_bundle_manifest.json", label="Bundle Manifest", description="Final paper bundle manifest."),
-            self._file_entry("release/open_source/manifest.json", label="Open Source Manifest", description="Open-source cleanup and release preparation manifest."),
-            self._file_entry("release/open_source/cleanup_plan.md", label="Open Source Cleanup Plan", description="Checklist for cleaning the paper branch into a public release."),
+            self._file_entry(paper_root / "selected_outline.json", label="Selected Outline", description="Chosen paper outline."),
+            self._file_entry(paper_root / "outline_selection.md", label="Outline Selection Note", description="Outline selection rationale."),
+            self._file_entry(paper_root / "draft.md", label="Draft Markdown", description="Current paper draft."),
+            self._file_entry(paper_root / "writing_plan.md", label="Writing Plan", description="Paper writing plan."),
+            self._file_entry(paper_root / "references.bib", label="References", description="Bibliography file."),
+            self._file_entry(paper_root / "claim_evidence_map.json", label="Claim-Evidence Map", description="Claim to evidence mapping."),
+            self._file_entry(paper_root / "baseline_inventory.json", label="Baseline Inventory", description="Canonical and supplementary baseline inventory for writing."),
+            self._file_entry(paper_root / "build" / "compile_report.json", label="Compile Report", description="Paper build/compile report."),
+            self._file_entry(paper_root / "paper_bundle_manifest.json", label="Bundle Manifest", description="Final paper bundle manifest."),
+            self._file_entry(open_source_root / "manifest.json", label="Open Source Manifest", description="Open-source cleanup and release preparation manifest."),
+            self._file_entry(open_source_root / "cleanup_plan.md", label="Open Source Cleanup Plan", description="Checklist for cleaning the paper branch into a public release."),
             self._file_entry(latex_root_rel, label="LaTeX Sources", description="LaTeX source folder.", expected_kind="directory"),
             self._file_entry(main_tex_rel, label="Main TeX", description="Primary TeX source file."),
         ]
@@ -1290,7 +1331,7 @@ class QuestStageViewBuilder:
 
     def _paper_candidates(self) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
-        for path in sorted((self.quest_root / "paper" / "outlines" / "candidates").glob("*.json")):
+        for path in sorted((self._paper_root() / "outlines" / "candidates").glob("*.json")):
             payload = read_json(path, {})
             if not isinstance(payload, dict):
                 payload = {}
@@ -1319,7 +1360,8 @@ class QuestStageViewBuilder:
             )
             and self._branch_matches(self._payload(item), allow_parent=True)
         ]
-        selected_outline_path = self.quest_root / "paper" / "selected_outline.json"
+        paper_root = self._paper_root()
+        selected_outline_path = paper_root / "selected_outline.json"
         selected_outline = read_json(selected_outline_path, {}) if selected_outline_path.exists() else {}
         if not isinstance(selected_outline, dict):
             selected_outline = {}
@@ -1329,15 +1371,18 @@ class QuestStageViewBuilder:
             else {}
         )
         candidates = self._paper_candidates()
-        compile_report = read_json(self.quest_root / "paper" / "build" / "compile_report.json", {})
+        compile_report = read_json(paper_root / "build" / "compile_report.json", {})
         if not isinstance(compile_report, dict):
             compile_report = {}
         bundle_manifest = self._paper_bundle_manifest()
         latex_root_rel = self._paper_latex_root(bundle_manifest)
         main_tex_rel = self._paper_main_tex(latex_root_rel)
-        references_bib = read_text(self.quest_root / "paper" / "references.bib", "")
+        references_bib = read_text(paper_root / "references.bib", "")
         references_count = sum(1 for line in references_bib.splitlines() if line.lstrip().startswith("@"))
         pdf_paths = self._paper_pdf_candidates(bundle_manifest, main_tex_rel=main_tex_rel)
+        draft_rel = self._paper_relative_path(paper_root / "draft.md") or "paper/draft.md"
+        writing_plan_rel = self._paper_relative_path(paper_root / "writing_plan.md") or "paper/writing_plan.md"
+        claim_map_rel = self._paper_relative_path(paper_root / "claim_evidence_map.json") or "paper/claim_evidence_map.json"
         selected_title = str(
             detailed.get("title") or selected_outline.get("title") or bundle_manifest.get("title") or "Drafting"
         ).strip() or "Drafting"
@@ -1356,7 +1401,7 @@ class QuestStageViewBuilder:
             overview=[
                 _field("Selected Outline", selected_title if selected_outline else "Not selected"),
                 _field("Candidate Count", len(candidates)),
-                _field("Draft Status", "present" if (self.quest_root / "paper" / "draft.md").exists() else "missing"),
+                _field("Draft Status", "present" if (paper_root / "draft.md").exists() else "missing"),
                 _field("Bundle Status", "present" if bundle_manifest else "missing"),
             ],
             key_facts=[
@@ -1377,10 +1422,10 @@ class QuestStageViewBuilder:
                     "outline_candidates": candidates,
                     "selected_outline": selected_outline,
                     "drafting": {
-                        "writing_plan_path": "paper/writing_plan.md",
-                        "draft_path": "paper/draft.md",
+                        "writing_plan_path": writing_plan_rel,
+                        "draft_path": draft_rel,
                         "references_count": references_count,
-                        "claim_evidence_map_path": "paper/claim_evidence_map.json",
+                        "claim_evidence_map_path": claim_map_rel,
                     },
                     "build": {
                         "compile_report": compile_report,

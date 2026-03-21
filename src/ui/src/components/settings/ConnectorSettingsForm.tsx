@@ -9,7 +9,9 @@ import {
   MessageSquareText,
   RadioTower,
   Save,
+  Settings2,
   ShieldCheck,
+  Trash2,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -18,16 +20,18 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { HintDot } from '@/components/ui/hint-dot'
 import { Input } from '@/components/ui/input'
-import { Modal, ModalFooter } from '@/components/ui/modal'
+import { ConfirmModal, Modal, ModalFooter } from '@/components/ui/modal'
 import { Textarea } from '@/components/ui/textarea'
-import { connectorTargetLabel, normalizeConnectorTargets, parseConversationId } from '@/lib/connectors'
+import { connectorTargetLabel, conversationIdentityKey, normalizeConnectorTargets, parseConversationId } from '@/lib/connectors'
 import { getDocAssetUrl } from '@/lib/docs'
 import { cn } from '@/lib/utils'
 import type {
+  ConnectorProfileSnapshot,
   ConnectorRecentEvent,
   ConnectorSnapshot,
   ConnectorTargetSnapshot,
   Locale,
+  QuestSummary,
 } from '@/types'
 
 import { connectorCatalog, type ConnectorCatalogEntry, type ConnectorField, type ConnectorName } from './connectorCatalog'
@@ -39,6 +43,7 @@ import {
   type ConnectorGuideLink,
   type ConnectorGuideStep,
 } from './connectorGuideCatalog'
+import { qqProfileDisplayLabel, qqProfileStatus, selectQqProfileTarget } from './connectorSettingsHelpers'
 import { translateSettingsCatalogText } from './settingsCatalogI18n'
 
 type ConnectorConfigMap = Record<string, Record<string, unknown>>
@@ -1179,9 +1184,7 @@ function ConnectorTargetList({
             {showBindingDetails ? (
               <div>
                 <span className="text-foreground">{t.boundQuestLabel}:</span>{' '}
-                {target.bound_quest_id
-                  ? `${target.bound_quest_id}${target.bound_quest_title ? ` · ${target.bound_quest_title}` : ''}`
-                  : t.notBoundYet}
+                {target.bound_quest_id || t.notBoundYet}
               </div>
             ) : null}
           </div>
@@ -1242,27 +1245,317 @@ function ConnectorOverviewCard({
   )
 }
 
+type ConnectorProfileBindingAction = {
+  connectorName: ConnectorName
+  profileId: string
+  conversationId: string
+  currentQuestId?: string | null
+  nextQuestId?: string | null
+}
+
+function ConnectorProfileSettingsModal({
+  open,
+  locale,
+  connectorName,
+  profileId,
+  profileLabel,
+  preferredConversationId,
+  profileSnapshot,
+  targets,
+  quests,
+  busy,
+  isDirty,
+  onClose,
+  onSaveBinding,
+  onRequestDelete,
+}: {
+  open: boolean
+  locale: Locale
+  connectorName: ConnectorName
+  profileId: string
+  profileLabel: string
+  preferredConversationId?: string | null
+  profileSnapshot?: ConnectorProfileSnapshot | null
+  targets: ConnectorTargetSnapshot[]
+  quests: QuestSummary[]
+  busy?: boolean
+  isDirty?: boolean
+  onClose: () => void
+  onSaveBinding: (payload: ConnectorProfileBindingAction) => Promise<void> | void
+  onRequestDelete: () => void
+}) {
+  const text =
+    locale === 'zh'
+      ? {
+          title: 'Connector 设置',
+          description: '管理当前 connector 实例的目标、绑定项目和运行统计。',
+          target: '目标会话',
+          targetPlaceholder: '选择一个已发现的目标',
+          quest: '绑定项目',
+          questPlaceholder: '不绑定任何项目',
+          unbound: '不绑定项目',
+          noTargets: '这个 connector 还没有发现可绑定的会话。先从平台侧发来一条真实消息。',
+          currentBinding: '当前绑定',
+          notBound: '当前未绑定到任何项目。',
+          stats: '运行统计',
+          received: '接收总数',
+          sent: '发送总数',
+          bindings: '绑定数',
+          targets: '目标数',
+          status: '状态',
+          auth: '鉴权',
+          save: '保存绑定',
+          saving: '保存中…',
+          delete: '删除 Connector',
+          dirty: '请先保存当前未保存的 connector 配置，再修改绑定或删除。',
+          bindHint: '保存时会自动把旧 quest 解绑，并重绑到新的 quest。',
+          close: '关闭',
+        }
+      : {
+          title: 'Connector settings',
+          description: 'Manage the target conversation, bound quest, and runtime stats for this connector profile.',
+          target: 'Target conversation',
+          targetPlaceholder: 'Select a discovered target',
+          quest: 'Bound quest',
+          questPlaceholder: 'Keep this target unbound',
+          unbound: 'Not bound',
+          noTargets: 'No runtime target has been discovered for this connector yet. Send one real platform message first.',
+          currentBinding: 'Current binding',
+          notBound: 'This target is not currently bound to any quest.',
+          stats: 'Runtime stats',
+          received: 'Received',
+          sent: 'Sent',
+          bindings: 'Bindings',
+          targets: 'Targets',
+          status: 'Status',
+          auth: 'Auth',
+          save: 'Save binding',
+          saving: 'Saving…',
+          delete: 'Delete connector',
+          dirty: 'Save the current connector config changes before changing bindings or deleting this profile.',
+          bindHint: 'Saving here automatically unbinds the old quest and rebinds this target to the new quest.',
+          close: 'Close',
+        }
+
+  const targetOptions = useMemo(() => {
+    const seen = new Set<string>()
+    return targets.filter((item) => {
+      const key = conversationIdentityKey(item.conversation_id)
+      if (!key || seen.has(key)) {
+        return false
+      }
+      seen.add(key)
+      return true
+    })
+  }, [targets])
+  const defaultConversationId = useMemo(() => {
+    const preferredKey = conversationIdentityKey(preferredConversationId || '')
+    if (preferredKey) {
+      const preferred = targetOptions.find((item) => conversationIdentityKey(item.conversation_id) === preferredKey)
+      if (preferred) {
+        return preferred.conversation_id
+      }
+    }
+    return targetOptions.find((item) => item.bound_quest_id)?.conversation_id || targetOptions[0]?.conversation_id || ''
+  }, [preferredConversationId, targetOptions])
+  const [selectedConversationId, setSelectedConversationId] = useState('')
+  const [selectedQuestId, setSelectedQuestId] = useState('')
+  const [errorMessage, setErrorMessage] = useState('')
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+    setSelectedConversationId(defaultConversationId)
+    const initialTarget = targetOptions.find(
+      (item) => conversationIdentityKey(item.conversation_id) === conversationIdentityKey(defaultConversationId)
+    )
+    setSelectedQuestId(String(initialTarget?.bound_quest_id || '').trim())
+    setErrorMessage('')
+  }, [defaultConversationId, open, targetOptions])
+
+  const selectedTarget =
+    targetOptions.find((item) => conversationIdentityKey(item.conversation_id) === conversationIdentityKey(selectedConversationId)) || null
+  const currentQuestId = String(selectedTarget?.bound_quest_id || '').trim()
+  const hasBindingChange =
+    Boolean(selectedConversationId) &&
+    (selectedQuestId !== currentQuestId ||
+      ((selectedQuestId || currentQuestId) &&
+        conversationIdentityKey(selectedConversationId) !== conversationIdentityKey(defaultConversationId)))
+
+  const handleSave = async () => {
+    if (!selectedConversationId || busy || isDirty || !hasBindingChange) {
+      return
+    }
+    setErrorMessage('')
+    try {
+      await onSaveBinding({
+        connectorName,
+        profileId,
+        conversationId: selectedConversationId,
+        currentQuestId: currentQuestId || null,
+        nextQuestId: selectedQuestId || null,
+      })
+      onClose()
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error || 'Failed to update connector binding.'))
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`${profileLabel} · ${text.title}`}
+      description={`${connectorName} · ${profileId}. ${text.description}`}
+      size="lg"
+    >
+      <div className="space-y-5">
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="rounded-[20px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <span>{text.target}</span>
+            </label>
+            <select
+              value={selectedConversationId || ''}
+              onChange={(event) => {
+                const nextConversationId = event.target.value
+                setSelectedConversationId(nextConversationId)
+                const nextTarget =
+                  targetOptions.find(
+                    (item) => conversationIdentityKey(item.conversation_id) === conversationIdentityKey(nextConversationId)
+                  ) || null
+                setSelectedQuestId(String(nextTarget?.bound_quest_id || '').trim())
+              }}
+              className="mt-3 flex h-11 w-full rounded-[18px] border border-black/[0.08] bg-white/[0.44] px-3 py-2 text-sm shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:border-white/[0.12] dark:bg-white/[0.03]"
+              disabled={busy || targetOptions.length === 0}
+            >
+              {targetOptions.length === 0 ? <option value="">{text.targetPlaceholder}</option> : null}
+              {targetOptions.map((item) => (
+                <option key={item.conversation_id} value={item.conversation_id}>
+                  {connectorTargetLabel(item) || item.conversation_id}
+                </option>
+              ))}
+            </select>
+            {selectedTarget ? (
+              <div className="mt-3 rounded-[14px] border border-black/[0.06] bg-black/[0.02] px-3 py-2 text-xs text-muted-foreground dark:border-white/[0.08] dark:bg-white/[0.03]">
+                <div className="font-medium text-foreground">{connectorTargetLabel(selectedTarget)}</div>
+                <div className="mt-1 break-all font-mono">{selectedTarget.conversation_id}</div>
+              </div>
+            ) : (
+              <div className="mt-3 text-xs leading-5 text-muted-foreground">{text.noTargets}</div>
+            )}
+          </div>
+
+          <div className="rounded-[20px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <span>{text.quest}</span>
+            </label>
+            <select
+              value={selectedQuestId}
+              onChange={(event) => setSelectedQuestId(event.target.value)}
+              className="mt-3 flex h-11 w-full rounded-[18px] border border-black/[0.08] bg-white/[0.44] px-3 py-2 text-sm shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:border-white/[0.12] dark:bg-white/[0.03]"
+              disabled={busy || !selectedConversationId}
+            >
+              <option value="">{text.unbound}</option>
+              {quests.map((quest) => (
+                <option key={quest.quest_id} value={quest.quest_id}>
+                  {quest.quest_id}
+                </option>
+              ))}
+            </select>
+            <div className="mt-3 rounded-[14px] border border-black/[0.06] bg-black/[0.02] px-3 py-2 text-xs text-muted-foreground dark:border-white/[0.08] dark:bg-white/[0.03]">
+              <div className="font-medium text-foreground">{text.currentBinding}</div>
+              <div className="mt-1">{selectedTarget?.bound_quest_id || text.notBound}</div>
+            </div>
+            <div className="mt-3 text-xs leading-5 text-muted-foreground">{text.bindHint}</div>
+          </div>
+        </div>
+
+        <div className="rounded-[20px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
+          <div className="text-sm font-medium text-foreground">{text.stats}</div>
+          <div className="mt-3 grid gap-3 text-sm text-muted-foreground sm:grid-cols-2 xl:grid-cols-4">
+            <div>
+              <span className="text-foreground">{text.received}:</span> {profileSnapshot?.inbox_count ?? 0}
+            </div>
+            <div>
+              <span className="text-foreground">{text.sent}:</span> {profileSnapshot?.outbox_count ?? 0}
+            </div>
+            <div>
+              <span className="text-foreground">{text.bindings}:</span> {profileSnapshot?.binding_count ?? targetOptions.filter((item) => item.bound_quest_id).length}
+            </div>
+            <div>
+              <span className="text-foreground">{text.targets}:</span> {profileSnapshot?.target_count ?? targetOptions.length}
+            </div>
+            <div>
+              <span className="text-foreground">{text.status}:</span>{' '}
+              {translateSettingsCatalogText(locale, profileSnapshot?.connection_state || 'idle')}
+            </div>
+            <div>
+              <span className="text-foreground">{text.auth}:</span>{' '}
+              {translateSettingsCatalogText(locale, profileSnapshot?.auth_state || 'idle')}
+            </div>
+          </div>
+        </div>
+
+        {isDirty ? <div className="text-sm text-amber-700 dark:text-amber-300">{text.dirty}</div> : null}
+        {errorMessage ? <div className="text-sm text-red-600 dark:text-red-300">{errorMessage}</div> : null}
+
+        <ModalFooter className="-mx-6 -mb-4 mt-2 justify-between">
+          <Button
+            variant="secondary"
+            onClick={onRequestDelete}
+            disabled={busy || Boolean(isDirty)}
+            className="text-red-600 hover:text-red-700 dark:text-red-300 dark:hover:text-red-200"
+          >
+            <Trash2 className="h-4 w-4" />
+            {text.delete}
+          </Button>
+          <div className="flex items-center gap-3">
+            <Button variant="secondary" onClick={onClose} disabled={busy}>
+              {text.close}
+            </Button>
+            <Button onClick={() => void handleSave()} disabled={busy || Boolean(isDirty) || !hasBindingChange || !selectedConversationId}>
+              {busy ? text.saving : text.save}
+            </Button>
+          </div>
+        </ModalFooter>
+      </div>
+    </Modal>
+  )
+}
+
 function ConnectorCard({
   entry,
   locale,
   config,
   snapshot,
+  quests,
   saving,
   isDirty,
+  deletingProfileKey,
+  bindingProfileKey,
   onUpdateField,
   onUpdateConnector,
   onSave,
+  onDeleteProfile,
+  onManageProfileBinding,
   onJumpToAnchor,
 }: {
   entry: ConnectorCatalogEntry
   locale: Locale
   config: Record<string, unknown>
   snapshot?: ConnectorSnapshot
+  quests: QuestSummary[]
   saving: boolean
   isDirty: boolean
+  deletingProfileKey?: string
+  bindingProfileKey?: string
   onUpdateField: (connectorName: ConnectorName, key: string, value: unknown) => void
   onUpdateConnector: (connectorName: ConnectorName, patch: Record<string, unknown>) => void
   onSave: () => void
+  onDeleteProfile: (connectorName: ConnectorName, profileId: string) => Promise<void> | void
+  onManageProfileBinding: (payload: ConnectorProfileBindingAction) => Promise<void> | void
   onJumpToAnchor?: (anchorId: string) => void
 }) {
   const t = copy[locale]
@@ -1283,6 +1576,14 @@ function ConnectorCard({
   const [profileWizardStep, setProfileWizardStep] = useState<1 | 2 | 3>(1)
   const [profileWizardProfileId, setProfileWizardProfileId] = useState<string | null>(null)
   const [profileWizardDraft, setProfileWizardDraft] = useState<Record<string, unknown>>({})
+  const [deleteProfileTarget, setDeleteProfileTarget] = useState<{ profileId: string; label: string } | null>(null)
+  const [manageProfileTarget, setManageProfileTarget] = useState<{
+    profileId: string
+    label: string
+    preferredConversationId?: string | null
+    profileSnapshot?: ConnectorProfileSnapshot | null
+    targets: ConnectorTargetSnapshot[]
+  } | null>(null)
   const cardAnchorId = connectorAnchorId(entry.name)
   const useCompactGuidedLayout = entry.name !== 'qq'
   const connectorModalClassName = 'w-[min(92vw,1100px)] max-w-[calc(100vw-1.5rem)] overflow-y-auto lg:w-[50vw]'
@@ -1674,6 +1975,7 @@ function ConnectorCard({
           ? '先保存 App ID 和 App Secret，再从 QQ 给该 bot 发送一条私聊，DeepScientist 就会自动检测 OpenID。'
           : 'Save App ID and App Secret first. Then send one private QQ message to that bot and DeepScientist will detect the OpenID automatically.',
       waiting: locale === 'zh' ? '等待绑定' : 'Waiting',
+      ready: locale === 'zh' ? '已就绪' : 'Ready',
       bound: locale === 'zh' ? '已绑定' : 'Bound',
       profileId: locale === 'zh' ? 'Profile ID' : 'Profile ID',
       currentBot: locale === 'zh' ? '当前 Bot' : 'Current bot',
@@ -1682,6 +1984,15 @@ function ConnectorCard({
         locale === 'zh'
           ? '当第一条私聊到达后，DeepScientist 会自动保存 OpenID，并且 QQ bot 会在该会话里回复绑定成功提示。'
           : 'After the first private message arrives, DeepScientist saves the OpenID automatically and the QQ bot replies with a binding-success notice in that same chat.',
+      deleteBot: locale === 'zh' ? '删除 QQ Bot' : 'Delete QQ bot',
+      deleteBotConfirm:
+        locale === 'zh'
+          ? '删除后会移除该 QQ bot 的配置，并清理它当前的绑定关系。'
+          : 'Deleting removes this QQ bot profile and clears its current bindings.',
+      saveFirstToDelete:
+        locale === 'zh'
+          ? '请先保存当前未保存的修改，再删除已有 QQ bot。'
+          : 'Save the current unsaved changes before deleting an existing QQ bot.',
       botName: locale === 'zh' ? 'Bot 名称' : 'Bot name',
       close: locale === 'zh' ? '关闭' : 'Close',
       back: locale === 'zh' ? '返回' : 'Back',
@@ -1732,7 +2043,6 @@ function ConnectorCard({
         bot_name: qqWizardDraft.bot_name.trim() || 'DeepScientist',
         app_id: qqWizardDraft.app_id.trim(),
         app_secret: qqWizardDraft.app_secret.trim(),
-        app_secret_env: 'QQ_APP_SECRET',
         main_chat_id: null,
       }
       onUpdateConnector(entry.name, {
@@ -1773,48 +2083,100 @@ function ConnectorCard({
                 const profileSnapshot = profileSnapshots.get(profile.profile_id)
                 const mainChatId = String(profileSnapshot?.main_chat_id || profile.main_chat_id || '').trim()
                 const profileTargets = allQqTargets.filter((item) => targetMatchesProfile(item, profile.profile_id))
-                const selectedTarget =
-                  profileTargets.find((item) => item.chat_id === mainChatId) ||
-                  profileTargets[0] ||
-                  null
+                const selectedTarget = selectQqProfileTarget(profileTargets, mainChatId)
+                const profileTitle = qqProfileDisplayLabel(profile, profileSnapshot)
+                const profileState = qqProfileStatus(profileSnapshot, profileTargets, mainChatId)
+                const manageKey = `${entry.name}:${profile.profile_id}`
                 return (
-                <div
-                  key={profile.profile_id}
-                  className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-foreground">{profile.bot_name || 'DeepScientist'}</div>
-                      <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{profile.app_id || '—'}</div>
+                  <div
+                    key={profile.profile_id}
+                    className="group rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-foreground">{profileTitle}</div>
+                        <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{profile.app_id || '—'}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          title={locale === 'zh' ? '管理 Connector' : 'Manage connector'}
+                          onClick={() =>
+                            setManageProfileTarget({
+                              profileId: profile.profile_id,
+                              label: profileTitle,
+                              preferredConversationId:
+                                profileTargets.find((item) => item.bound_quest_id)?.conversation_id ||
+                                selectedTarget?.conversation_id ||
+                                profileSnapshot?.default_conversation_id ||
+                                null,
+                              profileSnapshot: profileSnapshot || null,
+                              targets: profileTargets,
+                            })
+                          }
+                          disabled={saving || Boolean(deletingProfileKey)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-black/[0.08] bg-white/[0.72] text-muted-foreground transition hover:border-black/[0.14] hover:bg-black/[0.04] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.12] dark:bg-white/[0.06]"
+                        >
+                          <Settings2 className="h-4 w-4" />
+                        </button>
+                        <Badge variant={profileState === 'waiting' ? 'secondary' : 'default'}>
+                          {bindingProfileKey === manageKey
+                            ? locale === 'zh'
+                              ? '更新中'
+                              : 'Updating'
+                            : profileState === 'bound'
+                              ? qqCopy.bound
+                              : profileState === 'ready'
+                                ? qqCopy.ready
+                                : qqCopy.waiting}
+                        </Badge>
+                      </div>
                     </div>
-                    <Badge variant={mainChatId ? 'default' : 'secondary'}>{mainChatId ? qqCopy.bound : qqCopy.waiting}</Badge>
+                    <div className="mt-3 grid gap-2 text-xs text-muted-foreground md:grid-cols-2">
+                      <div>
+                        <span className="text-foreground">{qqCopy.profileId}:</span> {profile.profile_id}
+                      </div>
+                      <div>
+                        <span className="text-foreground">{t.boundQuestLabel}:</span>{' '}
+                        {selectedTarget?.bound_quest_id || t.notBoundYet}
+                      </div>
+                    </div>
+                    {selectedTarget ? (
+                      <div className="mt-3 rounded-[14px] border border-black/[0.06] bg-black/[0.02] px-3 py-2 text-xs text-muted-foreground dark:border-white/[0.08] dark:bg-white/[0.03]">
+                        <div className="font-medium text-foreground">{connectorTargetLabel(selectedTarget)}</div>
+                        <div className="mt-1 break-all font-mono">{selectedTarget.conversation_id}</div>
+                      </div>
+                    ) : null}
                   </div>
-                  <div className="mt-3 grid gap-2 text-xs text-muted-foreground md:grid-cols-3">
-                    <div>
-                      <span className="text-foreground">{qqCopy.profileId}:</span> {profile.profile_id}
-                    </div>
-                    <div>
-                      <span className="text-foreground">{t.qqDetectedOpenId}:</span> {mainChatId || '—'}
-                    </div>
-                    <div>
-                      <span className="text-foreground">{t.boundQuestLabel}:</span>{' '}
-                      {selectedTarget?.bound_quest_id
-                        ? `${selectedTarget.bound_quest_id}${selectedTarget.bound_quest_title ? ` · ${selectedTarget.bound_quest_title}` : ''}`
-                        : t.notBoundYet}
-                    </div>
-                  </div>
-                  {selectedTarget ? (
-                    <div className="mt-3 rounded-[14px] border border-black/[0.06] bg-black/[0.02] px-3 py-2 text-xs text-muted-foreground dark:border-white/[0.08] dark:bg-white/[0.03]">
-                      <div className="font-medium text-foreground">{connectorTargetLabel(selectedTarget)}</div>
-                      <div className="mt-1 break-all font-mono">{selectedTarget.conversation_id}</div>
-                    </div>
-                  ) : null}
-                </div>
                 )
               })
             )}
           </div>
         </section>
+
+        <ConnectorProfileSettingsModal
+          open={Boolean(manageProfileTarget)}
+          locale={locale}
+          connectorName={entry.name}
+          profileId={manageProfileTarget?.profileId || ''}
+          profileLabel={manageProfileTarget?.label || 'QQ'}
+          preferredConversationId={manageProfileTarget?.preferredConversationId || null}
+          profileSnapshot={manageProfileTarget?.profileSnapshot || null}
+          targets={manageProfileTarget?.targets || []}
+          quests={quests}
+          busy={Boolean(manageProfileTarget && bindingProfileKey === `${entry.name}:${manageProfileTarget.profileId}`)}
+          isDirty={isDirty}
+          onClose={() => setManageProfileTarget(null)}
+          onSaveBinding={(payload) => onManageProfileBinding(payload)}
+          onRequestDelete={() => {
+            if (!manageProfileTarget) return
+            setManageProfileTarget(null)
+            setDeleteProfileTarget({
+              profileId: manageProfileTarget.profileId,
+              label: manageProfileTarget.label,
+            })
+          }}
+        />
 
         <section className="rounded-[24px] border border-black/[0.08] bg-white/[0.48] p-5 dark:border-white/[0.12] dark:bg-white/[0.03]">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -1838,8 +2200,8 @@ function ConnectorCard({
           title={qqCopy.createConnector}
           description={
             locale === 'zh'
-              ? 'Step 1 先打开 QQ 平台并填写 App ID / App Secret；Step 2 等待第一条 QQ 私聊；Step 3 确认检测到的 OpenID 并展示最终绑定结果。'
-              : 'Step 1 opens the QQ platform first and fills App ID / App Secret. Step 2 waits for the first QQ private message. Step 3 confirms the detected OpenID and shows the final binding state.'
+              ? 'Step 1 先打开 QQ 平台并填写 App ID / App Secret；Step 2 等待第一条 QQ 私聊；Step 3 确认连接状态并展示最终绑定结果。'
+              : 'Step 1 opens the QQ platform first and fills App ID / App Secret. Step 2 waits for the first QQ private message. Step 3 confirms the connection state and shows the final binding state.'
           }
           size="xl"
           className={connectorModalClassName}
@@ -1903,20 +2265,9 @@ function ConnectorCard({
                     <li>2. {t.qqPlatformChecklist2}</li>
                     <li>3. {t.qqPlatformChecklist3}</li>
                   </ol>
+                  <div className="mt-3 text-xs leading-5">{t.qqPlatformHint}</div>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-                    <label className="flex items-center justify-between gap-3">
-                      <span className="text-sm font-medium">{t.enabled}</span>
-                      <input
-                        type="checkbox"
-                        checked={enabled}
-                        onChange={(event) => onUpdateField(entry.name, 'enabled', event.target.checked)}
-                        className="h-4 w-4 rounded border-black/20 text-foreground"
-                      />
-                    </label>
-                    <div className="mt-3 text-xs leading-5 text-muted-foreground">{t.qqPlatformHint}</div>
-                  </div>
                   <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
                     <label className="flex items-center gap-2 text-sm font-medium">
                       <span>{qqCopy.botName}</span>
@@ -1984,13 +2335,6 @@ function ConnectorCard({
                   </ol>
                 </div>
                 <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
-                  <div className="text-sm font-medium text-foreground">{t.qqDetectedOpenId}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">{t.qqDetectedOpenIdHint}</div>
-                  <div className="mt-3 rounded-[14px] border border-black/[0.06] bg-black/[0.02] px-4 py-3 font-mono text-sm dark:border-white/[0.08] dark:bg-white/[0.03]">
-                    {activeProfileSnapshot?.main_chat_id || '—'}
-                  </div>
-                </div>
-                <div className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] p-4 dark:border-white/[0.08] dark:bg-white/[0.04]">
                   <div className="text-sm font-medium text-foreground">{qqCopy.currentBot}</div>
                   <div className="mt-2 text-xs text-muted-foreground">
                     {activeProfileSnapshot?.label || qqWizardDraft.bot_name || 'DeepScientist'} · {qqWizardDraft.app_id || activeProfileSnapshot?.app_id || '—'}
@@ -2008,12 +2352,9 @@ function ConnectorCard({
                       {hasDetectedTarget ? t.qqConnectedSummary : t.qqWaitingOpenId}
                     </span>
                   </div>
-                  <div className="mt-3 grid gap-3 text-sm text-muted-foreground md:grid-cols-3">
+                  <div className="mt-3 grid gap-3 text-sm text-muted-foreground md:grid-cols-2">
                     <div>
                       <span className="text-foreground">{t.transportLabel}:</span> gateway_direct
-                    </div>
-                    <div>
-                      <span className="text-foreground">{t.boundTarget}:</span> {activeProfileSnapshot?.main_chat_id || '—'}
                     </div>
                     <div>
                       <span className="text-foreground">{t.discoveredTargets}:</span> {activeProfileTargets.length}
@@ -2090,6 +2431,33 @@ function ConnectorCard({
             </ModalFooter>
           </div>
         </Modal>
+        <ConfirmModal
+          open={Boolean(deleteProfileTarget)}
+          onClose={() => {
+            if (deletingProfileKey) return
+            setDeleteProfileTarget(null)
+          }}
+          onConfirm={() => {
+            if (!deleteProfileTarget) return
+            void Promise.resolve()
+              .then(() => onDeleteProfile(entry.name, deleteProfileTarget.profileId))
+              .finally(() => {
+                setDeleteProfileTarget(null)
+              })
+          }}
+          loading={Boolean(deletingProfileKey)}
+          title={qqCopy.deleteBot}
+          description={
+            isDirty
+              ? qqCopy.saveFirstToDelete
+              : deleteProfileTarget
+                ? `${deleteProfileTarget.label}\n\n${qqCopy.deleteBotConfirm}`
+                : qqCopy.deleteBotConfirm
+          }
+          confirmText={qqCopy.deleteBot}
+          cancelText={qqCopy.close}
+          variant="destructive"
+        />
       </div>
     )
   }
@@ -2131,6 +2499,9 @@ function ConnectorCard({
             waiting: '等待第一条消息',
             ready: '已就绪',
             profileId: 'Profile ID',
+            deleteProfile: '删除 Connector',
+            deleteProfileConfirm: '删除后会移除这个 connector 实例，并清理它当前的绑定关系。',
+            saveFirstToDelete: '请先保存当前未保存的修改，再删除已有 connector。',
           }
         : {
             configuredTitle: 'Configured connectors',
@@ -2141,6 +2512,9 @@ function ConnectorCard({
             waiting: 'Waiting for first message',
             ready: 'Ready',
             profileId: 'Profile ID',
+            deleteProfile: 'Delete connector',
+            deleteProfileConfirm: 'Deleting removes this connector profile and clears its current bindings.',
+            saveFirstToDelete: 'Save the current unsaved changes before deleting an existing connector.',
           }
     const profileStepState = {
       1: (profileWizardStep > 1 || hasSavedProfile ? 'done' : 'current') as const,
@@ -2221,17 +2595,39 @@ function ConnectorCard({
                         : connectorName === 'whatsapp'
                           ? String(profile.session_dir || '').trim()
                           : String(profile.bot_name || '').trim()
+                const manageKey = `${entry.name}:${profileId}`
                 return (
                   <div
                     key={profileId}
-                    className="rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]"
+                    className="group rounded-[20px] border border-black/[0.06] bg-white/[0.62] px-4 py-4 dark:border-white/[0.08] dark:bg-white/[0.04]"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-sm font-medium text-foreground">{profileSnapshot?.label || genericProfileLabel(connectorName, profile)}</div>
                         <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{identifier || profileId}</div>
                       </div>
-                      <Badge variant={ready ? 'default' : 'secondary'}>{ready ? labels.ready : labels.waiting}</Badge>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          title={locale === 'zh' ? '管理 Connector' : 'Manage connector'}
+                          onClick={() =>
+                            setManageProfileTarget({
+                              profileId,
+                              label: (profileSnapshot?.label || genericProfileLabel(connectorName, profile) || profileId) as string,
+                              preferredConversationId: profileTargets.find((item) => item.bound_quest_id)?.conversation_id || profileSnapshot?.last_conversation_id || null,
+                              profileSnapshot: profileSnapshot || null,
+                              targets: profileTargets,
+                            })
+                          }
+                          disabled={saving || Boolean(deletingProfileKey)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-black/[0.08] bg-white/[0.72] text-muted-foreground transition hover:border-black/[0.14] hover:bg-black/[0.04] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.12] dark:bg-white/[0.06]"
+                        >
+                          <Settings2 className="h-4 w-4" />
+                        </button>
+                        <Badge variant={ready ? 'default' : 'secondary'}>
+                          {bindingProfileKey === manageKey ? (locale === 'zh' ? '更新中' : 'Updating') : ready ? labels.ready : labels.waiting}
+                        </Badge>
+                      </div>
                     </div>
                     <div className="mt-3 grid gap-2 text-xs text-muted-foreground md:grid-cols-4">
                       <div>
@@ -2263,6 +2659,30 @@ function ConnectorCard({
             </Button>
           </div>
         </section>
+
+        <ConnectorProfileSettingsModal
+          open={Boolean(manageProfileTarget)}
+          locale={locale}
+          connectorName={entry.name}
+          profileId={manageProfileTarget?.profileId || ''}
+          profileLabel={manageProfileTarget?.label || translateSettingsCatalogText(locale, entry.label)}
+          preferredConversationId={manageProfileTarget?.preferredConversationId || null}
+          profileSnapshot={manageProfileTarget?.profileSnapshot || null}
+          targets={manageProfileTarget?.targets || []}
+          quests={quests}
+          busy={Boolean(manageProfileTarget && bindingProfileKey === `${entry.name}:${manageProfileTarget.profileId}`)}
+          isDirty={isDirty}
+          onClose={() => setManageProfileTarget(null)}
+          onSaveBinding={(payload) => onManageProfileBinding(payload)}
+          onRequestDelete={() => {
+            if (!manageProfileTarget) return
+            setManageProfileTarget(null)
+            setDeleteProfileTarget({
+              profileId: manageProfileTarget.profileId,
+              label: manageProfileTarget.label,
+            })
+          }}
+        />
 
         <section className="rounded-[24px] border border-black/[0.08] bg-white/[0.48] p-5 dark:border-white/[0.12] dark:bg-white/[0.03]">
           <div className="flex items-start justify-between gap-4">
@@ -2360,17 +2780,8 @@ function ConnectorCard({
                   ))}
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 dark:border-white/[0.12] dark:bg-white/[0.04]">
-                    <label className="flex min-h-[44px] items-center justify-between gap-4">
-                      <span className="text-sm font-medium">{t.enabled}</span>
-                      <input
-                        type="checkbox"
-                        checked={enabled}
-                        onChange={(event) => onUpdateField(entry.name, 'enabled', event.target.checked)}
-                        className="h-4 w-4 rounded border-black/20 text-foreground"
-                      />
-                    </label>
-                    <div className="mt-3 text-xs leading-5 text-muted-foreground">{localizedGuideText(locale, settingsStep?.description)}</div>
+                  <div className="rounded-[22px] border border-black/[0.08] bg-white/[0.52] p-4 text-sm text-muted-foreground dark:border-white/[0.12] dark:bg-white/[0.04] md:col-span-2">
+                    {localizedGuideText(locale, settingsStep?.description)}
                   </div>
                   {profileFields.map((field) => (
                     <ConnectorFieldControl
@@ -2383,7 +2794,11 @@ function ConnectorCard({
                   ))}
                 </div>
                 {missingRequiredFields.length ? (
-                  <StepBlockerNotice locale={locale} description={t.enableConnectorFirst} fields={missingRequiredFields} />
+                  <StepBlockerNotice
+                    locale={locale}
+                    description={locale === 'zh' ? '请先补齐缺少的凭据字段。' : 'Fill the missing credential fields first.'}
+                    fields={missingRequiredFields}
+                  />
                 ) : null}
               </div>
             ) : null}
@@ -2479,6 +2894,33 @@ function ConnectorCard({
             </ModalFooter>
           </div>
         </Modal>
+        <ConfirmModal
+          open={Boolean(deleteProfileTarget)}
+          onClose={() => {
+            if (deletingProfileKey) return
+            setDeleteProfileTarget(null)
+          }}
+          onConfirm={() => {
+            if (!deleteProfileTarget) return
+            void Promise.resolve()
+              .then(() => onDeleteProfile(entry.name, deleteProfileTarget.profileId))
+              .finally(() => {
+                setDeleteProfileTarget(null)
+              })
+          }}
+          loading={Boolean(deletingProfileKey)}
+          title={labels.deleteProfile}
+          description={
+            isDirty
+              ? labels.saveFirstToDelete
+              : deleteProfileTarget
+                ? `${deleteProfileTarget.label}\n\n${labels.deleteProfileConfirm}`
+                : labels.deleteProfileConfirm
+          }
+          confirmText={labels.deleteProfile}
+          cancelText={t.wizardClose}
+          variant="destructive"
+        />
       </div>
     )
   }
@@ -3126,7 +3568,7 @@ function ConnectorCard({
                       <span className="text-foreground">{t.defaultTarget}:</span> {connectorTargetLabel(snapshot.default_target)}
                     </div>
                   ) : null}
-                  {snapshot.main_chat_id ? (
+                  {snapshot.main_chat_id && entry.name !== 'qq' ? (
                     <div className="break-all">
                       <span className="text-foreground">{t.boundTarget}:</span> {snapshot.main_chat_id}
                     </div>
@@ -3188,11 +3630,17 @@ export function ConnectorSettingsForm({
   locale,
   value,
   connectors,
+  quests,
   saving,
   isDirty,
+  deletingProfileKey,
+  bindingProfileKey,
+  visibleConnectorNames,
   selectedConnectorName,
   onChange,
   onSave,
+  onDeleteProfile,
+  onManageProfileBinding,
   onSelectConnector,
   onBackToConnectorCatalog,
   onJumpToAnchor,
@@ -3200,11 +3648,17 @@ export function ConnectorSettingsForm({
   locale: Locale
   value: ConnectorConfigMap
   connectors: ConnectorSnapshot[]
+  quests: QuestSummary[]
   saving: boolean
   isDirty: boolean
+  deletingProfileKey?: string
+  bindingProfileKey?: string
+  visibleConnectorNames: ConnectorName[]
   selectedConnectorName?: ConnectorName | null
   onChange: (next: ConnectorConfigMap) => void
   onSave: () => void
+  onDeleteProfile: (connectorName: ConnectorName, profileId: string) => Promise<void> | void
+  onManageProfileBinding: (payload: ConnectorProfileBindingAction) => Promise<void> | void
   onSelectConnector: (connectorName: ConnectorName) => void
   onBackToConnectorCatalog: () => void
   onJumpToAnchor?: (anchorId: string) => void
@@ -3212,15 +3666,19 @@ export function ConnectorSettingsForm({
   const t = copy[locale]
   const snapshots = useMemo(() => snapshotByName(connectors), [connectors])
   const routing = useMemo(() => routingConfig(value), [value])
+  const visibleEntries = useMemo(
+    () => connectorCatalog.filter((entry) => visibleConnectorNames.includes(entry.name)),
+    [visibleConnectorNames]
+  )
   const enabledEntries = useMemo(
-    () => connectorCatalog.filter((entry) => Boolean(value[entry.name]?.enabled)),
-    [value]
+    () => visibleEntries.filter((entry) => Boolean(value[entry.name]?.enabled)),
+    [value, visibleEntries]
   )
   const preferredConnector = typeof routing.primary_connector === 'string' ? routing.primary_connector : ''
   const deliveryPolicy =
     typeof routing.artifact_delivery_policy === 'string' ? routing.artifact_delivery_policy : 'fanout_all'
   const selectedEntry =
-    selectedConnectorName ? connectorCatalog.find((entry) => entry.name === selectedConnectorName) || null : null
+    selectedConnectorName ? visibleEntries.find((entry) => entry.name === selectedConnectorName) || null : null
 
   useEffect(() => {
     const nextPreferred =
@@ -3383,18 +3841,23 @@ export function ConnectorSettingsForm({
               locale={locale}
               config={value[selectedEntry.name] || {}}
               snapshot={snapshots.get(selectedEntry.name)}
+              quests={quests}
               saving={saving}
               isDirty={isDirty}
+              deletingProfileKey={deletingProfileKey}
+              bindingProfileKey={bindingProfileKey}
               onUpdateField={updateConnectorField}
               onUpdateConnector={updateConnectorFields}
               onSave={onSave}
+              onDeleteProfile={onDeleteProfile}
+              onManageProfileBinding={onManageProfileBinding}
               onJumpToAnchor={onJumpToAnchor}
             />
           ) : (
             <>
               {renderRoutingSection()}
               <div className="grid gap-5 xl:grid-cols-2">
-                {connectorCatalog.map((entry) => (
+                {visibleEntries.map((entry) => (
                   <ConnectorOverviewCard
                     key={entry.name}
                     entry={entry}

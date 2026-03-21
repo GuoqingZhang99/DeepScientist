@@ -318,6 +318,7 @@ function ToolUseDefault({
           animate={{ y: 0, opacity: 1 }}
           exit={{ y: '-120%', opacity: 0 }}
           animatePresenceInitial
+          maxWords={14}
           mainClassName="ds-copilot-status-text"
           splitLevelClassName="ds-copilot-status-text-split"
           elementLevelClassName="ds-copilot-status-text-element"

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEven
 import {
   ArrowLeft,
   FileCode2,
+  FileText,
   FlaskConical,
   GitBranch,
   GitCommitHorizontal,
@@ -13,7 +14,7 @@ import {
   X,
 } from 'lucide-react'
 
-import { GitDiffPanel } from '@/components/git/GitDiffPanel'
+import { GitDiffViewer } from '@/components/workspace/GitDiffViewer'
 import { Badge } from '@/components/ui/badge'
 import { client } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -160,6 +161,14 @@ function kindMeta(kind?: string) {
       shell: 'from-[#c7d3da] to-[#b5c0cb]',
       tone: 'bg-[rgba(143,163,184,0.16)]',
       label: 'Analysis',
+    }
+  }
+  if (kind === 'paper') {
+    return {
+      icon: FileText,
+      shell: 'from-[#d7d3c3] to-[#c5bea9]',
+      tone: 'bg-[rgba(171,158,126,0.16)]',
+      label: 'Paper',
     }
   }
   if (kind === 'implementation') {
@@ -333,6 +342,8 @@ function FileChangeButton({
     <button
       type="button"
       onClick={onClick}
+      data-change-path={file.path}
+      data-change-status={file.status}
       className={cn(
         'w-full rounded-[22px] border px-3 py-3 text-left transition',
         selected
@@ -812,7 +823,14 @@ export function GitResearchCanvas({
         <div className="overflow-hidden rounded-[28px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.82),rgba(244,239,233,0.92))] shadow-card dark:border-white/[0.10] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))]">
           <div className="border-b border-black/[0.06] px-4 py-3 dark:border-white/[0.08]">
             <div className="text-sm font-medium text-foreground">Canvas overview</div>
-            <div className="mt-1 text-xs text-muted-foreground">Scroll or drag the background, then click a node to inspect commits, files, and red/green diffs.</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Scroll or drag the background, then click a node to inspect commits, files, and red/green diffs.
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+              {payload?.active_workspace_ref ? <Badge>workspace: {payload.active_workspace_ref}</Badge> : null}
+              {payload?.research_head_ref ? <Badge>head: {payload.research_head_ref}</Badge> : null}
+              {payload?.workspace_mode ? <Badge>mode: {payload.workspace_mode}</Badge> : null}
+            </div>
           </div>
           <div
             ref={containerRef}
@@ -878,11 +896,18 @@ export function GitResearchCanvas({
                   const Icon = meta.icon
                   const metric = metricLabel(node)
                   const lineage = lineageLabel(node)
-                  const primaryBadgeLabel = node.current
-                    ? 'current'
-                    : node.breakthrough
-                      ? node.breakthrough_level || 'breakthrough'
-                      : meta.label
+                  const badges = [
+                    ...(node.active_workspace ? ['workspace'] : []),
+                    ...(node.research_head ? ['head'] : []),
+                    ...(!node.active_workspace && !node.research_head && node.current ? ['git current'] : []),
+                    ...(node.breakthrough ? [node.breakthrough_level || 'breakthrough'] : []),
+                  ]
+                  if (!badges.length) {
+                    badges.push(meta.label)
+                  }
+                  if (lineage) {
+                    badges.push(lineage)
+                  }
                   const summaryLine =
                     node.subject ||
                     node.latest_summary ||
@@ -893,10 +918,12 @@ export function GitResearchCanvas({
                       key={node.ref}
                       type="button"
                       data-node-card="true"
+                      data-node-ref={node.ref}
                       onClick={() => void openNode(node)}
                       className={cn(
                         'absolute rounded-[24px] border border-black/[0.08] bg-[linear-gradient(180deg,rgba(255,255,255,0.88),rgba(243,239,233,0.95))] p-3.5 text-left shadow-card transition duration-200 hover:-translate-y-0.5 hover:border-black/[0.14] dark:border-white/[0.12] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))]',
-                        node.current && 'ring-1 ring-[rgba(143,163,184,0.42)]',
+                        node.active_workspace && 'ring-1 ring-[rgba(143,163,184,0.5)]',
+                        node.research_head && 'shadow-[0_0_0_1px_rgba(166,127,72,0.18),0_16px_42px_-34px_rgba(166,127,72,0.3)]',
                         node.breakthrough &&
                           'shadow-[0_0_0_1px_rgba(163,135,58,0.18),0_0_0_8px_rgba(163,135,58,0.10),0_18px_42px_-34px_rgba(163,135,58,0.34)]'
                       )}
@@ -919,8 +946,9 @@ export function GitResearchCanvas({
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <div className="truncate text-sm font-semibold text-foreground">{node.ref}</div>
-                            <Badge>{primaryBadgeLabel}</Badge>
-                            {lineage ? <Badge>{lineage}</Badge> : null}
+                            {badges.map((badge) => (
+                              <Badge key={`${node.ref}:${badge}`}>{badge}</Badge>
+                            ))}
                           </div>
                           <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
                             {summaryLine}
@@ -952,6 +980,9 @@ export function GitResearchCanvas({
               </div>
               <div className="rounded-[18px] bg-black/[0.03] px-3 py-3 dark:bg-white/[0.04]">
                 Use the <span className="font-medium text-foreground">Ideas & main</span> mode to compare different approaches. Use <span className="font-medium text-foreground">Analysis branches</span> to inspect ablations and robustness runs attached to one accepted main branch.
+              </div>
+              <div className="rounded-[18px] bg-black/[0.03] px-3 py-3 dark:bg-white/[0.04]">
+                <span className="font-medium text-foreground">workspace</span> marks the branch the runtime will use next. <span className="font-medium text-foreground">head</span> marks the newest durable research head. They can be different after reactivating an older branch.
               </div>
             </div>
           </div>
@@ -1143,7 +1174,10 @@ export function GitResearchCanvas({
                         Loading diff...
                       </div>
                     ) : diff ? (
-                      <GitDiffPanel diff={diff} title={selectedPath || diff.path} />
+                      <GitDiffViewer
+                        diff={diff}
+                        className="border border-black/[0.06] bg-white/[0.92] shadow-none dark:border-white/[0.08] dark:bg-[rgba(24,26,31,0.92)]"
+                      />
                     ) : (
                       <div className="rounded-[22px] border border-dashed border-black/10 px-4 py-6 text-center text-sm text-muted-foreground dark:border-white/[0.12]">
                         No diff available for this file.
@@ -1206,7 +1240,10 @@ export function GitResearchCanvas({
                         Loading commit diff...
                       </div>
                     ) : commitDiff ? (
-                      <GitDiffPanel diff={commitDiff} title={selectedCommitPath || commitDiff.path} />
+                      <GitDiffViewer
+                        diff={commitDiff}
+                        className="border border-black/[0.06] bg-white/[0.92] shadow-none dark:border-white/[0.08] dark:bg-[rgba(24,26,31,0.92)]"
+                      />
                     ) : (
                       <div className="rounded-[22px] border border-dashed border-black/10 px-4 py-6 text-center text-sm text-muted-foreground dark:border-white/[0.12]">
                         No patch is available for this file.
@@ -1494,7 +1531,10 @@ export function GitResearchCanvas({
                             Loading diff...
                           </div>
                         ) : diff ? (
-                          <GitDiffPanel diff={diff} />
+                          <GitDiffViewer
+                            diff={diff}
+                            className="border border-black/[0.06] bg-white/[0.92] shadow-none dark:border-white/[0.08] dark:bg-[rgba(24,26,31,0.92)]"
+                          />
                         ) : (
                           <div className="flex min-h-[240px] items-center justify-center rounded-[24px] border border-dashed border-black/10 text-sm text-muted-foreground dark:border-white/[0.12]">
                             Pick a changed file to preview its red/green diff.
@@ -1559,7 +1599,10 @@ export function GitResearchCanvas({
                                 Loading commit diff...
                               </div>
                             ) : commitDiff ? (
-                              <GitDiffPanel diff={commitDiff} title={selectedCommitPath || commitDiff.path} />
+                              <GitDiffViewer
+                                diff={commitDiff}
+                                className="border border-black/[0.06] bg-white/[0.92] shadow-none dark:border-white/[0.08] dark:bg-[rgba(24,26,31,0.92)]"
+                              />
                             ) : (
                               <div className="flex min-h-[240px] items-center justify-center rounded-[24px] border border-dashed border-black/10 text-sm text-muted-foreground dark:border-white/[0.12]">
                                 Pick a file from this commit to preview the exact patch.

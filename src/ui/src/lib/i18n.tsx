@@ -275,10 +275,7 @@ type I18nValue = {
 const I18nContext = createContext<I18nValue | null>(null)
 
 function resolveInitialLocale(): Locale {
-  if (typeof navigator === 'undefined') {
-    return 'en'
-  }
-  return navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en'
+  return 'en'
 }
 
 function resolveBrowserConfigLocale(): 'zh-CN' | 'en-US' {

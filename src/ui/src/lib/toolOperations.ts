@@ -14,6 +14,11 @@ import type { FeedItem, WorkflowEntry, WorkflowPayload } from '@/types'
 
 type ToolIntent = 'search' | 'web_search' | 'read' | 'write' | 'artifact' | 'memory' | 'web' | 'shell' | 'file' | 'tool'
 
+export type FileChangeEntry = {
+  path: string
+  kind?: string
+}
+
 export function compactToolSubject(value?: string | null) {
   if (!value) {
     return null
@@ -33,10 +38,42 @@ export function parseStructuredArgs(value?: string) {
     return null
   }
   try {
-    return JSON.parse(value) as Record<string, unknown>
+    return JSON.parse(value) as unknown
   } catch {
     return null
   }
+}
+
+function asRecord(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function pushFileChangeEntries(target: FileChangeEntry[], value: unknown) {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const record = asRecord(entry)
+      if (!record || typeof record.path !== 'string' || !record.path.trim()) continue
+      target.push({
+        path: record.path.trim(),
+        kind: typeof record.kind === 'string' ? record.kind.trim() : undefined,
+      })
+    }
+    return
+  }
+  const record = asRecord(value)
+  if (!record) return
+  if (Array.isArray(record.changes)) {
+    pushFileChangeEntries(target, record.changes)
+  }
+}
+
+export function extractFileChangeEntries(...values: Array<unknown>) {
+  const entries: FileChangeEntry[] = []
+  for (const value of values) {
+    pushFileChangeEntries(entries, value)
+  }
+  return entries
 }
 
 function unwrapShellCommand(value?: string) {
@@ -85,24 +122,20 @@ export function extractToolSubject(toolName?: string, args?: string, output?: st
   const parsedOutput = parseStructuredArgs(output)
   const candidates: string[] = []
 
-  if (parsed) {
+  const parsedRecord = asRecord(parsed)
+  const parsedOutputRecord = asRecord(parsedOutput)
+
+  if (parsedRecord) {
     for (const key of ['path', 'file', 'filename', 'document_id', 'ref_id', 'q', 'query', 'url']) {
-      const value = parsed[key]
+      const value = parsedRecord[key]
       if (typeof value === 'string' && value.trim()) {
         candidates.push(value.trim())
       }
     }
   }
 
-  for (const payload of [parsed, parsedOutput]) {
-    const changes = payload?.changes
-    if (Array.isArray(changes)) {
-      for (const change of changes) {
-        if (change && typeof change === 'object' && typeof (change as Record<string, unknown>).path === 'string') {
-          candidates.push(String((change as Record<string, unknown>).path).trim())
-        }
-      }
-    }
+  for (const change of extractFileChangeEntries(parsed, parsedOutputRecord?.result, parsedOutput)) {
+    candidates.push(change.path)
   }
 
   if (name.includes('apply_patch') || name.includes('patch')) {

@@ -237,6 +237,25 @@ def test_config_save_validate_and_test_accept_structured_connectors(monkeypatch,
     assert test_payload["items"][0]["name"] == "telegram"
 
 
+def test_config_save_reloads_system_connector_visibility(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    app = DaemonApp(temp_home)
+
+    assert "telegram" not in {item["name"] for item in app.handlers.connectors()}
+
+    structured = manager.load_named("config")
+    structured["connectors"]["system_enabled"]["telegram"] = True
+
+    payload = app.handlers.config_save("config", {"structured": structured})
+
+    assert payload["ok"] is True
+    assert payload["runtime_reload"]["ok"] is True
+    assert "telegram" in payload["runtime_reload"]["system_enabled_connectors"]
+    assert "telegram" in {item["name"] for item in app.handlers.connectors()}
+
+
 def test_structured_connector_test_passes_delivery_targets(monkeypatch, temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
@@ -488,6 +507,43 @@ def test_runners_config_test_executes_live_codex_probe(monkeypatch, temp_home: P
     assert codex["details"]["resolved_binary"] == "/tmp/fake-codex"
     assert codex["details"]["live_probe_executed"] is True
     assert codex["details"]["stdout_excerpt"]
+
+
+def test_codex_probe_omits_reasoning_effort_flag_when_runner_sets_none(monkeypatch, temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("deepscientist.config.service.resolve_runner_binary", lambda binary, runner_name=None: "/tmp/fake-codex")
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        captured["command"] = list(command)
+
+        class Result:
+            returncode = 0
+            stdout = '{"type":"item.completed","item":{"text":"HELLO"}}'
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = manager._probe_codex_runner(
+        {
+            "binary": "codex",
+            "config_dir": "~/.codex",
+            "model": "gpt-5.4",
+            "approval_policy": "on-request",
+            "sandbox_mode": "workspace-write",
+            "model_reasoning_effort": "",
+        }
+    )
+
+    command = [str(part) for part in captured["command"]]
+    assert result["ok"] is True
+    assert result["details"]["reasoning_effort"] is None
+    assert not any("model_reasoning_effort=" in part for part in command)
 
 
 def test_codex_bootstrap_probe_persists_success_state(monkeypatch, temp_home: Path) -> None:

@@ -1,16 +1,20 @@
 import {
+  detectWorkspaceContentKindByExtension,
   getWorkspaceBadgeClassName,
   getWorkspaceBadgeLabel,
   getWorkspaceBadgeTokens,
   getWorkspaceContentKind,
   getWorkspaceContentKindBadge,
   getWorkspaceContentTone,
+  inferWorkspaceContentKindFromMetadata,
 } from '../content-meta'
 
 const t = (key: string) => {
   const messages: Record<string, string> = {
     tab_badge_rendered: 'Rendered',
     tab_badge_source: 'Source',
+    tab_badge_snapshot: 'Snapshot',
+    tab_badge_diff: 'Diff',
     tab_badge_quote: 'Quote',
     tab_badge_read_only: 'Read only',
     tab_badge_compiling: 'Compiling',
@@ -57,6 +61,13 @@ describe('workspace content meta helpers', () => {
         context: { resourcePath: '/latex/main.tex' },
       } as any)
     ).toBe('latex')
+
+    expect(
+      getWorkspaceContentKind({
+        pluginId: '@ds/plugin-code-editor',
+        context: { resourceName: 'analysis.ipynb' },
+      } as any)
+    ).toBe('notebook')
   })
 
   it('builds badge tokens from current workspace state', () => {
@@ -77,6 +88,8 @@ describe('workspace content meta helpers', () => {
 
   it('maps badge labels and styles consistently', () => {
     expect(getWorkspaceBadgeLabel('rendered', t)).toBe('Rendered')
+    expect(getWorkspaceBadgeLabel('snapshot', t)).toBe('Snapshot')
+    expect(getWorkspaceBadgeLabel('diff', t)).toBe('Diff')
     expect(getWorkspaceBadgeLabel('quote', t)).toBe('Quote')
     expect(getWorkspaceBadgeLabel('tex', t)).toBe('TeX')
     expect(getWorkspaceBadgeClassName('pdf')).toContain('#8FA3B8')
@@ -94,5 +107,23 @@ describe('workspace content meta helpers', () => {
       label: 'HTML',
       tone: 'html',
     })
+  })
+
+  it('infers content kind from metadata for snapshot-like documents', () => {
+    expect(
+      inferWorkspaceContentKindFromMetadata({
+        mimeType: 'application/x-ipynb+json',
+        resourcePath: 'analysis.ipynb',
+      })
+    ).toBe('notebook')
+
+    expect(
+      inferWorkspaceContentKindFromMetadata({
+        mimeType: 'text/markdown',
+        resourcePath: 'notes.md',
+      })
+    ).toBe('markdown')
+
+    expect(detectWorkspaceContentKindByExtension('dsnb')).toBe('notebook')
   })
 })

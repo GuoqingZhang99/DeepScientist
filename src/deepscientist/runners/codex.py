@@ -499,6 +499,7 @@ class CodexRunner:
         workspace_root = request.worktree_root or request.quest_root
         run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
         history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+        runner_config = self._load_runner_config()
         prompt = self.prompt_builder.build(
             quest_id=request.quest_id,
             skill_id=request.skill_id,
@@ -514,8 +515,9 @@ class CodexRunner:
             quest_root=request.quest_root,
             quest_id=request.quest_id,
             run_id=request.run_id,
+            runner_config=runner_config,
         )
-        command = self._build_command(request, prompt)
+        command = self._build_command(request, prompt, runner_config=runner_config)
         write_json(
             run_root / "command.json",
             {
@@ -752,9 +754,10 @@ class CodexRunner:
             process.wait(timeout=3)
         return interrupted
 
-    def _build_command(self, request: RunRequest, prompt: str) -> list[str]:
+    def _build_command(self, request: RunRequest, prompt: str, *, runner_config: dict[str, Any] | None = None) -> list[str]:
         workspace_root = request.worktree_root or request.quest_root
         resolved_binary = resolve_runner_binary(self.binary, runner_name="codex")
+        resolved_runner_config = runner_config if isinstance(runner_config, dict) else self._load_runner_config()
         command = [
             resolved_binary or self.binary,
             "--search",
@@ -768,9 +771,14 @@ class CodexRunner:
         ]
         if request.approval_policy:
             command.extend(["-c", f'approval_policy="{request.approval_policy}"'])
-        reasoning_effort = request.reasoning_effort if request.reasoning_effort is not None else "xhigh"
+        reasoning_effort = request.reasoning_effort
         if reasoning_effort:
             command.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+        tool_timeout_sec = self._positive_timeout_seconds(resolved_runner_config.get("mcp_tool_timeout_sec"))
+        if tool_timeout_sec is not None:
+            timeout_value = int(tool_timeout_sec) if float(tool_timeout_sec).is_integer() else float(tool_timeout_sec)
+            for server_name in ("memory", "artifact", "bash_exec"):
+                command.extend(["-c", f"mcp_servers.{server_name}.tool_timeout_sec={timeout_value}"])
         if request.sandbox_mode:
             command.extend(["--sandbox", request.sandbox_mode])
         command.append("-")
@@ -783,6 +791,7 @@ class CodexRunner:
         quest_root: Path,
         quest_id: str,
         run_id: str,
+        runner_config: dict[str, Any] | None = None,
     ) -> Path:
         target = ensure_dir(workspace_root / ".codex")
         source = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
@@ -812,6 +821,7 @@ class CodexRunner:
             workspace_root=workspace_root,
             quest_id=quest_id,
             run_id=run_id,
+            runner_config=runner_config,
         )
         return target
 
@@ -823,6 +833,7 @@ class CodexRunner:
         workspace_root: Path,
         quest_id: str,
         run_id: str,
+        runner_config: dict[str, Any] | None = None,
     ) -> None:
         config_path = codex_home / "config.toml"
         existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -834,17 +845,8 @@ class CodexRunner:
             prefix = existing.rstrip()
 
         pythonpath = os.environ.get("PYTHONPATH", "")
-        tool_timeout_sec = None
-        try:
-            runners_cfg = ConfigManager(self.home).load_named("runners")
-            raw_codex_cfg = runners_cfg.get("codex") if isinstance(runners_cfg.get("codex"), dict) else {}
-            raw_timeout = raw_codex_cfg.get("mcp_tool_timeout_sec") if isinstance(raw_codex_cfg, dict) else None
-            if raw_timeout is not None:
-                tool_timeout_sec = float(raw_timeout)
-        except (OSError, ValueError, TypeError, KeyError):
-            tool_timeout_sec = None
-        if tool_timeout_sec is not None and tool_timeout_sec <= 0:
-            tool_timeout_sec = None
+        resolved_runner_config = runner_config if isinstance(runner_config, dict) else self._load_runner_config()
+        tool_timeout_sec = self._positive_timeout_seconds(resolved_runner_config.get("mcp_tool_timeout_sec"))
 
         shared_env = {
             "DEEPSCIENTIST_HOME": str(self.home),
@@ -896,3 +898,19 @@ class CodexRunner:
         for key, value in env.items():
             lines.append(f"{key} = {json.dumps(value)}")
         return "\n".join(lines)
+
+    def _load_runner_config(self) -> dict[str, Any]:
+        try:
+            runners_cfg = ConfigManager(self.home).load_runners_config()
+        except OSError:
+            return {}
+        codex_cfg = runners_cfg.get("codex")
+        return codex_cfg if isinstance(codex_cfg, dict) else {}
+
+    @staticmethod
+    def _positive_timeout_seconds(value: object) -> float | None:
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout > 0 else None
