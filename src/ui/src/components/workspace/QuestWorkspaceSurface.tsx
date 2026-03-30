@@ -4,6 +4,8 @@ import * as React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
+  AlertTriangle,
+  BarChart3,
   Clock3,
   FileCode2,
   FlaskConical,
@@ -76,6 +78,7 @@ type LinkItem = {
   subtitle?: string | null
   badge?: string | null
   documentId?: string | null
+  stageSelection?: QuestStageSelection | null
 }
 
 export type QuestWorkspaceState = ReturnType<typeof useQuestWorkspace>
@@ -346,6 +349,23 @@ function formatMetricValue(
     return value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')
   }
   return String(value)
+}
+
+function formatSelectionScoreSummary(value?: Record<string, unknown> | null) {
+  if (!value || typeof value !== 'object') return null
+  const entries = Object.entries(value)
+    .map(([key, raw]) => {
+      const label = String(key || '').trim()
+      if (!label) return null
+      if (typeof raw === 'number' && Number.isFinite(raw)) {
+        return `${label}=${raw.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}`
+      }
+      const rendered = String(raw ?? '').trim()
+      return rendered ? `${label}=${rendered}` : null
+    })
+    .filter(Boolean)
+    .slice(0, 3) as string[]
+  return entries.length ? entries.join(' · ') : null
 }
 
 type MetricTimelineChartDatum = {
@@ -931,10 +951,19 @@ function QuestCanvasSurface({
   const queryClient = useQueryClient()
   const clearGraphSelection = useLabGraphSelectionStore((state) => state.clear)
   const selection = useLabGraphSelectionStore((state) => state.selection)
+  const [canvasReady, setCanvasReady] = React.useState(false)
 
   React.useEffect(() => {
     clearGraphSelection()
   }, [clearGraphSelection, questId])
+
+  React.useEffect(() => {
+    setCanvasReady(false)
+    const timer = window.setTimeout(() => {
+      setCanvasReady(true)
+    }, 1800)
+    return () => window.clearTimeout(timer)
+  }, [questId])
 
   const handleRefresh = React.useCallback(async () => {
     clearGraphSelection()
@@ -995,17 +1024,39 @@ function QuestCanvasSurface({
       </div>
 
       <div className="h-full min-h-0 overflow-hidden">
-        {/* Keep the lab canvas refresh contract explicit for shared surface tests: onRefresh={handleRefresh}. */}
-        <LabQuestGraphCanvas
-          projectId={questId}
-          questId={questId}
-          readOnly
-          preferredViewMode="branch"
-          activeBranch={snapshot?.branch || null}
-          highlightBranch={selection?.branch_name || null}
-          showFloatingPanels={false}
-          onStageOpen={onOpenStageSelection}
-        />
+        {canvasReady ? (
+          /* Keep the lab canvas refresh contract explicit for shared surface tests: onRefresh={handleRefresh}. */
+          <LabQuestGraphCanvas
+            projectId={questId}
+            questId={questId}
+            readOnly
+            preferredViewMode="branch"
+            activeBranch={snapshot?.branch || null}
+            highlightBranch={selection?.branch_name || null}
+            showFloatingPanels={false}
+            onStageOpen={onOpenStageSelection}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center p-6">
+            <div className="max-w-xl rounded-[28px] border border-black/[0.08] bg-white/[0.88] px-6 py-6 text-center shadow-[0_24px_64px_rgba(15,23,42,0.08)] backdrop-blur dark:border-white/[0.10] dark:bg-[rgba(18,18,18,0.78)]">
+              <div className="text-base font-semibold text-foreground">Preparing branch canvas…</div>
+              <div className="mt-3 text-sm leading-7 text-muted-foreground">
+                Large quests open faster when the workspace shell loads first and the branch canvas is rebuilt after that.
+              </div>
+              <div className="mt-5 flex justify-center">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                  onClick={() => setCanvasReady(true)}
+                >
+                  Load Canvas Now
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -2860,6 +2911,352 @@ function QuestDetails({
       })),
     [snapshot]
   )
+  const optimizationFrontier = workflow?.optimization_frontier ?? null
+
+  const optimizationTopBranchItems = React.useMemo<LinkItem[]>(
+    () =>
+      (optimizationFrontier?.top_branches || []).map((branch, index) => ({
+        key: `opt-branch:${branch.branch_name || index}`,
+        title: branch.idea_title || branch.branch_name || 'Optimization line',
+        subtitle: [
+          branch.branch_no ? `branch #${branch.branch_no}` : null,
+          branch.branch_name || null,
+          branch.mechanism_family ? `family ${branch.mechanism_family}` : null,
+          branch.change_layer ? `layer ${branch.change_layer}` : null,
+          branch.source_lens ? `lens ${branch.source_lens}` : null,
+          branch.method_brief ? clampText(branch.method_brief, 120) : null,
+          formatSelectionScoreSummary(branch.selection_scores || null),
+          branch.latest_main_experiment?.run_id ? `run ${branch.latest_main_experiment.run_id}` : null,
+          branch.latest_main_experiment?.recommended_next_route
+            ? `next ${branch.latest_main_experiment.recommended_next_route}`
+            : null,
+          branch.latest_main_experiment?.delta_vs_baseline != null
+            ? `Δ ${formatMetricValue(branch.latest_main_experiment.delta_vs_baseline as number | null | undefined)}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: branch.has_main_result ? 'line' : 'pre-result',
+      })),
+    [optimizationFrontier?.top_branches]
+  )
+
+  const optimizationCandidateBriefItems = React.useMemo<LinkItem[]>(
+    () =>
+      (optimizationFrontier?.candidate_briefs || []).map((candidate, index) => ({
+        key: `opt-brief:${candidate.idea_id || index}`,
+        title: candidate.title || candidate.idea_id || 'Candidate brief',
+        subtitle: [
+          candidate.mechanism_family ? `family ${candidate.mechanism_family}` : null,
+          candidate.change_layer ? `layer ${candidate.change_layer}` : null,
+          candidate.source_lens ? `lens ${candidate.source_lens}` : null,
+          candidate.method_brief ? clampText(candidate.method_brief, 120) : candidate.problem || null,
+          formatSelectionScoreSummary(candidate.selection_scores || null),
+          candidate.next_target ? `next ${candidate.next_target}` : null,
+          candidate.updated_at ? `updated ${formatRelativeTime(candidate.updated_at)}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: 'brief',
+        documentId: resolveQuestDocumentIdFromPath(
+          candidate.idea_draft_path || candidate.idea_md_path || candidate.candidate_root || null,
+          snapshot
+        ),
+        stageSelection: {
+          selection_ref: candidate.idea_id || null,
+          selection_type: 'idea_candidate',
+          branch_name: candidate.parent_branch || snapshot?.branch || null,
+          stage_key: 'idea',
+          label: candidate.title || candidate.idea_id || 'Candidate brief',
+          summary: candidate.method_brief || candidate.problem || null,
+        },
+      })),
+    [optimizationFrontier?.candidate_briefs, snapshot]
+  )
+
+  const optimizationImplementationCandidateItems = React.useMemo<LinkItem[]>(
+    () =>
+      (optimizationFrontier?.implementation_candidates || []).map((candidate, index) => ({
+        key: `opt-candidate:${candidate.candidate_id || index}`,
+        title: candidate.summary || candidate.candidate_id || 'Implementation candidate',
+        subtitle: [
+          candidate.branch || null,
+          candidate.strategy || null,
+          candidate.status || null,
+          candidate.linked_run_id ? `run ${candidate.linked_run_id}` : null,
+          candidate.updated_at ? `updated ${formatRelativeTime(candidate.updated_at)}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: candidate.status || 'candidate',
+        documentId: resolveQuestDocumentIdFromPath(candidate.artifact_path || null, snapshot),
+      })),
+    [optimizationFrontier?.implementation_candidates, snapshot]
+  )
+
+  const optimizationFusionItems = React.useMemo<LinkItem[]>(
+    () =>
+      (optimizationFrontier?.fusion_candidates || []).map((candidate, index) => ({
+        key: `opt-fusion:${candidate.branch_name || index}`,
+        title: candidate.idea_title || candidate.branch_name || 'Fusion candidate',
+        subtitle: [
+          candidate.branch_name || null,
+          candidate.latest_main_run_id ? `run ${candidate.latest_main_run_id}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: 'fusion',
+      })),
+    [optimizationFrontier?.fusion_candidates]
+  )
+
+  const optimizationStagnantItems = React.useMemo<LinkItem[]>(
+    () =>
+      (optimizationFrontier?.stagnant_branches || []).map((branch, index) => ({
+        key: `opt-stagnant:${branch.branch_name || index}`,
+        title: branch.idea_title || branch.branch_name || 'Stagnant line',
+        subtitle: [branch.branch_no ? `branch #${branch.branch_no}` : null, branch.branch_name || null]
+          .filter(Boolean)
+          .join(' · '),
+        badge: 'stagnant',
+      })),
+    [optimizationFrontier?.stagnant_branches]
+  )
+
+  const paperContract = snapshot?.paper_contract ?? null
+  const paperContractHealth = snapshot?.paper_contract_health ?? null
+  const paperEvidence = snapshot?.paper_evidence ?? null
+  const analysisInventory = snapshot?.analysis_inventory ?? null
+  const ideaLines = snapshot?.idea_lines ?? []
+  const activeIdeaLineRef = snapshot?.active_idea_line_ref ?? null
+  const paperLines = snapshot?.paper_lines ?? []
+  const activePaperLineRef = snapshot?.active_paper_line_ref ?? null
+
+  const paperContractFiles = React.useMemo<LinkItem[]>(() => {
+    if (!paperContract?.paths) return []
+    const labels: Record<string, string> = {
+      selected_outline: 'Selected Outline',
+      outline_manifest: 'Outline Manifest',
+      experiment_matrix: 'Experiment Matrix',
+      experiment_matrix_json: 'Experiment Matrix JSON',
+      bundle_manifest: 'Bundle Manifest',
+      claim_evidence_map: 'Claim-Evidence Map',
+      paper_line_state: 'Paper Line State',
+      evidence_ledger_json: 'Evidence Ledger JSON',
+      evidence_ledger_md: 'Evidence Ledger MD',
+      submission_checklist: 'Submission Checklist',
+      draft: 'Draft',
+      status: 'Paper Status',
+      summary: 'Paper Summary',
+    }
+    return Object.entries(paperContract.paths)
+      .filter(([, path]) => typeof path === 'string' && path.trim().length > 0)
+      .map(([key, path]) => ({
+        key: `paper-file:${key}:${path}`,
+        title: labels[key] || key,
+        subtitle: path,
+        badge: 'paper',
+        documentId: resolveQuestDocumentIdFromPath(path, snapshot),
+      }))
+  }, [paperContract?.paths, snapshot])
+
+  const paperSectionItems = React.useMemo<LinkItem[]>(
+    () =>
+      (paperContract?.sections || []).map((section) => ({
+        key: `paper-section:${section.section_id}`,
+        title: section.title,
+        subtitle: [
+          `section_id=${section.section_id}`,
+          section.paper_role || null,
+          typeof section.required_items?.length === 'number'
+            ? `${section.required_items.length} required`
+            : null,
+          typeof section.optional_items?.length === 'number'
+            ? `${section.optional_items.length} optional`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: section.status || 'recorded',
+      })),
+    [paperContract?.sections]
+  )
+
+  const ideaLineItems = React.useMemo<LinkItem[]>(
+    () =>
+      ideaLines.map((line) => ({
+        key: `idea-line:${line.idea_line_id}`,
+        title: line.idea_title || line.idea_id || line.idea_line_id,
+        subtitle: [
+          line.idea_branch ? `idea ${line.idea_branch}` : null,
+          line.latest_main_run_id ? `run ${line.latest_main_run_id}` : null,
+          line.paper_line_id ? `paper ${line.paper_line_id}` : null,
+          typeof line.required_count === 'number'
+            ? `${line.ready_required_count ?? 0}/${line.required_count} required`
+            : null,
+          typeof line.open_supplementary_count === 'number'
+            ? `${line.open_supplementary_count} open supp`
+            : null,
+          typeof line.unmapped_count === 'number' && line.unmapped_count > 0
+            ? `${line.unmapped_count} unmapped`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: activeIdeaLineRef === line.idea_line_id ? 'active' : 'idea-line',
+        documentId: resolveQuestDocumentIdFromPath(
+          line.paths?.paper_line_state || line.paths?.idea_draft || line.paths?.idea_md || null,
+          snapshot
+        ),
+      })),
+    [ideaLines, activeIdeaLineRef, snapshot]
+  )
+
+  const paperLineItems = React.useMemo<LinkItem[]>(
+    () =>
+      paperLines.map((line) => ({
+        key: `paper-line:${line.paper_line_id}`,
+        title: line.title || line.paper_branch || line.paper_line_id,
+        subtitle: [
+          line.source_idea_id ? `idea ${line.source_idea_id}` : null,
+          line.source_run_id ? `run ${line.source_run_id}` : null,
+          line.selected_outline_ref ? `outline ${line.selected_outline_ref}` : null,
+          typeof line.required_count === 'number'
+            ? `${line.ready_required_count ?? 0}/${line.required_count} required`
+            : null,
+          typeof line.open_supplementary_count === 'number'
+            ? `${line.open_supplementary_count} open supp`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: activePaperLineRef === line.paper_line_id ? 'active' : 'paper-line',
+        documentId: resolveQuestDocumentIdFromPath(line.paths?.paper_line_state || null, snapshot),
+      })),
+    [paperLines, activePaperLineRef, snapshot]
+  )
+
+  const paperHealthBlockingItems = React.useMemo<LinkItem[]>(
+    () => [
+      ...((paperContractHealth?.unresolved_required_items || []).map((item, index) => ({
+        key: `paper-health:required:${item.section_id || item.item_id || index}`,
+        title: item.item_id || 'Required item',
+        subtitle: [
+          item.section_title || item.section_id || null,
+          item.status ? `status ${item.status}` : 'not ready',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: 'required',
+      })) as LinkItem[]),
+      ...((paperContractHealth?.unmapped_completed_items || []).map((item, index) => ({
+        key: `paper-health:unmapped:${item.campaign_id || item.slice_id || index}`,
+        title: item.title || item.slice_id || item.item_id || 'Completed slice',
+        subtitle: [
+          item.campaign_id || null,
+          item.section_id ? `section ${item.section_id}` : null,
+          'completed but unmapped',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: 'unmapped',
+      })) as LinkItem[]),
+      ...((paperContractHealth?.blocking_pending_slices || []).map((item, index) => ({
+        key: `paper-health:pending:${item.campaign_id || item.slice_id || index}`,
+        title: item.title || item.slice_id || item.item_id || 'Pending slice',
+        subtitle: [
+          item.campaign_id || null,
+          item.section_id ? `section ${item.section_id}` : null,
+          'pending main-text evidence',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: 'pending',
+      })) as LinkItem[]),
+    ],
+    [paperContractHealth]
+  )
+
+  const paperEvidenceItems = React.useMemo<LinkItem[]>(
+    () =>
+      (paperEvidence?.items || []).map((item, index) => ({
+        key: `paper-evidence:${item.item_id || index}`,
+        title: item.title || item.item_id || 'Evidence item',
+        subtitle: [
+          item.section_id || null,
+          item.paper_role || null,
+          item.result_summary || null,
+          item.key_metrics?.length
+            ? item.key_metrics
+                .slice(0, 2)
+                .map((metric) => `${metric.metric_id || 'metric'}=${metric.value ?? '—'}`)
+                .join(' · ')
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: item.status || item.kind || 'evidence',
+        documentId: resolveQuestDocumentIdFromPath(item.source_paths?.[0] || null, snapshot),
+      })),
+    [paperEvidence?.items, snapshot]
+  )
+
+  const analysisCampaignItems = React.useMemo<LinkItem[]>(
+    () =>
+      (analysisInventory?.campaigns || []).map((campaign) => ({
+        key: `analysis-campaign:${campaign.campaign_id}`,
+        title: campaign.title || campaign.campaign_id,
+        subtitle: [
+          campaign.summary_excerpt || null,
+          campaign.selected_outline_ref ? `outline ${campaign.selected_outline_ref}` : null,
+          typeof campaign.slice_count === 'number'
+            ? `${campaign.completed_slice_count ?? 0}/${campaign.slice_count} slices`
+            : null,
+          typeof campaign.mapped_slice_count === 'number'
+            ? `${campaign.mapped_slice_count} mapped`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        badge: 'analysis',
+        documentId: resolveQuestDocumentIdFromPath(
+          campaign.summary_path || campaign.campaign_path || campaign.todo_manifest_path || null,
+          snapshot
+        ),
+      })),
+    [analysisInventory?.campaigns, snapshot]
+  )
+
+  const analysisSliceItems = React.useMemo<LinkItem[]>(
+    () =>
+      (analysisInventory?.campaigns || [])
+        .flatMap((campaign) =>
+          (campaign.slices || []).map((slice) => ({
+            key: `analysis-slice:${campaign.campaign_id}:${slice.slice_id}`,
+            title: slice.title || slice.slice_id,
+            subtitle: [
+              campaign.title || campaign.campaign_id,
+              slice.paper_role || null,
+              slice.section_id ? `section ${slice.section_id}` : null,
+              slice.item_id ? `item ${slice.item_id}` : null,
+              slice.experimental_design || slice.research_question || slice.result_excerpt || null,
+            ]
+              .filter(Boolean)
+              .join(' · '),
+            badge: slice.status || 'completed',
+            documentId: resolveQuestDocumentIdFromPath(slice.result_path || null, snapshot),
+          }))
+        )
+        .slice(0, 24),
+    [analysisInventory?.campaigns, snapshot]
+  )
+
+  const paperWorkspaceDrift =
+    paperContract?.workspace_root &&
+    snapshot?.active_workspace_root &&
+    paperContract.workspace_root !== snapshot.active_workspace_root
+      ? `Active workspace is ${snapshot.active_workspace_root}, but the current paper contract points to ${paperContract.workspace_root}.`
+      : null
 
   const guidance = (snapshot?.guidance ?? null) as GuidanceVm | null
   const latestMetric = snapshot?.summary?.latest_metric ?? null
@@ -3153,6 +3550,462 @@ function QuestDetails({
         </DetailSection>
 
         <DetailSection
+          title="Idea Lines"
+          hint="This is the minimal audit view for each idea line: whether it has reached a main run, whether it owns a paper line, and whether supplementary work is still open."
+        >
+          <DocumentListBlock
+            title="Idea Audit"
+            countLabel={ideaLineItems.length ? `${ideaLineItems.length} lines` : null}
+            items={ideaLineItems}
+            emptyLabel="No durable idea lines are exposed yet."
+            onOpen={onOpenDocument}
+          />
+        </DetailSection>
+
+        <DetailSection
+          title="Optimization Frontier"
+          hint={
+            optimizationFrontier?.frontier_reason ||
+            'This is the optimization-mode frontier: candidate briefs, active implementation candidates, line quality, stagnation, and fusion opportunities.'
+          }
+        >
+          {!optimizationFrontier ? (
+            <div className="py-3 text-sm leading-7 text-muted-foreground">
+              No optimization frontier is exposed in the current workflow payload yet.
+            </div>
+          ) : (
+            <div className="grid gap-8 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+              <div className="min-w-0 space-y-6">
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  <OverviewMetric
+                    icon={<Sparkles className="h-4 w-4" />}
+                    label="Mode"
+                    value={optimizationFrontier.mode || 'unknown'}
+                    hint={optimizationFrontier.frontier_reason || 'No frontier reason recorded.'}
+                  />
+                  <OverviewMetric
+                    icon={<GitBranch className="h-4 w-4" />}
+                    label="Best line"
+                    value={optimizationFrontier.best_branch?.branch_no || optimizationFrontier.best_branch?.branch_name || 'none'}
+                    hint={optimizationFrontier.best_branch?.idea_title || optimizationFrontier.best_branch?.branch_name || 'No leading line yet'}
+                  />
+                  <OverviewMetric
+                    icon={<FlaskConical className="h-4 w-4" />}
+                    label="Candidate pool"
+                    value={String(optimizationFrontier.candidate_backlog?.implementation_candidate_count ?? 0)}
+                    hint={`${optimizationFrontier.candidate_backlog?.active_implementation_candidate_count ?? 0} active · ${optimizationFrontier.candidate_backlog?.candidate_brief_count ?? 0} briefs`}
+                  />
+                  <OverviewMetric
+                    icon={<AlertTriangle className="h-4 w-4" />}
+                    label="Stagnant"
+                    value={String((optimizationFrontier.stagnant_branches || []).length)}
+                    hint={`${(optimizationFrontier.fusion_candidates || []).length} fusion opportunities`}
+                  />
+                </div>
+
+                <div className="space-y-8">
+                  <DocumentListBlock
+                    title="Top Lines"
+                    countLabel={optimizationTopBranchItems.length ? `${optimizationTopBranchItems.length} lines` : null}
+                    items={optimizationTopBranchItems}
+                    emptyLabel="No optimization lines are ranked yet."
+                    onOpen={onOpenDocument}
+                  />
+
+                  <DocumentListBlock
+                    title="Candidate Briefs"
+                    countLabel={optimizationCandidateBriefItems.length ? `${optimizationCandidateBriefItems.length} briefs` : null}
+                    items={optimizationCandidateBriefItems}
+                    emptyLabel="No branchless candidate briefs are recorded yet."
+                    onOpen={onOpenDocument}
+                  />
+                </div>
+              </div>
+
+              <div className="min-w-0 space-y-8">
+                <DocumentListBlock
+                  title="Implementation Candidates"
+                  countLabel={
+                    optimizationImplementationCandidateItems.length
+                      ? `${optimizationImplementationCandidateItems.length} candidates`
+                      : null
+                  }
+                  items={optimizationImplementationCandidateItems}
+                  emptyLabel="No implementation-level optimization candidates are recorded yet."
+                  onOpen={onOpenDocument}
+                />
+
+                <DocumentListBlock
+                  title="Stagnant Lines"
+                  countLabel={optimizationStagnantItems.length ? `${optimizationStagnantItems.length} lines` : null}
+                  items={optimizationStagnantItems}
+                  emptyLabel="No stagnant lines detected yet."
+                  onOpen={onOpenDocument}
+                />
+
+                <DocumentListBlock
+                  title="Fusion Opportunities"
+                  countLabel={optimizationFusionItems.length ? `${optimizationFusionItems.length} lines` : null}
+                  items={optimizationFusionItems}
+                  emptyLabel="No fusion opportunities are currently exposed."
+                  onOpen={onOpenDocument}
+                />
+
+                <div className="min-w-0">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    Recommended Next Actions
+                  </div>
+                  {(optimizationFrontier.recommended_next_actions || []).length ? (
+                    <div className="space-y-2">
+                      {(optimizationFrontier.recommended_next_actions || []).map((item, index) => (
+                        <div key={`opt-next:${index}`} className="break-words text-sm leading-7 text-foreground">
+                          {item}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="py-3 text-sm leading-7 text-muted-foreground">
+                      No frontier-driven next actions are exposed yet.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </DetailSection>
+
+        <DetailSection
+          title="Paper Contract Health"
+          hint="This is the minimal blocking surface for the active paper line. If this section is not green, the system should repair the paper contract or complete required supplementary work before treating the paper as settled."
+        >
+          {!paperContractHealth ? (
+            <div className="py-3 text-sm leading-7 text-muted-foreground">
+              No paper-contract health summary is exposed yet.
+            </div>
+          ) : (
+            <div className="grid gap-8 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+              <div className="min-w-0 space-y-6">
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  <OverviewMetric
+                    icon={<Sparkles className="h-4 w-4" />}
+                    label="Contract"
+                    value={paperContractHealth.contract_ok ? 'OK' : 'Blocked'}
+                    hint="Outline-required and mapping health"
+                  />
+                  <OverviewMetric
+                    icon={<FileCode2 className="h-4 w-4" />}
+                    label="Required"
+                    value={`${paperContractHealth.ready_required_count ?? 0}/${paperContractHealth.required_count ?? 0}`}
+                    hint="Required outline items ready"
+                  />
+                  <OverviewMetric
+                    icon={<AlertTriangle className="h-4 w-4" />}
+                    label="Unmapped"
+                    value={String(paperContractHealth.unmapped_completed_count ?? 0)}
+                    hint="Completed slices not yet mapped"
+                  />
+                  <OverviewMetric
+                    icon={<FlaskConical className="h-4 w-4" />}
+                    label="Blocking Supp"
+                    value={String(paperContractHealth.blocking_open_supplementary_count ?? 0)}
+                    hint="Pending main-text supplementary slices"
+                  />
+                </div>
+
+                <div className="divide-y divide-dashed divide-black/[0.10] dark:divide-white/[0.10]">
+                  <div className="grid gap-2 py-3 sm:grid-cols-[170px_minmax(0,1fr)]">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      Writing status
+                    </div>
+                    <div className="break-words text-sm leading-7 text-foreground">
+                      {paperContractHealth.writing_ready ? 'ready' : 'not ready'}
+                    </div>
+                  </div>
+                  <div className="grid gap-2 py-3 sm:grid-cols-[170px_minmax(0,1fr)]">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      Recommended
+                    </div>
+                    <div className="break-words text-sm leading-7 text-foreground">
+                      {(paperContractHealth.recommended_next_stage || 'none') +
+                        ' · ' +
+                        (paperContractHealth.recommended_action || 'none')}
+                    </div>
+                  </div>
+                  <div className="grid gap-2 py-3 sm:grid-cols-[170px_minmax(0,1fr)]">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      Blocking reasons
+                    </div>
+                    <div className="break-words text-sm leading-7 text-foreground">
+                      {(paperContractHealth.blocking_reasons || []).length
+                        ? (paperContractHealth.blocking_reasons || []).join(' · ')
+                        : 'None'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="min-w-0">
+                <DocumentListBlock
+                  title="Blocking Items"
+                  countLabel={paperHealthBlockingItems.length ? `${paperHealthBlockingItems.length} items` : null}
+                  items={paperHealthBlockingItems}
+                  emptyLabel="No blocking paper-contract items are exposed."
+                  onOpen={onOpenDocument}
+                />
+              </div>
+            </div>
+          )}
+        </DetailSection>
+
+        <DetailSection
+          title="Paper Contract"
+          hint="This is the current paper-facing contract the quest is actually using: selected outline, experiment matrix, and bundle control files."
+        >
+          {!paperContract ? (
+            <div className="py-3 text-sm leading-7 text-muted-foreground">
+              No selected paper contract is exposed in the current quest snapshot yet.
+            </div>
+          ) : (
+            <div className="grid gap-8 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+              <div className="min-w-0 space-y-5">
+                <div className="space-y-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    Outline
+                  </div>
+                  <div className="break-words text-base font-semibold leading-7 text-foreground">
+                    {paperContract.title || 'Untitled paper contract'}
+                  </div>
+                  <div className="break-words text-sm leading-7 text-muted-foreground">
+                    {paperContract.summary || paperContract.story || 'No paper summary recorded.'}
+                  </div>
+                </div>
+
+                <div className="divide-y divide-dashed divide-black/[0.10] dark:divide-white/[0.10]">
+                  <div className="grid gap-2 py-3 sm:grid-cols-[150px_minmax(0,1fr)]">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      Outline ref
+                    </div>
+                    <div className="break-words text-sm leading-7 text-foreground">
+                      {paperContract.selected_outline_ref || 'Not selected'}
+                    </div>
+                  </div>
+                  <div className="grid gap-2 py-3 sm:grid-cols-[150px_minmax(0,1fr)]">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      Paper branch
+                    </div>
+                    <div className="break-words text-sm leading-7 text-foreground">
+                      {paperContract.paper_branch || 'Not recorded'}
+                    </div>
+                  </div>
+                  <div className="grid gap-2 py-3 sm:grid-cols-[150px_minmax(0,1fr)]">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      Source branch
+                    </div>
+                  <div className="break-words text-sm leading-7 text-foreground">
+                      {paperContract.source_branch || 'Not recorded'}
+                    </div>
+                  </div>
+                  <div className="grid gap-2 py-3 sm:grid-cols-[150px_minmax(0,1fr)]">
+                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      Evidence status
+                    </div>
+                    <div className="break-words text-sm leading-7 text-foreground">
+                      {(paperContract.evidence_summary?.main_text_ready_count ?? 0)}/
+                      {(paperContract.evidence_summary?.item_count ?? 0)} ready ·{' '}
+                      {paperContract.evidence_summary?.unmapped_item_count ?? 0} unmapped
+                    </div>
+                  </div>
+                  {paperWorkspaceDrift ? (
+                    <div className="grid gap-2 py-3 sm:grid-cols-[150px_minmax(0,1fr)]">
+                      <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                        Drift warning
+                      </div>
+                      <div className="break-words text-sm leading-7 text-[#b42318] dark:text-[#ffb4b4]">
+                        {paperWorkspaceDrift}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+
+                {paperContract.research_questions?.length ? (
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                      Research Questions
+                    </div>
+                    <div className="space-y-2">
+                      {paperContract.research_questions.map((item, index) => (
+                        <div key={`rq-${index}`} className="break-words text-sm leading-7 text-foreground">
+                          {item}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {paperContract.experimental_designs?.length ? (
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                      Experimental Designs
+                    </div>
+                    <div className="space-y-2">
+                      {paperContract.experimental_designs.map((item, index) => (
+                        <div key={`exp-${index}`} className="break-words text-sm leading-7 text-foreground">
+                          {item}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="min-w-0 space-y-8">
+                <DocumentListBlock
+                  title="Paper Files"
+                  countLabel={paperContractFiles.length ? `${paperContractFiles.length} files` : null}
+                  items={paperContractFiles}
+                  emptyLabel="No paper-contract files exposed yet."
+                  onOpen={onOpenDocument}
+                />
+                <DocumentListBlock
+                  title="Outline Sections"
+                  countLabel={paperSectionItems.length ? `${paperSectionItems.length} sections` : null}
+                  items={paperSectionItems}
+                  emptyLabel="No paper sections exposed yet."
+                  onOpen={onOpenDocument}
+                />
+              </div>
+            </div>
+          )}
+        </DetailSection>
+
+        <DetailSection
+          title="Paper Lines"
+          hint="Each serious paper-facing route should become a visible paper line rather than hiding behind one quest-global paper panel."
+        >
+          <DocumentListBlock
+            title="Lines"
+            countLabel={paperLineItems.length ? `${paperLineItems.length} lines` : null}
+            items={paperLineItems}
+            emptyLabel="No paper lines are exposed yet."
+            onOpen={onOpenDocument}
+          />
+        </DetailSection>
+
+        <DetailSection
+          title="Evidence Ledger"
+          hint="Paper-facing evidence items mirrored from main experiments and analysis slices. This is the contract layer that should keep completed results from disappearing before writing."
+        >
+          {!paperEvidence ? (
+            <div className="py-3 text-sm leading-7 text-muted-foreground">
+              No paper evidence ledger is exposed in the current quest snapshot yet.
+            </div>
+          ) : (
+            <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <div className="min-w-0">
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  <OverviewMetric
+                    icon={<FileCode2 className="h-4 w-4" />}
+                    label="Items"
+                    value={String(paperEvidence.item_count ?? 0)}
+                    hint="Ledger items detected"
+                  />
+                  <OverviewMetric
+                    icon={<Sparkles className="h-4 w-4" />}
+                    label="Main Ready"
+                    value={String(paperEvidence.main_text_ready_count ?? 0)}
+                    hint="Main-text items marked ready"
+                  />
+                  <OverviewMetric
+                    icon={<BarChart3 className="h-4 w-4" />}
+                    label="Appendix"
+                    value={String(paperEvidence.appendix_item_count ?? 0)}
+                    hint="Appendix-linked items"
+                  />
+                  <OverviewMetric
+                    icon={<AlertTriangle className="h-4 w-4" />}
+                    label="Unmapped"
+                    value={String(paperEvidence.unmapped_item_count ?? 0)}
+                    hint="Items missing section or role mapping"
+                  />
+                </div>
+              </div>
+
+              <div className="min-w-0">
+                <DocumentListBlock
+                  title="Ledger Items"
+                  countLabel={paperEvidenceItems.length ? `${paperEvidenceItems.length} items` : null}
+                  items={paperEvidenceItems}
+                  emptyLabel="No evidence items exposed yet."
+                  onOpen={onOpenDocument}
+                />
+              </div>
+            </div>
+          )}
+        </DetailSection>
+
+        <DetailSection
+          title="Analysis Inventory"
+          hint="All detected paper-facing analysis campaigns and slice result mirrors currently available under the quest."
+        >
+          {!analysisInventory ? (
+            <div className="py-3 text-sm leading-7 text-muted-foreground">
+              No analysis inventory is exposed in the current quest snapshot yet.
+            </div>
+          ) : (
+            <div className="grid gap-8 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+              <div className="min-w-0">
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <OverviewMetric
+                    icon={<BarChart3 className="h-4 w-4" />}
+                    label="Campaigns"
+                    value={String(analysisInventory.campaign_count ?? 0)}
+                    hint="Detected analysis campaigns"
+                  />
+                  <OverviewMetric
+                    icon={<FlaskConical className="h-4 w-4" />}
+                    label="Slices"
+                    value={String(analysisInventory.slice_count ?? 0)}
+                    hint="Total analysis slices"
+                  />
+                  <OverviewMetric
+                    icon={<Sparkles className="h-4 w-4" />}
+                    label="Completed"
+                    value={String(analysisInventory.completed_slice_count ?? 0)}
+                    hint="Slices marked completed"
+                  />
+                  <OverviewMetric
+                    icon={<FileCode2 className="h-4 w-4" />}
+                    label="Mapped"
+                    value={String(analysisInventory.mapped_slice_count ?? 0)}
+                    hint="Slices with paper-contract mapping"
+                  />
+                </div>
+
+                <div className="mt-6">
+                  <DocumentListBlock
+                    title="Campaigns"
+                    countLabel={analysisCampaignItems.length ? `${analysisCampaignItems.length} campaigns` : null}
+                    items={analysisCampaignItems}
+                    emptyLabel="No analysis campaigns exposed yet."
+                    onOpen={onOpenDocument}
+                  />
+                </div>
+              </div>
+
+              <div className="min-w-0">
+                <DocumentListBlock
+                  title="Slice Results"
+                  countLabel={analysisSliceItems.length ? `${analysisSliceItems.length} slices` : null}
+                  items={analysisSliceItems}
+                  emptyLabel="No slice results exposed yet."
+                  onOpen={onOpenDocument}
+                />
+              </div>
+            </div>
+          )}
+        </DetailSection>
+
+        <DetailSection
           title="Recent Progress"
           hint="Latest project messages, tool calls, artifacts, and runtime runs in one linear view."
         >
@@ -3359,8 +4212,20 @@ export function QuestWorkspaceSurfaceInner({
           className="ds-stage-safe flex h-full items-center justify-center"
           style={{ paddingLeft: safePaddingLeft, paddingRight: safePaddingRight }}
         >
-          <div className="text-sm text-muted-foreground">
-            {restoring ? 'Restoring project workspace…' : 'Loading project workspace…'}
+          <div className="w-full max-w-xl rounded-[28px] border border-black/[0.08] bg-white/[0.88] px-8 py-8 shadow-[0_24px_64px_rgba(15,23,42,0.08)] backdrop-blur dark:border-white/[0.08] dark:bg-[rgba(18,20,24,0.84)] dark:shadow-[0_28px_72px_rgba(0,0,0,0.32)]">
+            <div className="text-base font-semibold text-foreground">
+              {restoring ? 'Restoring project workspace…' : 'Loading project workspace…'}
+            </div>
+            <div className="mt-3 text-sm leading-7 text-muted-foreground">
+              {restoring
+                ? 'Rehydrating the quest snapshot, documents, memory, and recent workflow state.'
+                : 'Fetching the current quest snapshot and preparing the shared workspace surfaces.'}
+            </div>
+            <div className="mt-5 space-y-3" aria-hidden="true">
+              <div className="h-3 w-40 rounded-full bg-black/[0.06] dark:bg-white/[0.08]" />
+              <div className="h-3 w-full rounded-full bg-black/[0.05] dark:bg-white/[0.06]" />
+              <div className="h-3 w-[82%] rounded-full bg-black/[0.05] dark:bg-white/[0.06]" />
+            </div>
           </div>
         </div>
       </div>
@@ -3421,6 +4286,10 @@ export function QuestWorkspaceSurfaceInner({
             restoring={restoring}
             connectionState={connectionState}
             onOpenDocument={(item) => {
+              if (item.stageSelection) {
+                updateView('stage', item.stageSelection)
+                return
+              }
               if (!item.documentId) return
               void openDocumentInTab(item.documentId)
             }}

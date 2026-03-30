@@ -11,10 +11,12 @@ Use this skill to close or pause a quest responsibly.
 
 - Follow the shared interaction contract injected by the system prompt.
 - For ordinary active work, prefer a concise progress update once work has crossed roughly 6 tool calls with a human-meaningful delta, and do not drift beyond roughly 12 tool calls or about 8 minutes without a user-visible update.
+- Do not emit another finalize progress update when the user-visible state is unchanged.
 - If the runtime starts an auto-continue turn with no new user message, keep finalizing from the durable quest state and active requirements instead of replaying the previous user turn.
 - If a threaded user reply arrives, interpret it relative to the latest finalize progress update before assuming the task changed completely.
 - When finalize reaches a real closure state, pause-ready packet, or route-back decision, send one threaded `artifact.interact(kind='milestone', ...)` update that names the recommendation, why it is the right call, and any reopen condition that still matters.
 - True quest completion still requires explicit user approval through the runtime completion flow before calling `artifact.complete_quest(...)`.
+- Rechecking that the same bundle files still exist, or re-aligning status surfaces without changing the closure judgment, does not by itself count as a fresh milestone.
 
 ## Stage purpose
 
@@ -54,8 +56,19 @@ Before finalizing, gather:
 - latest quest documents
 - latest review / proofing / submission state when a paper bundle exists
 - the paper bundle manifest and its referenced paths when the quest has a paper-like deliverable
+- the paper evidence ledger and selected-outline section statuses when the quest has a paper-like deliverable
 
 If finalization reveals that the quest is still too uncertain, route back through `decision` rather than forcing closure.
+For paper-like deliverables, do not finalize while any of these remain true:
+
+- required main-text outline items are still unresolved
+- completed analysis remains unmapped into the paper contract
+- the active paper line still reports open supplementary work that is expected to block the manuscript
+
+If the current paper-state blocker is not obvious from the existing files, call `artifact.get_paper_contract_health(detail='full')` before deciding whether finalize is legitimate.
+If the active quest/runtime state is unclear after restart or long pause, call `artifact.get_quest_state(detail='summary')` first.
+If the exact latest `SUMMARY.md`, `status.md`, or active user requirement wording matters for closure, call `artifact.read_quest_documents(...)`.
+If earlier user/assistant continuity matters for whether the quest should really stop, call `artifact.get_conversation_context(...)` instead of guessing from prompt context alone.
 
 ## Truth sources
 
@@ -90,6 +103,7 @@ The finalize stage should usually leave behind:
 If the quest produced a paper-style bundle, finalization should also check that the writing stage left behind enough closure evidence, such as:
 
 - selected outline and outline selection records
+- evidence ledger records and section-level result tables
 - review output
 - proofing output
 - submission or packaging checklist
@@ -113,12 +127,14 @@ Say clearly what exists and why it matters. Name concrete paths or artifact ids 
 When a paper bundle exists, verify the manifest inventory explicitly, including:
 
 - `paper/paper_bundle_manifest.json`
+- `paper/evidence_ledger.json`
 - the recorded `paper_branch` and source evidence branch / run fields in that manifest
 - referenced `outline_path`
 - referenced `draft_path`
 - referenced `writing_plan_path`
 - referenced `references_path`
 - referenced `claim_evidence_map_path`
+- referenced `evidence_ledger_path`
 - referenced `baseline_inventory_path`
 - referenced `compile_report_path`
 - referenced `pdf_path`
@@ -243,6 +259,7 @@ Weak finalization:
 - leaves no clear recommendation
 - claims “done” without showing what is actually done
 - drops the package or file inventory needed for resumption
+- ignores unmapped completed analysis that never entered the paper contract
 
 ## Memory rules
 

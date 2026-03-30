@@ -40,6 +40,7 @@ Use this skill for the main evidence-producing runs of the quest.
 - Progress message templates are references only. Adapt to the actual context and vary wording so messages feel human, respectful, and non-robotic.
 - If a threaded user reply arrives, interpret it relative to the latest experiment progress update before assuming the task changed completely.
 - Prefer `bash_exec` for experiment commands so each run gets a durable session id, quest-local log folder, and later `read/list/kill` control.
+- For meaningful long-running runs, include the estimated next reply time or next check-in window whenever it is defensible.
 
 ## Stage purpose
 
@@ -63,6 +64,9 @@ Use `references/evidence-ladder.md` when deciding whether the current package is
 
 Completing one main run is not quest completion.
 After reporting the run, keep moving to iterate, analyze, write, or finalize unless a genuine blocking decision remains.
+
+When the quest is algorithm-first, treat `experiment` as the execution surface of `optimize`, not as the terminal goal of the workflow.
+After a measured result, the default next move is frontier review and optimize-side route selection rather than paper packaging.
 
 ## Quick workflow
 
@@ -90,6 +94,7 @@ Treat this as the short run-order summary. The detailed run contract, execution 
 - After each `artifact.record_main_experiment(...)`, route from the measured result:
   - if paper mode is enabled, decide whether to strengthen evidence, analyze, or write
   - if paper mode is disabled, prefer iterate / revise-idea / branch over default writing
+- In algorithm-first work, after each main run, return to `optimize` or `decision` for frontier review before launching another large run.
 
 ## Experiment mental guardrails
 
@@ -429,8 +434,8 @@ For commands that may run longer than a few minutes:
   - if you only need wall-clock waiting between checks, use `bash_exec(command='sleep N', mode='await', timeout_seconds=N+buffer, ...)`
   - keep a real buffer on that sleep timeout; do not set `timeout_seconds` exactly equal to `N`
   - if you are waiting on an already running managed session, prefer `bash_exec(mode='await', id=..., timeout_seconds=...)` instead of starting a new sleep command
-- after every completed sleep / await cycle, inspect logs and send `artifact.interact(kind='progress', ...)` with the latest real status, latest evidence, the next checkpoint, and the estimated next reply time
-- after the first meaningful signal and then at real checkpoints (e.g., completion, or roughly every ~30 minutes if still running), keep those progress updates going rather than waiting silently
+- after every completed sleep / await cycle, inspect logs first; only send `artifact.interact(kind='progress', ...)` when the user-visible state, frontier, blocker status, or ETA materially changed
+- after the first meaningful signal and then at real checkpoints (e.g., completion, recovery, blocker, or a materially widened comparable surface), keep those progress updates going rather than waiting silently
 - if the run is clearly invalid, wedged, or superseded, stop it with `bash_exec(mode='kill', id=..., wait=true, timeout_seconds=...)`; if it must die immediately, add `force=true`, record the reason, fix the issue, and relaunch cleanly
 - do not report completion until logs and output files both confirm completion
 

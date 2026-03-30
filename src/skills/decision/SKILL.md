@@ -84,7 +84,9 @@ Choose the smallest action that genuinely resolves the current state.
 
 In the current runtime, prefer these concrete flow actions:
 
+- record a candidate brief before branch promotion -> `artifact.submit_idea(mode='create', submission_mode='candidate', ...)`
 - accepted idea -> `artifact.submit_idea(mode='create', lineage_intent='continue_line'|'branch_alternative', ...)`
+- promote a candidate brief into a durable optimization line -> `artifact.submit_idea(mode='create', submission_mode='line', source_candidate_id=..., lineage_intent='continue_line'|'branch_alternative', ...)`
 - maintenance-only in-place cleanup of the same branch -> `artifact.submit_idea(mode='revise', ...)`
 - compare branch foundations before a new round -> `artifact.list_research_branches(...)`
 - return to an older durable branch without creating a new node -> `artifact.activate_branch(...)`
@@ -104,6 +106,7 @@ If the chosen action is baseline reuse, the decision is not complete until one o
 Treat `prepare_branch` as a compatibility or recovery action, not the normal path.
 Treat `activate_branch` as the correct recovery or revisit action when the quest should resume on an existing older durable branch while preserving the newer research head.
 Treat each accepted branch as one durable research round.
+Treat candidate briefs as branchless pre-promotion objects; they are not yet durable optimization lines.
 If a branch already has a durable main-experiment result, a genuinely new optimization round should normally create a child branch from a chosen foundation rather than keep revising that old branch in place.
 Treat each durable main experiment as its own child `run/*` branch/node, not as another mutable state on the idea branch.
 When paper mode is enabled and the necessary analysis for a strong run is done, the next default route is `write` on a dedicated `paper/*` branch/worktree derived from that run branch.
@@ -120,6 +123,12 @@ Make decisions from durable evidence:
 - memory only as supporting context
 
 Do not make major decisions from vibe or momentum.
+
+When the quest is algorithm-first, add one extra truth-source rule before non-trivial route choices:
+
+- read `artifact.get_optimization_frontier(...)`
+- treat the frontier as the primary optimize-state summary
+- only override it when newer durable evidence clearly dominates
 
 ## Workflow
 
@@ -248,6 +257,14 @@ When recording the decision, make explicit:
 - which alternatives were serious enough to compare
 - which existing evidence was decisive
 - what residual risk remains after the choice
+
+For algorithm-first route choices, prefer this default mapping:
+
+- frontier says `explore` -> widen or refine candidate briefs before new branch creation
+- frontier says `exploit` -> keep the strongest line active and advance the best implementation candidates
+- frontier says `fusion` -> open at most one bounded fusion candidate
+- a fixable candidate failure dominates -> run a debug route instead of widening search blindly
+- frontier says `stop` -> record the stop decision and explicit reopen condition
 
 Good route-selection criteria often include:
 

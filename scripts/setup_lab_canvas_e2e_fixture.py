@@ -159,11 +159,18 @@ def build_fixture(home: Path) -> dict[str, object]:
         experimental_designs=["Exp-current"],
         todo_items=[
             {
+                "exp_id": "EXP-CURRENT-001",
                 "todo_id": "todo-current-001",
                 "slice_id": "slice-current-001",
                 "title": "Current route slice",
                 "research_question": "RQ-current",
                 "experimental_design": "Exp-current",
+                "tier": "main_required",
+                "paper_placement": "main_text",
+                "paper_role": "main_text",
+                "section_id": "results-current",
+                "item_id": "AN-CURRENT-001",
+                "claim_links": ["C-current"],
                 "completion_condition": "Finish the final writing-facing supplementary experiment.",
             }
         ],
@@ -174,6 +181,10 @@ def build_fixture(home: Path) -> dict[str, object]:
                 "goal": "Verify the active route with one final writing-facing check.",
                 "required_changes": "Keep the protocol comparable.",
                 "metric_contract": "Use the same three tracked metrics.",
+                "section_id": "results-current",
+                "item_id": "AN-CURRENT-001",
+                "paper_role": "main_text",
+                "claim_links": ["C-current"],
             }
         ],
     )

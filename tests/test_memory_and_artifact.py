@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError
 
 import pytest
@@ -638,6 +639,7 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
     assert campaign["campaign_id"]
     assert len(campaign["slices"]) == 2
     assert campaign["guidance"]
+
     assert campaign["recommended_skill_reads"]
     assert campaign["suggested_artifact_calls"]
     assert campaign["next_instruction"]
@@ -736,6 +738,260 @@ def test_artifact_managed_git_flow_updates_research_state_and_mirrors_analysis(t
     assert campaign_event["details"]["slice_count"] == 2
 
 
+def test_submit_idea_candidate_mode_records_branchless_candidate_then_allows_promotion(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("idea candidate quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-candidate")
+
+    baseline_snapshot = quest_service.snapshot(quest["quest_id"])
+    assert baseline_snapshot["active_anchor"] == "idea"
+
+    candidate = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        submission_mode="candidate",
+        title="Candidate route",
+        problem="Baseline saturates on rare cases.",
+        hypothesis="A candidate adapter path may improve the long tail.",
+        mechanism="Try a narrow adapter before the head.",
+        method_brief="Target the rare-case bottleneck while keeping the baseline comparison surface unchanged.",
+        selection_scores={"utility": 0.82, "distinctness": 0.61},
+        mechanism_family="adapter",
+        change_layer="Tier2",
+        source_lens="baseline_refinement",
+        decision_reason="Record this candidate before ranking and promotion.",
+        next_target="optimize",
+        draft_markdown="# Candidate route draft\n\n## Code-Level Change Plan\n\nTry the narrow adapter.\n",
+    )
+
+    assert candidate["ok"] is True
+    assert candidate["submission_mode"] == "candidate"
+    assert candidate["promotable"] is True
+    assert candidate["method_brief"] == "Target the rare-case bottleneck while keeping the baseline comparison surface unchanged."
+    assert candidate["selection_scores"] == {"utility": 0.82, "distinctness": 0.61}
+    assert candidate["mechanism_family"] == "adapter"
+    assert candidate["change_layer"] == "Tier2"
+    assert candidate["source_lens"] == "baseline_refinement"
+    assert "branch" not in candidate
+    assert Path(candidate["candidate_root"]).exists()
+    assert Path(candidate["idea_md_path"]).exists()
+    assert Path(candidate["idea_draft_path"]).exists()
+
+    candidate_metadata, _ = load_markdown_document(Path(candidate["idea_md_path"]))
+    assert candidate_metadata["submission_mode"] == "candidate"
+    assert candidate_metadata["kind"] == "idea_candidate"
+    assert candidate_metadata["method_brief"] == candidate["method_brief"]
+    assert candidate_metadata["selection_scores"] == candidate["selection_scores"]
+    assert candidate_metadata["mechanism_family"] == candidate["mechanism_family"]
+    assert candidate_metadata["change_layer"] == candidate["change_layer"]
+    assert candidate_metadata["source_lens"] == candidate["source_lens"]
+
+    candidate_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": candidate["idea_id"],
+            "selection_type": "idea_candidate",
+            "branch_name": candidate["parent_branch"],
+            "stage_key": "idea",
+        },
+    )
+    assert candidate_view["title"] == "Candidate Brief · Candidate route"
+    assert candidate_view["details"]["idea"]["method_brief"] == candidate["method_brief"]
+    assert candidate_view["details"]["idea"]["selection_scores"] == candidate["selection_scores"]
+    assert candidate_view["details"]["idea"]["candidate_root"] == "memory/ideas/_candidates/" + candidate["idea_id"]
+
+    after_candidate_snapshot = quest_service.snapshot(quest["quest_id"])
+    assert after_candidate_snapshot["active_anchor"] == "idea"
+
+    branches = artifact.list_research_branches(quest_root)
+    assert branches["ok"] is True
+    assert all(item.get("idea_id") != candidate["idea_id"] for item in branches["branches"])
+
+    promoted = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        submission_mode="line",
+        source_candidate_id=candidate["idea_id"],
+        title="Promoted route",
+        problem="Promote the candidate into a real branch.",
+        hypothesis="The candidate is now strong enough for a durable line.",
+        mechanism="Carry the adapter plan into a branch-backed implementation line.",
+        method_brief="Promote the narrow adapter route into a durable optimization line.",
+        selection_scores={"utility": 0.9, "distinctness": 0.58},
+        mechanism_family="adapter",
+        change_layer="Tier2",
+        source_lens="baseline_refinement",
+        decision_reason="Promote the candidate into the active optimization line.",
+        next_target="optimize",
+    )
+
+    assert promoted["ok"] is True
+    assert promoted["submission_mode"] == "line"
+    assert promoted["source_candidate_id"] == candidate["idea_id"]
+    assert promoted["method_brief"] == "Promote the narrow adapter route into a durable optimization line."
+    assert promoted["selection_scores"] == {"utility": 0.9, "distinctness": 0.58}
+    assert promoted["mechanism_family"] == "adapter"
+    assert promoted["change_layer"] == "Tier2"
+    assert promoted["source_lens"] == "baseline_refinement"
+    assert promoted["branch"].startswith(f"idea/{quest['quest_id']}-")
+    assert Path(promoted["worktree_root"]).exists()
+    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "optimize"
+
+    branch_view = quest_service.stage_view(
+        quest["quest_id"],
+        {
+            "selection_ref": promoted["branch"],
+            "selection_type": "branch_node",
+            "branch_name": promoted["branch"],
+            "stage_key": "idea",
+        },
+    )
+    assert branch_view["details"]["branch"]["method_brief"] == promoted["method_brief"]
+    assert branch_view["details"]["branch"]["selection_scores"] == promoted["selection_scores"]
+    assert branch_view["details"]["branch"]["mechanism_family"] == promoted["mechanism_family"]
+    assert branch_view["details"]["branch"]["change_layer"] == promoted["change_layer"]
+    assert branch_view["details"]["branch"]["source_lens"] == promoted["source_lens"]
+
+
+def test_get_optimization_frontier_summarizes_briefs_lines_candidates_and_mode(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create(
+        "optimization frontier quest",
+        startup_contract={"need_research_paper": False},
+    )
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-frontier")
+
+    candidate = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        submission_mode="candidate",
+        title="Frontier candidate",
+        problem="Need a branchless direction for later promotion.",
+        hypothesis="A branchless brief captures a possible new route.",
+        mechanism="Delay branch creation until ranking is finished.",
+        method_brief="Keep the direction branchless until ranking is complete.",
+        selection_scores={"utility": 0.73, "distinctness": 0.67},
+        mechanism_family="ranking_gate",
+        change_layer="Tier1",
+        source_lens="search_widening",
+        decision_reason="Keep this direction in the candidate pool.",
+        next_target="optimize",
+    )
+
+    first_line = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        submission_mode="line",
+        title="Leading line",
+        problem="Baseline saturates on hard examples.",
+        hypothesis="A stronger adapter route should improve hard-example recall.",
+        mechanism="Insert a residual adapter before the head.",
+        decision_reason="Promote the strongest current line.",
+        next_target="optimize",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="main-frontier-001",
+        title="Leading line main run",
+        hypothesis="The leading line helps.",
+        setup="Use the baseline recipe.",
+        execution="Ran validation.",
+        results="Accuracy improved.",
+        conclusion="Use this result as the current incumbent.",
+        metric_rows=[{"metric_id": "acc", "value": 0.87}],
+    )
+
+    second_line = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        submission_mode="line",
+        lineage_intent="branch_alternative",
+        title="Trailing line",
+        problem="Try an alternative mechanism from the same family.",
+        hypothesis="A sibling route may still be worth comparing.",
+        mechanism="Change the intervention point while keeping the same parent foundation.",
+        decision_reason="Keep one alternative line alive.",
+        next_target="optimize",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="main-frontier-002",
+        title="Trailing line main run",
+        hypothesis="The trailing line is weaker.",
+        setup="Use the same protocol.",
+        execution="Ran validation.",
+        results="Accuracy dropped slightly.",
+        conclusion="This line is weaker than the current incumbent.",
+        metric_rows=[{"metric_id": "acc", "value": 0.79}],
+    )
+
+    artifact.record(
+        quest_root,
+        {
+            "kind": "report",
+            "status": "proposed",
+            "report_type": "optimization_candidate",
+            "candidate_id": "cand-frontier-001",
+            "idea_id": first_line["idea_id"],
+            "branch": first_line["branch"],
+            "strategy": "exploit",
+            "summary": "Candidate patch queued for smoke.",
+            "details": {
+                "candidate_id": "cand-frontier-001",
+                "change_plan": "Tighten the adapter bottleneck.",
+                "expected_gain": "Better tail accuracy.",
+            },
+        },
+        workspace_root=Path(first_line["worktree_root"]),
+    )
+
+    frontier = artifact.get_optimization_frontier(quest_root)
+
+    assert frontier["ok"] is True
+    payload = frontier["optimization_frontier"]
+    assert payload["mode"] == "exploit"
+    assert payload["best_branch"]["branch_name"] == "run/main-frontier-001"
+    assert payload["best_run"]["run_id"] == "main-frontier-001"
+    assert payload["candidate_backlog"]["candidate_brief_count"] == 1
+    assert payload["candidate_backlog"]["implementation_candidate_count"] == 1
+    assert payload["candidate_backlog"]["active_implementation_candidate_count"] == 1
+    assert payload["candidate_briefs"][0]["idea_id"] == candidate["idea_id"]
+    assert payload["candidate_briefs"][0]["method_brief"] == "Keep the direction branchless until ranking is complete."
+    assert payload["candidate_briefs"][0]["selection_scores"] == {"utility": 0.73, "distinctness": 0.67}
+    assert payload["candidate_briefs"][0]["mechanism_family"] == "ranking_gate"
+    assert payload["candidate_briefs"][0]["change_layer"] == "Tier1"
+    assert payload["candidate_briefs"][0]["source_lens"] == "search_widening"
+    assert payload["implementation_candidates"][0]["candidate_id"] == "cand-frontier-001"
+    assert payload["best_branch_recent_candidates"][0]["candidate_id"] == "cand-frontier-001"
+    assert len(payload["top_branches"]) >= 2
+    assert payload["recommended_next_actions"]
+
+
+def test_algorithm_first_baseline_gate_advances_into_optimize_anchor(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create(
+        "algorithm-first baseline gate quest",
+        startup_contract={"need_research_paper": False},
+    )
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    result = _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-algorithm-first")
+
+    assert result["ok"] is True
+    assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "optimize"
+
+
 def test_paper_outline_flow_and_outline_bound_analysis_campaign(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -830,6 +1086,8 @@ def test_paper_outline_flow_and_outline_bound_analysis_campaign(temp_home: Path)
     )
     assert selected["ok"] is True
     assert Path(selected["selected_outline_path"]).exists()
+    assert Path(selected["outline_manifest_path"]).exists()
+    assert Path(selected["paper_line_state_path"]).exists()
     assert Path(selected["outline_selection_path"]).exists()
     assert quest_service.snapshot(quest["quest_id"])["active_anchor"] == "write"
 
@@ -842,11 +1100,18 @@ def test_paper_outline_flow_and_outline_bound_analysis_campaign(temp_home: Path)
         experimental_designs=["Exp-main"],
         todo_items=[
             {
+                "exp_id": "EXP-001",
                 "todo_id": "todo-001",
                 "slice_id": "ablation",
                 "title": "Ablation for RQ-main",
                 "research_question": "RQ-main",
                 "experimental_design": "Exp-main",
+                "tier": "main_required",
+                "paper_placement": "main_text",
+                "paper_role": "main_text",
+                "section_id": "analysis-main",
+                "item_id": "AN-001",
+                "claim_links": ["C1"],
                 "completion_condition": "Show whether the core module is necessary.",
             }
         ],
@@ -858,6 +1123,10 @@ def test_paper_outline_flow_and_outline_bound_analysis_campaign(temp_home: Path)
                 "hypothesis": "Performance will drop without the core module.",
                 "required_changes": "Disable the core module only.",
                 "metric_contract": "Report full validation metrics.",
+                "section_id": "analysis-main",
+                "item_id": "AN-001",
+                "paper_role": "main_text",
+                "claim_links": ["C1"],
             }
         ],
     )
@@ -866,8 +1135,17 @@ def test_paper_outline_flow_and_outline_bound_analysis_campaign(temp_home: Path)
     manifest = read_json(quest_root / ".ds" / "analysis_campaigns" / f"{campaign['campaign_id']}.json", {})
     assert manifest["selected_outline_ref"] == "outline-002"
     assert manifest["todo_items"][0]["slice_id"] == "ablation"
+    assert manifest["todo_items"][0]["item_id"] == "AN-001"
+    assert manifest["paper_line_branch"]
+    assert manifest["paper_line_root"]
     assert manifest["slices"][0]["research_question"] == "RQ-main"
     assert manifest["slices"][0]["experimental_design"] == "Exp-main"
+    assert manifest["slices"][0]["section_id"] == "analysis-main"
+    outline_result_table = read_json(
+        Path(selected["outline_manifest_path"]).parent / "sections" / "analysis-main" / "result_table.json",
+        {},
+    )
+    assert outline_result_table["rows"][0]["item_id"] == "AN-001"
 
     stage_view = quest_service.stage_view(
         quest["quest_id"],
@@ -1038,11 +1316,18 @@ def test_artifact_stage_milestones_emit_semantic_connector_messages(temp_home: P
         experimental_designs=["Ablation-semantic"],
         todo_items=[
             {
+                "exp_id": "EXP-SEM-001",
                 "todo_id": "todo-semantic-001",
                 "slice_id": "ablation",
                 "title": "Core ablation",
                 "research_question": "RQ-semantic",
                 "experimental_design": "Ablation-semantic",
+                "tier": "main_required",
+                "paper_placement": "main_text",
+                "paper_role": "main_text",
+                "section_id": "analysis-semantic",
+                "item_id": "AN-SEM-001",
+                "claim_links": ["C-semantic"],
                 "completion_condition": "Show whether the adapter is necessary.",
             }
         ],
@@ -1054,6 +1339,10 @@ def test_artifact_stage_milestones_emit_semantic_connector_messages(temp_home: P
                 "hypothesis": "The gain disappears without the adapter.",
                 "required_changes": "Disable adapter only.",
                 "metric_contract": "Keep the full validation protocol.",
+                "section_id": "analysis-semantic",
+                "item_id": "AN-SEM-001",
+                "paper_role": "main_text",
+                "claim_links": ["C-semantic"],
             }
         ],
     )
@@ -1404,11 +1693,18 @@ def test_supplementary_experiment_protocol_supports_runtime_ref_queries_and_unif
         experimental_designs=["Exp-supp"],
         todo_items=[
             {
+                "exp_id": "EXP-R1-C1",
                 "todo_id": "todo-r1-c1",
                 "slice_id": "reviewer-check",
                 "title": "Reviewer check",
                 "research_question": "RQ-supp",
                 "experimental_design": "Exp-supp",
+                "tier": "main_required",
+                "paper_placement": "main_text",
+                "paper_role": "main_text",
+                "section_id": "reviewer-response",
+                "item_id": "AN-R1-C1",
+                "claim_links": ["C-review"],
                 "completion_condition": "Answer whether the claim survives the requested check.",
                 "why_now": "This is the only remaining blocker before revision.",
                 "success_criteria": "Produce a fair comparison and a usable manuscript update.",
@@ -1428,6 +1724,10 @@ def test_supplementary_experiment_protocol_supports_runtime_ref_queries_and_unif
                 "abandonment_criteria": "Abort if the comparison breaks the metric contract.",
                 "reviewer_item_ids": ["R1-C1"],
                 "manuscript_targets": ["Results", "Response letter"],
+                "section_id": "reviewer-response",
+                "item_id": "AN-R1-C1",
+                "paper_role": "main_text",
+                "claim_links": ["C-review"],
             }
         ],
     )
@@ -1463,6 +1763,13 @@ def test_supplementary_experiment_protocol_supports_runtime_ref_queries_and_unif
         },
     )
     assert completed["ok"] is True
+    evidence_ledger = read_json(quest_root / "paper" / "evidence_ledger.json", {})
+    ledger_item = next(item for item in evidence_ledger["items"] if item["item_id"] == "AN-R1-C1")
+    assert ledger_item["section_id"] == "reviewer-response"
+    selected_outline = read_json(quest_root / "paper" / "selected_outline.json", {})
+    reviewer_section = next(item for item in selected_outline["sections"] if item["section_id"] == "reviewer-response")
+    assert reviewer_section["status"] == "ready"
+    assert reviewer_section["result_table"][0]["item_id"] == "AN-R1-C1"
     result_text = Path(completed["result_path"]).read_text(encoding="utf-8")
     assert "## Claim Impact" in result_text
     assert "Strengthens confidence in the main claim." in result_text
@@ -1539,16 +1846,24 @@ def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path
     assert result["interaction"]["status"] == "ok"
     assert Path(result["manifest_path"]).exists()
     assert Path(result["baseline_inventory_path"]).exists()
-    assert Path(result["open_source_manifest_path"]).exists()
+    assert Path(result["evidence_ledger_path"]).exists()
+    assert Path(result["paper_line_state_path"]).exists()
+    assert result["open_source_manifest_path"] is None
     baseline_inventory = read_json(Path(result["baseline_inventory_path"]), {})
     assert baseline_inventory["schema_version"] == 1
-    open_source_manifest = read_json(Path(result["open_source_manifest_path"]), {})
-    expected_bundle_rel = Path(result["manifest_path"]).relative_to(quest_root).as_posix()
-    expected_cleanup_rel = Path(result["open_source_manifest_path"]).parent.joinpath("cleanup_plan.md").relative_to(quest_root).as_posix()
-    assert open_source_manifest["source_bundle_manifest_path"] == expected_bundle_rel
-    assert open_source_manifest["cleanup_plan_path"] == expected_cleanup_rel
+    manifest = read_json(Path(result["manifest_path"]), {})
+    assert manifest["prepare_open_source"] is False
+    assert manifest["open_source_manifest_path"] is None
+    assert manifest["open_source_cleanup_plan_path"] is None
     snapshot = quest_service.snapshot(quest["quest_id"])
     assert snapshot["active_anchor"] == "finalize"
+    assert snapshot["continuation_policy"] == "wait_for_user_or_resume"
+    assert snapshot["continuation_anchor"] == "decision"
+    assert snapshot["continuation_reason"] == "paper_bundle_submitted"
+    assert snapshot["paper_contract_health"]["closure_state"] == "delivery_ready"
+    assert snapshot["paper_contract_health"]["delivery_state"] == "bundle_ready"
+    assert snapshot["paper_evidence"]["item_count"] == 0
+    assert snapshot["paper_lines"][0]["paper_line_id"] == result["paper_line_state"]["paper_line_id"]
 
     stage_view = quest_service.stage_view(
         quest["quest_id"],
@@ -1561,6 +1876,129 @@ def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path
     )
     assert stage_view["stage_key"] == "paper"
     assert any(item["label"] == "Bundle Manifest" for item in stage_view["sections"]["key_files"])
+
+
+def test_submit_paper_bundle_can_prepare_open_source_when_enabled(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("paper bundle open source quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Bundle Outline",
+        detailed_outline={
+            "title": "Bundle Outline",
+            "research_questions": ["RQ-bundle"],
+            "experimental_designs": ["Exp-bundle"],
+            "contributions": ["C-bundle"],
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Use this for bundle generation.",
+    )
+    paper_workspace = quest_service.active_workspace_root(quest_root)
+    paper_root = paper_workspace / "paper"
+    paper_root.mkdir(parents=True, exist_ok=True)
+    (paper_root / "draft.md").write_text("# Draft\n", encoding="utf-8")
+    (paper_root / "writing_plan.md").write_text("# Plan\n", encoding="utf-8")
+    (paper_root / "references.bib").write_text("@article{demo, title={Demo}}\n", encoding="utf-8")
+    (paper_root / "build").mkdir(parents=True, exist_ok=True)
+    write_json(paper_root / "build" / "compile_report.json", {"ok": True})
+    (paper_root / "paper.pdf").write_bytes(b"%PDF-1.4\n%paper\n")
+
+    result = artifact.submit_paper_bundle(
+        quest_root,
+        title="Bundle Paper",
+        summary="Paper bundle is ready for final review.",
+        pdf_path="paper/paper.pdf",
+        prepare_open_source=True,
+    )
+
+    assert result["ok"] is True
+    assert result["open_source_manifest_path"] is not None
+    assert Path(result["open_source_manifest_path"]).exists()
+    manifest = read_json(Path(result["manifest_path"]), {})
+    assert manifest["prepare_open_source"] is True
+    expected_bundle_rel = Path(result["manifest_path"]).relative_to(quest_root).as_posix()
+    open_source_manifest = read_json(Path(result["open_source_manifest_path"]), {})
+    assert open_source_manifest["source_bundle_manifest_path"] == expected_bundle_rel
+
+
+def test_submit_paper_bundle_blocks_unmapped_completed_analysis(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("paper bundle gate quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Gate Outline",
+        detailed_outline={
+            "title": "Gate Outline",
+            "research_questions": ["RQ-gate"],
+            "experimental_designs": ["Exp-gate"],
+            "sections": [
+                {
+                    "section_id": "results-gate",
+                    "title": "Gate Results",
+                    "paper_role": "main_text",
+                    "claims": ["C1"],
+                    "required_items": [],
+                    "optional_items": [],
+                }
+            ],
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Use the gate outline for bundle validation.",
+    )
+    paper_workspace = quest_service.active_workspace_root(quest_root)
+    paper_root = paper_workspace / "paper"
+    paper_root.mkdir(parents=True, exist_ok=True)
+    (paper_root / "draft.md").write_text("# Draft\n", encoding="utf-8")
+    (paper_root / "writing_plan.md").write_text("# Plan\n", encoding="utf-8")
+    (paper_root / "references.bib").write_text("@article{demo, title={Demo}}\n", encoding="utf-8")
+    (paper_root / "build").mkdir(parents=True, exist_ok=True)
+    write_json(paper_root / "build" / "compile_report.json", {"ok": True})
+    (paper_root / "paper.pdf").write_bytes(b"%PDF-1.4\n%paper\n")
+
+    write_json(
+        quest_root / ".ds" / "analysis_campaigns" / "analysis-gate.json",
+        {
+            "campaign_id": "analysis-gate",
+            "selected_outline_ref": "outline-001",
+            "slices": [
+                {
+                    "slice_id": "ablation",
+                    "title": "Gate ablation",
+                    "status": "completed",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        artifact.submit_paper_bundle(
+            quest_root,
+            title="Blocked Paper",
+            summary="This bundle should be blocked by unmapped analysis.",
+            pdf_path="paper/paper.pdf",
+        )
+
+    assert "unmapped" in str(exc_info.value)
 
 
 def test_submit_paper_bundle_normalizes_latex_root_from_main_tex_path(temp_home: Path) -> None:
@@ -2029,6 +2467,144 @@ def test_submit_idea_supports_foundation_selection_and_branch_listing(temp_home:
     assert "draft" in branch_view["subviews"]
     assert any(item["label"] == "Idea Markdown" for item in branch_view["sections"]["key_files"])
     assert any(item["label"] == "Idea Draft" for item in branch_view["sections"]["key_files"])
+
+
+def test_collect_artifacts_uses_projection_when_fresh(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    artifact = ArtifactService(temp_home)
+    quest = quest_service.create("artifact projection cache quest")
+    quest_root = Path(quest["quest_root"])
+
+    artifact.record(
+        quest_root,
+        {
+            "kind": "milestone",
+            "summary": "Projection-ready artifact.",
+            "message": "Projection-ready artifact.",
+        },
+        checkpoint=False,
+    )
+
+    first = quest_service._collect_artifacts(quest_root)
+    projection_path = quest_service._artifact_projection_path(quest_root)
+    projection = read_json(projection_path, {})
+    assert projection["schema_version"] == 2
+    assert projection["state_kind"] in {"index", "raw"}
+    assert any(str((item.get("payload") or {}).get("kind") or "") == "milestone" for item in first)
+
+    def _fail_raw(_quest_root: Path) -> list[dict[str, Any]]:
+        raise AssertionError("raw artifact scan should not run when the projection is fresh")
+
+    monkeypatch.setattr(quest_service, "_collect_artifacts_raw", _fail_raw)
+
+    second = quest_service._collect_artifacts(quest_root)
+    assert [item.get("path") for item in second] == [item.get("path") for item in first]
+
+
+def test_collect_artifacts_auto_backfills_legacy_quest_without_index(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("legacy artifact backfill quest")
+    quest_root = Path(quest["quest_root"])
+
+    legacy_path = quest_root / "artifacts" / "milestones" / "legacy-milestone.json"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        legacy_path,
+        {
+            "kind": "milestone",
+            "artifact_id": "legacy-milestone",
+            "summary": "Legacy artifact without an index line.",
+            "updated_at": "2026-03-30T00:00:00+00:00",
+            "workspace_root": str(quest_root),
+        },
+    )
+
+    artifacts = quest_service._collect_artifacts(quest_root)
+    assert len(artifacts) == 1
+    assert artifacts[0]["payload"]["artifact_id"] == "legacy-milestone"
+
+    projection = read_json(quest_service._artifact_projection_path(quest_root), {})
+    assert projection["schema_version"] == 2
+    assert projection["state_kind"] == "raw"
+
+
+def test_artifact_record_updates_projection_incrementally(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    artifact = ArtifactService(temp_home)
+    quest = quest_service.create("artifact projection incremental update quest")
+    quest_root = Path(quest["quest_root"])
+
+    first_result = artifact.record(
+        quest_root,
+        {
+            "kind": "milestone",
+            "summary": "First projected artifact.",
+            "message": "First projected artifact.",
+        },
+        checkpoint=False,
+    )
+    quest_service._collect_artifacts(quest_root)
+
+    def _fail_raw(_quest_root: Path) -> list[dict[str, Any]]:
+        raise AssertionError("raw artifact scan should not run after an incremental projection update")
+
+    monkeypatch.setattr(quest_service, "_collect_artifacts_raw", _fail_raw)
+
+    second_result = artifact.record(
+        quest_root,
+        {
+            "kind": "milestone",
+            "summary": "Second projected artifact.",
+            "message": "Second projected artifact.",
+        },
+        checkpoint=False,
+    )
+
+    artifacts = quest_service._collect_artifacts(quest_root)
+    artifact_ids = {
+        str((item.get("payload") or {}).get("artifact_id") or "")
+        for item in artifacts
+    }
+    assert first_result["artifact_id"] in artifact_ids
+    assert second_result["artifact_id"] in artifact_ids
+
+
+def test_idea_interaction_message_stays_concise_and_design_focused(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    artifact = ArtifactService(temp_home)
+    quest = quest_service.create("concise idea interaction quest")
+    quest_root = Path(quest["quest_root"])
+
+    message = artifact._build_idea_interaction_message(
+        quest_root=quest_root,
+        action="create",
+        idea_id="idea-001",
+        title="Sparse routing adapter",
+        mechanism="Add a sparse routing adapter on top of the baseline encoder.",
+        method_brief="Insert a lightweight router that only activates a small expert subset.",
+        foundation_label="baseline model",
+        branch_name="idea/quest-idea-001",
+        change_layer="adapter block",
+        source_lens="conditional routing",
+        expected_gain="improve calibration without widening the whole model",
+        next_target="experiment",
+    )
+
+    assert ("Innovation:" in message) or ("创新点：" in message)
+    assert ("Compared with baseline model:" in message) or ("相对 baseline model：" in message)
+    assert "Problem" not in message
+    assert "Hypothesis" not in message
+    assert "Idea doc" not in message
+    assert "Draft" not in message
+    assert len(message.splitlines()) <= 4
 
 
 def test_submit_idea_lineage_intent_creates_child_and_sibling_like_nodes(temp_home: Path) -> None:
@@ -2885,6 +3461,118 @@ def test_artifact_interact_normalizes_attachment_paths_and_returns_delivery_resu
     assert result["delivery_results"][0]["conversation_id"] == "qq:direct:qq-user-absolute"
     assert captured
     assert captured[-1]["attachments"][0]["path"] == str(absolute_path.resolve())
+
+
+def test_record_main_experiment_auto_generates_and_sends_metric_charts_to_bound_qq(
+    temp_home: Path,
+    monkeypatch,
+) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("main experiment chart delivery quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    quest_service.bind_source(quest["quest_id"], "qq:direct:qq-user-chart")
+
+    baseline_root = quest_root / "baselines" / "local" / "baseline-chart"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    (baseline_root / "README.md").write_text("# Baseline\n", encoding="utf-8")
+    artifact.confirm_baseline(
+        quest_root,
+        baseline_path=str(baseline_root),
+        baseline_id="baseline-chart",
+        summary="Baseline with two chartable metrics.",
+        metrics_summary={"acc": 0.8, "loss": 0.42},
+        primary_metric={"metric_id": "acc", "value": 0.8},
+        metric_contract={
+            "primary_metric_id": "acc",
+            "metrics": [
+                {
+                    "metric_id": "acc",
+                    "direction": "higher",
+                    "description": "Accuracy.",
+                    "derivation": "Read from evaluation output.",
+                    "source_ref": "eval.py",
+                },
+                {
+                    "metric_id": "loss",
+                    "direction": "lower",
+                    "description": "Loss.",
+                    "derivation": "Read from evaluation output.",
+                    "source_ref": "eval.py",
+                },
+            ],
+        },
+    )
+    artifact.submit_idea(
+        quest_root,
+        title="Chart route",
+        problem="Need chart delivery after the main run.",
+        hypothesis="The route should notify bound connectors with metric charts.",
+        mechanism="Hook chart generation into the main experiment completion flow.",
+        decision_reason="Exercise automatic connector chart delivery.",
+    )
+
+    deliveries: list[dict[str, Any]] = []
+    sleeps: list[float] = []
+
+    def fake_deliver(channel_name, payload, *, connectors):  # noqa: ANN001
+        deliveries.append(
+            {
+                "channel": channel_name,
+                "payload": payload,
+            }
+        )
+        return {"ok": True, "transport": f"{channel_name}-mock"}
+
+    monkeypatch.setattr(artifact, "_deliver_to_channel", fake_deliver)
+    monkeypatch.setattr("deepscientist.artifact.service.time.sleep", lambda seconds: sleeps.append(float(seconds)))
+
+    result = artifact.record_main_experiment(
+        quest_root,
+        run_id="main-chart-001",
+        title="Charted main run",
+        hypothesis="The charted run should beat the baseline.",
+        setup="Use the confirmed baseline contract.",
+        execution="Ran the main experiment once.",
+        results="Both metrics improved in the expected directions.",
+        conclusion="Charts should be generated and sent automatically.",
+        metric_rows=[
+            {"metric_id": "acc", "value": 0.91, "direction": "higher"},
+            {"metric_id": "loss", "value": 0.31, "direction": "lower"},
+        ],
+        evaluation_summary={
+            "takeaway": "The main run improves both tracked metrics.",
+            "claim_update": "strengthens",
+            "baseline_relation": "better",
+            "comparability": "high",
+            "failure_mode": "none",
+            "next_action": "analysis_campaign",
+        },
+    )
+
+    chart_deliveries = [
+        item for item in deliveries if str((item.get("payload") or {}).get("kind") or "") == "main_experiment_metric_chart"
+    ]
+    assert result["connector_metric_charts"]
+    assert len(result["connector_metric_charts"]) == 2
+    assert all(Path(item["path"]).exists() for item in result["connector_metric_charts"])
+    assert result["connector_metric_chart_delivery"]["enabled"] is True
+    assert result["connector_metric_chart_delivery"]["chart_count"] == 2
+    assert len(chart_deliveries) == 2
+    assert [item["channel"] for item in chart_deliveries] == ["qq", "qq"]
+    assert chart_deliveries[0]["payload"]["attachments"][0]["connector_delivery"]["qq"]["allow_internal_auto_media"] is True
+    assert chart_deliveries[0]["payload"]["attachments"][0]["connector_delivery"]["qq"]["media_kind"] == "image"
+    assert chart_deliveries[0]["payload"]["attachments"][0]["connector_delivery"]["weixin"]["media_kind"] == "image"
+    assert sleeps == [2.0]
 
 
 def test_artifact_interact_reports_missing_attachment_path_to_agent(temp_home: Path) -> None:
@@ -3768,6 +4456,300 @@ def test_user_message_queue_agent_instruction_respects_english_locale(temp_home:
         .startswith("No new user message has arrived. Continue the task according to the user's requirements.")
     )
     assert "Here are the latest 10 artifact-related interaction records:" in no_new_message["agent_instruction"]
+
+
+def test_duplicate_progress_is_suppressed_when_message_is_unchanged(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("duplicate progress quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    first = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="老师，我已经完成第一轮检查，当前状态没有变化。",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+    )
+    assert first["status"] == "ok"
+
+    second = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="老师，我已经完成第一轮检查，当前状态没有变化。",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+    )
+    assert second["status"] == "suppressed_duplicate"
+    assert second["artifact_id"] == first["artifact_id"]
+
+    journal = read_jsonl(quest_root / ".ds" / "interaction_journal.jsonl")
+    outbound = [item for item in journal if str(item.get("type") or "") == "artifact_outbound"]
+    assert len(outbound) == 1
+
+
+def test_failed_connector_delivery_does_not_refresh_visible_interaction_timestamp(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("failed delivery freshness quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    quest_service.set_binding_sources(quest["quest_id"], ["qq:direct:test-user"])
+    baseline_ts = "2026-03-28T00:00:00+00:00"
+    quest_service.update_runtime_state(
+        quest_root=quest_root,
+        last_artifact_interact_at=baseline_ts,
+    )
+
+    monkeypatch.setattr(
+        artifact,
+        "_deliver_to_channel",
+        lambda channel_name, payload, connectors=None: {"ok": False, "queued": False, "message": "failed"},
+    )
+
+    result = artifact.interact(
+        quest_root,
+        kind="progress",
+        message="老师，我这里尝试发一条会失败的 connector 更新。",
+        deliver_to_bound_conversations=True,
+        include_recent_inbound_messages=False,
+    )
+
+    assert result["status"] == "ok"
+    runtime_state = read_json(quest_root / ".ds" / "runtime_state.json", {})
+    assert runtime_state["last_artifact_interact_at"] == baseline_ts
+
+
+def test_get_quest_state_and_global_status_expose_continuation_state(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("global status quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    quest_service.update_settings(quest["quest_id"], active_anchor="finalize")
+    quest_service.set_continuation_state(
+        quest_root,
+        policy="wait_for_user_or_resume",
+        anchor="decision",
+        reason="bundle_delivered",
+    )
+
+    state = artifact.get_quest_state(quest_root, detail="summary")
+    assert state["ok"] is True
+    assert state["quest_state"]["continuation_policy"] == "wait_for_user_or_resume"
+    assert state["quest_state"]["continuation_anchor"] == "decision"
+    assert state["quest_state"]["continuation_reason"] == "bundle_delivered"
+
+    global_status = artifact.get_global_status(quest_root, detail="brief", locale="zh")
+    assert global_status["ok"] is True
+    assert global_status["global_status"]["continuation_policy"] == "wait_for_user_or_resume"
+    assert global_status["global_status"]["current_stage"] == "finalize"
+    assert "停驻" in global_status["global_status"]["summary_text"]
+
+
+def test_answer_interaction_is_not_suppressed_like_progress(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("answer interaction quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    first = artifact.interact(
+        quest_root,
+        kind="answer",
+        message="现在论文已经可交付，不需要再等新的主实验。",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+    )
+    second = artifact.interact(
+        quest_root,
+        kind="answer",
+        message="现在论文已经可交付，不需要再等新的主实验。",
+        deliver_to_bound_conversations=False,
+        include_recent_inbound_messages=False,
+    )
+
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+    assert first["artifact_id"] != second["artifact_id"]
+
+    journal = read_jsonl(quest_root / ".ds" / "interaction_journal.jsonl")
+    outbound = [item for item in journal if str(item.get("type") or "") == "artifact_outbound"]
+    assert len(outbound) == 2
+    assert all(str(item.get("kind") or "") == "answer" for item in outbound)
+
+
+def test_answer_interaction_delivers_through_bound_qq_connector(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    connectors = manager.load_named("connectors")
+    connectors["qq"]["enabled"] = True
+    connectors["qq"]["app_id"] = "1903299925"
+    connectors["qq"]["app_secret"] = "qq-secret"
+    connectors["_routing"]["artifact_delivery_policy"] = "primary_only"
+    write_yaml(manager.path_for("connectors"), connectors)
+
+    captured: list[dict] = []
+
+    def fake_qq_deliver(_self, payload, _config):  # noqa: ANN001
+        captured.append(dict(payload))
+        return {"ok": True, "transport": "qq-http"}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.QQConnectorBridge.deliver", fake_qq_deliver)
+
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("answer connector quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+    quest_service.bind_source(quest["quest_id"], "qq:direct:qq-user-answer")
+
+    result = artifact.interact(
+        quest_root,
+        kind="answer",
+        message="现在论文已经可交付，当前没有新的主实验阻塞。",
+        deliver_to_bound_conversations=True,
+        include_recent_inbound_messages=False,
+    )
+
+    assert result["status"] == "ok"
+    assert result["delivery_targets"] == ["qq:direct:qq-user-answer"]
+    assert captured
+    assert captured[-1]["kind"] == "answer"
+    assert captured[-1]["text"] == "现在论文已经可交付，当前没有新的主实验阻塞。"
+
+    outbox = read_jsonl(temp_home / "logs" / "connectors" / "qq" / "outbox.jsonl")
+    assert outbox
+    assert outbox[-1]["kind"] == "answer"
+    assert outbox[-1]["text"] == "现在论文已经可交付，当前没有新的主实验阻塞。"
+
+
+def test_refresh_method_scoreboard_writes_status_files_and_incumbent(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("method scoreboard quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    _confirm_local_baseline(artifact, quest_root, baseline_id="scoreboard-baseline")
+    line = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        title="Scoreboard line",
+        problem="Need a canonical scoreboard entry.",
+        hypothesis="A verified run should appear as the incumbent.",
+        mechanism="Use the existing artifact surfaces to derive one quest-wide line ledger.",
+        next_target="experiment",
+        decision_reason="Open the line for scoreboard testing.",
+    )
+    artifact.record(
+        quest_root,
+        {
+            "kind": "run",
+            "status": "completed",
+            "run_id": "scoreboard-main-001",
+            "run_kind": "main_experiment",
+            "idea_id": line["idea_id"],
+            "branch": line["branch"],
+            "summary": "Main run finished for scoreboard testing.",
+        },
+        workspace_root=Path(line["worktree_root"]),
+    )
+
+    result = artifact.refresh_method_scoreboard(quest_root)
+    assert result["ok"] is True
+    assert Path(result["json_path"]).exists()
+    assert Path(result["md_path"]).exists()
+    scoreboard = read_json(Path(result["json_path"]), {})
+    assert scoreboard["entry_count"] >= 1
+    assert scoreboard["incumbent_title"] == "Scoreboard line"
+    assert any(item.get("status") == "main_verified" for item in scoreboard["entries"])
+
+
+def test_semantically_equivalent_report_is_suppressed(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("semantic report dedupe quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    first = artifact.record(
+        quest_root,
+        {
+            "kind": "report",
+            "stage": "finalize",
+            "report_type": "checkpoint",
+            "summary": "Finalize checkpoint remains unchanged.",
+            "reason": "No new blocker or route change.",
+        },
+    )
+    second = artifact.record(
+        quest_root,
+        {
+            "kind": "report",
+            "stage": "finalize",
+            "report_type": "checkpoint",
+            "summary": "Finalize checkpoint remains unchanged.",
+            "reason": "No new blocker or route change.",
+        },
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["status"] == "semantically_equivalent"
+    assert second["artifact_id"] == first["artifact_id"]
+
+    report_files = list((quest_root / "artifacts" / "reports").glob("*.json"))
+    assert len(report_files) == 1
+
+
+def test_semantically_equivalent_decision_is_suppressed(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("semantic decision dedupe quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    first = artifact.record(
+        quest_root,
+        {
+            "kind": "decision",
+            "stage": "finalize",
+            "verdict": "continue",
+            "action": "continue",
+            "reason": "Continue later from the same checkpoint.",
+            "summary": "Route unchanged.",
+        },
+    )
+    second = artifact.record(
+        quest_root,
+        {
+            "kind": "decision",
+            "stage": "finalize",
+            "verdict": "continue",
+            "action": "continue",
+            "reason": "Continue later from the same checkpoint.",
+            "summary": "Route unchanged.",
+        },
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["status"] == "semantically_equivalent"
+    assert second["artifact_id"] == first["artifact_id"]
+
+    decision_files = list((quest_root / "artifacts" / "decisions").glob("*.json"))
+    assert len(decision_files) == 1
 
 
 def test_artifact_interact_default_agent_instruction_respects_english_locale(temp_home: Path) -> None:

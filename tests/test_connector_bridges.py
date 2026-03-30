@@ -11,7 +11,11 @@ from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.shared import write_yaml
 from deepscientist.skills import SkillInstaller
 from deepscientist.quest import QuestService
-from deepscientist.connector.weixin_support import remember_weixin_context_token
+from deepscientist.connector.weixin_support import (
+    get_weixin_context_entry,
+    mark_weixin_context_stale,
+    remember_weixin_context_token,
+)
 
 
 def test_base_connector_bridge_render_text_ignores_machine_metadata_attachments() -> None:
@@ -256,6 +260,61 @@ def test_bridge_direct_outbound_qq_supports_image_and_file_upload(monkeypatch, t
     assert file_uploads[-1]["file_name"] == "report.pdf"
     assert any(body.get("msg_type") == 7 for body in image_media_messages)
     assert any(body.get("msg_type") == 7 for body in file_media_messages)
+
+
+def test_bridge_direct_outbound_qq_internal_auto_image_bypasses_experimental_flag(
+    monkeypatch,
+    temp_home: Path,
+) -> None:
+    QQConnectorBridge._token_cache = {}
+    _app, _quest_id = _setup_app(
+        temp_home,
+        connector_name="qq",
+        extra={
+            "app_id": "1903299925",
+            "app_secret": "qq-secret",
+            "enable_file_upload_experimental": False,
+        },
+    )
+    app = DaemonApp(temp_home)
+
+    image_path = temp_home / "auto-chart.png"
+    image_path.write_bytes(b"png-data")
+    captured: list[tuple[str, dict, dict]] = []
+
+    def fake_urlopen(request, timeout=8):  # noqa: ANN001
+        body = json.loads(request.data.decode("utf-8")) if request.data else {}
+        captured.append((request.full_url, dict(request.header_items()), body))
+        if request.full_url == "https://bots.qq.com/app/getAppAccessToken":
+            return _FakeResponse('{"access_token":"qq-access-token","expires_in":7200}', status=200)
+        if request.full_url.endswith("/files"):
+            return _FakeResponse('{"file_info":"FILE_INFO_AUTO","ttl":3600}', status=200)
+        return _FakeResponse('{"id":"msg-auto","timestamp":"1741440099"}', status=200)
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.urlopen", fake_urlopen)
+
+    result = app.channels["qq"].send(
+        {
+            "conversation_id": "qq:direct:user-openid-auto",
+            "message": "Auto chart upload test",
+            "attachments": [
+                {
+                    "kind": "path",
+                    "path": str(image_path),
+                    "content_type": "image/png",
+                    "connector_delivery": {
+                        "qq": {
+                            "media_kind": "image",
+                            "allow_internal_auto_media": True,
+                        }
+                    },
+                }
+            ],
+        }
+    )
+
+    assert result["delivery"]["ok"] is True
+    assert any(url.endswith("/v2/users/user-openid-auto/files") for url, _headers, _body in captured)
 
 
 def test_qq_channel_auto_uses_recent_inbound_message_as_reply_target(monkeypatch, temp_home: Path) -> None:
@@ -597,3 +656,251 @@ def test_bridge_direct_outbound_weixin_retries_text_send_after_ret_minus_2(monke
 
     assert result["delivery"]["ok"] is True
     assert [body["msg"]["item_list"][0]["type"] for body in sends] == [1, 1]
+
+
+def test_bridge_direct_outbound_weixin_suppresses_low_priority_messages_when_context_is_stale(
+    monkeypatch,
+    temp_home: Path,
+) -> None:
+    _app, _quest_id = _setup_app(
+        temp_home,
+        connector_name="weixin",
+        extra={"bot_token": "wx-token", "account_id": "wx-bot-1@im.bot"},
+    )
+    app = DaemonApp(temp_home)
+    connector_root = temp_home / "logs" / "connectors" / "weixin"
+    remember_weixin_context_token(
+        connector_root,
+        user_id="wx-user-stale@im.wechat",
+        context_token="ctx-token-stale",
+        account_id="wx-bot-1@im.bot",
+    )
+    mark_weixin_context_stale(
+        connector_root,
+        user_id="wx-user-stale@im.wechat",
+        error="Weixin sendmessage failed with ret=-2 errcode=0",
+        kind="progress",
+    )
+
+    sends: list[dict] = []
+
+    def fake_send_weixin_message(*, base_url, token, body, route_tag=None, timeout_ms=15_000):  # noqa: ANN001
+        sends.append(body)
+        return {}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.send_weixin_message", fake_send_weixin_message)
+
+    result = app.channels["weixin"].send(
+        {
+            "conversation_id": "weixin:direct:wx-user-stale@im.wechat",
+            "message": "should be deferred until next inbound refresh",
+            "kind": "progress",
+        }
+    )
+
+    assert sends == []
+    assert result["delivery"]["queued"] is True
+    assert "refreshes context_token" in " ".join(result["delivery"].get("warnings") or [])
+
+
+def test_bridge_direct_outbound_weixin_queues_low_priority_messages_without_context_token(temp_home: Path) -> None:
+    _app, _quest_id = _setup_app(
+        temp_home,
+        connector_name="weixin",
+        extra={"bot_token": "wx-token", "account_id": "wx-bot-1@im.bot"},
+    )
+    app = DaemonApp(temp_home)
+
+    result = app.channels["weixin"].send(
+        {
+            "conversation_id": "weixin:direct:wx-user-no-context@im.wechat",
+            "message": "queue until first inbound",
+            "kind": "progress",
+        }
+    )
+
+    assert result["delivery"]["queued"] is True
+    assert "Waiting for the next inbound message" in " ".join(result["delivery"].get("warnings") or [])
+
+
+def test_bridge_direct_outbound_weixin_ret_minus_2_queues_low_priority_message_for_replay(
+    monkeypatch,
+    temp_home: Path,
+) -> None:
+    _app, _quest_id = _setup_app(
+        temp_home,
+        connector_name="weixin",
+        extra={"bot_token": "wx-token", "account_id": "wx-bot-1@im.bot"},
+    )
+    app = DaemonApp(temp_home)
+    connector_root = temp_home / "logs" / "connectors" / "weixin"
+    remember_weixin_context_token(
+        connector_root,
+        user_id="wx-user-ret2@im.wechat",
+        context_token="ctx-token-ret2",
+        account_id="wx-bot-1@im.bot",
+    )
+
+    def fake_send_weixin_message(*, base_url, token, body, route_tag=None, timeout_ms=15_000):  # noqa: ANN001
+        raise RuntimeError("Weixin sendmessage failed with ret=-2 errcode=0")
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.send_weixin_message", fake_send_weixin_message)
+    monkeypatch.setattr("deepscientist.bridges.connectors.time.sleep", lambda _seconds: None)
+
+    result = app.channels["weixin"].send(
+        {
+            "conversation_id": "weixin:direct:wx-user-ret2@im.wechat",
+            "message": "stale retry text",
+            "kind": "progress",
+        }
+    )
+
+    assert result["delivery"]["queued"] is True
+    context_entry = get_weixin_context_entry(connector_root, "wx-user-ret2@im.wechat")
+    assert context_entry["stale_context"] is True
+
+
+def test_bridge_direct_outbound_weixin_clears_stale_context_after_new_inbound(
+    monkeypatch,
+    temp_home: Path,
+) -> None:
+    _app, _quest_id = _setup_app(
+        temp_home,
+        connector_name="weixin",
+        extra={"bot_token": "wx-token", "account_id": "wx-bot-1@im.bot"},
+    )
+    app = DaemonApp(temp_home)
+    connector_root = temp_home / "logs" / "connectors" / "weixin"
+    remember_weixin_context_token(
+        connector_root,
+        user_id="wx-user-refresh@im.wechat",
+        context_token="ctx-token-old",
+        account_id="wx-bot-1@im.bot",
+    )
+    mark_weixin_context_stale(
+        connector_root,
+        user_id="wx-user-refresh@im.wechat",
+        error="Weixin sendmessage failed with ret=-2 errcode=0",
+        kind="progress",
+    )
+    # Simulate a fresh inbound that refreshes the session continuity token.
+    remember_weixin_context_token(
+        connector_root,
+        user_id="wx-user-refresh@im.wechat",
+        context_token="ctx-token-new",
+        account_id="wx-bot-1@im.bot",
+        message_id="msg-new",
+    )
+
+    sends: list[dict] = []
+
+    def fake_send_weixin_message(*, base_url, token, body, route_tag=None, timeout_ms=15_000):  # noqa: ANN001
+        sends.append(body)
+        return {}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.send_weixin_message", fake_send_weixin_message)
+
+    result = app.channels["weixin"].send(
+        {
+            "conversation_id": "weixin:direct:wx-user-refresh@im.wechat",
+            "message": "fresh inbound cleared stale context",
+            "kind": "progress",
+        }
+    )
+
+    assert len(sends) == 1
+    assert result["delivery"]["ok"] is True
+
+
+def test_daemon_weixin_new_inbound_replays_latest_five_queued_messages_once(
+    monkeypatch,
+    temp_home: Path,
+) -> None:
+    _app, _quest_id = _setup_app(
+        temp_home,
+        connector_name="weixin",
+        extra={
+            "bot_token": "wx-token",
+            "account_id": "wx-bot-1@im.bot",
+            "stale_replay_latest_limit": 5,
+            "stale_replay_interval_seconds": 2.0,
+        },
+    )
+    app = DaemonApp(temp_home)
+    connector_root = temp_home / "logs" / "connectors" / "weixin"
+    remember_weixin_context_token(
+        connector_root,
+        user_id="wx-user-replay@im.wechat",
+        context_token="ctx-token-old",
+        account_id="wx-bot-1@im.bot",
+    )
+    mark_weixin_context_stale(
+        connector_root,
+        user_id="wx-user-replay@im.wechat",
+        error="Weixin sendmessage failed with ret=-2 errcode=0",
+        kind="progress",
+    )
+    for index in range(1, 8):
+        result = app.channels["weixin"].send(
+            {
+                "conversation_id": "weixin:direct:wx-user-replay@im.wechat",
+                "message": f"queued-{index}",
+                "kind": "progress",
+            }
+        )
+        assert result["delivery"]["queued"] is True
+    remember_weixin_context_token(
+        connector_root,
+        user_id="wx-user-replay@im.wechat",
+        context_token="ctx-token-new",
+        account_id="wx-bot-1@im.bot",
+        message_id="msg-fresh",
+    )
+
+    sends: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_send_weixin_message(*, base_url, token, body, route_tag=None, timeout_ms=15_000):  # noqa: ANN001
+        item = body["msg"]["item_list"][0]
+        sends.append(str(item.get("text_item", {}).get("text") or ""))
+        return {}
+
+    monkeypatch.setattr("deepscientist.bridges.connectors.send_weixin_message", fake_send_weixin_message)
+    monkeypatch.setattr("deepscientist.daemon.app.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(app, "_route_connector_message", lambda connector_name, message: {"ok": True, "connector": connector_name})
+
+    result = app.handle_connector_inbound(
+        "weixin",
+        {
+            "conversation_id": "weixin:direct:wx-user-replay@im.wechat",
+            "chat_type": "direct",
+            "direct_id": "wx-user-replay@im.wechat",
+            "sender_id": "wx-user-replay@im.wechat",
+            "sender_name": "wx-user-replay@im.wechat",
+            "message_id": "msg-fresh",
+            "text": "继续",
+        },
+    )
+
+    replay_meta = result["normalized"]["_weixin_replay"]
+    assert replay_meta["replayed_count"] == 5
+    assert replay_meta["dropped_count"] == 2
+    assert sends == ["queued-3", "queued-4", "queued-5", "queued-6", "queued-7"]
+    assert sleeps == [2.0, 2.0, 2.0, 2.0]
+
+    sends.clear()
+    sleeps.clear()
+    app.handle_connector_inbound(
+        "weixin",
+        {
+            "conversation_id": "weixin:direct:wx-user-replay@im.wechat",
+            "chat_type": "direct",
+            "direct_id": "wx-user-replay@im.wechat",
+            "sender_id": "wx-user-replay@im.wechat",
+            "sender_name": "wx-user-replay@im.wechat",
+            "message_id": "msg-fresh-2",
+            "text": "继续",
+        },
+    )
+    assert sends == []
+    assert sleeps == []

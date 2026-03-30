@@ -17,6 +17,8 @@ class RunRequest:
     approval_policy: str
     sandbox_mode: str
     turn_reason: str = "user_message"
+    turn_intent: str = "continue_stage"
+    turn_mode: str = "stage_execution"
     reasoning_effort: str | None = None
     turn_id: str | None = None
     attempt_index: int = 1

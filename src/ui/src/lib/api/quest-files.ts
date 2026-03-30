@@ -27,6 +27,7 @@ type CachedQuestFile = FileAPIResponse & {
 }
 
 const treeCache = new Map<string, { expiresAt: number; payload: FileTreeResponse }>()
+const treeInFlight = new Map<string, Promise<FileTreeResponse>>()
 const fileCache = new Map<string, CachedQuestFile>()
 
 type QuestTreeOptions = {
@@ -269,25 +270,42 @@ async function loadQuestTree(projectId: string, force = false): Promise<FileTree
   if (!force && cached && cached.expiresAt > Date.now()) {
     return cached.payload
   }
+  const inFlight = treeInFlight.get(projectId)
+  if (inFlight) {
+    return inFlight
+  }
 
-  const explorer = await questClient.explorer(projectId)
-  const payload = flattenQuestExplorerPayload(projectId, explorer)
-  treeCache.set(projectId, {
-    expiresAt: Date.now() + TREE_CACHE_TTL_MS,
-    payload,
-  })
-  return payload
+  const promise = questClient
+    .explorer(projectId)
+    .then((explorer) => {
+      const payload = flattenQuestExplorerPayload(projectId, explorer)
+      treeCache.set(projectId, {
+        expiresAt: Date.now() + TREE_CACHE_TTL_MS,
+        payload,
+      })
+      return payload
+    })
+    .finally(() => {
+      if (treeInFlight.get(projectId) === promise) {
+        treeInFlight.delete(projectId)
+      }
+    })
+
+  treeInFlight.set(projectId, promise)
+  return promise
 }
 
 export function invalidateQuestFileTree(projectId?: string | null) {
   const normalizedProjectId = typeof projectId === 'string' ? projectId.trim() : ''
   if (!normalizedProjectId) {
     treeCache.clear()
+    treeInFlight.clear()
     fileCache.clear()
     return
   }
 
   treeCache.delete(normalizedProjectId)
+  treeInFlight.delete(normalizedProjectId)
   for (const key of Array.from(fileCache.keys())) {
     const ref = parseQuestNodeId(key)
     if (ref?.projectId === normalizedProjectId) {

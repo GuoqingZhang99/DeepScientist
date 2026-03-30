@@ -58,6 +58,15 @@ def test_system_prompt_stays_compact_and_delegates_stage_sop() -> None:
     assert len(text) < 20000
 
 
+def test_system_prompt_requires_outline_and_analysis_mapping_for_paper_work() -> None:
+    text = _system_prompt_text()
+
+    assert "authoritative paper contract" in text
+    assert "paper experiment matrix" in text
+    assert "experiments/analysis-results/" in text
+    assert "repair that mapping before continuing drafting or finalize work" in text
+
+
 def test_system_prompt_keeps_compact_reference_wording_templates() -> None:
     text = _system_prompt_text()
 
@@ -138,6 +147,70 @@ def test_experiment_skill_requires_incremental_seven_field_recording() -> None:
     assert "artifact.record_main_experiment(...)" in text
 
 
+def test_optimize_skill_distinguishes_candidate_briefs_lines_and_attempts() -> None:
+    text = _skill_text("optimize")
+
+    assert "submission_mode='candidate'" in text
+    assert "submission_mode='line'" in text
+    assert "`brief`" in text
+    assert "`rank`" in text
+    assert "`seed`" in text
+    assert "`loop`" in text
+    assert "`fusion`" in text
+    assert "`debug`" in text
+    assert "optimization_candidate" in text
+    assert "artifact.get_optimization_frontier(...)" in text
+    assert "Do not create a new Git branch/worktree for every implementation-level candidate." in text
+    assert "Only promote a candidate brief into a durable line" in text
+    assert "OPTIMIZE_CHECKLIST.md" in text
+    assert "CANDIDATE_BOARD.md" in text
+    assert "references/optimize-checklist-template.md" in text
+    assert "references/candidate-board-template.md" in text
+    assert "references/method-brief-template.md" in text
+    assert "references/candidate-ranking-template.md" in text
+    assert "references/frontier-review-template.md" in text
+    assert "references/optimization-memory-template.md" in text
+    assert "references/fusion-playbook.md" in text
+    assert "references/codegen-route-playbook.md" in text
+    assert "references/debug-response-template.md" in text
+    assert "references/prompt-patterns.md" in text
+    assert "references/plateau-response-playbook.md" in text
+    assert "stepwise generation" in text
+    assert "diff / patch generation" in text
+    assert "full rewrite" in text
+    assert "Mandatory first-call sequence" in text
+    assert "artifact.get_optimization_frontier(...)" in text
+    assert "memory.search(...)" in text
+    assert "Stall-recovery protocol" in text
+    assert "InternAgent maps most naturally" in text
+    assert "MLEvolve maps most naturally" in text
+    assert "Internal submode selection" in text
+    assert "coverage contract" in text
+    assert "distinct promotion policy" in text
+    assert "mechanism family" in text
+    assert "change-layer diversity" in text
+    assert "Family-shift trigger" in text
+    assert "Task-category primer" in text
+    assert "simple-first" in text
+    assert "one atomic improvement per pass" in text
+    assert "bugfix-only" in text
+    assert "same-line local attempt memory" in text
+
+
+def test_algorithm_first_companion_skills_handoff_into_optimize() -> None:
+    idea_text = _skill_text("idea")
+    decision_text = _skill_text("decision")
+    experiment_text = _skill_text("experiment")
+
+    assert "Algorithm-first exception" in idea_text
+    assert "optimization brief frontier" in idea_text
+    assert "`artifact.get_optimization_frontier(...)`" in decision_text
+    assert "frontier says `explore`" in decision_text
+    assert "frontier says `fusion`" in decision_text
+    assert "execution surface of `optimize`" in experiment_text
+    assert "return to `optimize` or `decision` for frontier review" in experiment_text
+
+
 def test_analysis_campaign_skill_requires_outline_bound_campaign_fields() -> None:
     text = _skill_text("analysis-campaign")
 
@@ -164,8 +237,13 @@ def test_analysis_campaign_skill_requires_outline_bound_campaign_fields() -> Non
     assert "comparability" in text
     assert "paper/paper_experiment_matrix.md" in text
     assert "`exp_id`" in text
+    assert "section_id" in text
+    assert "item_id" in text
+    assert "claim_links" in text
+    assert "paper_role" in text
     assert "highlight-validation" in text or "highlight validation" in text
     assert "efficiency or cost" in text
+    assert "references/writing-facing-slice-examples.md" in text
 
 
 def test_write_skill_prefers_flexible_outline_flow_and_bundle_submission() -> None:
@@ -189,6 +267,12 @@ def test_write_skill_prefers_flexible_outline_flow_and_bundle_submission() -> No
     assert "verification checkpoints" in text
     assert "paper/paper_experiment_matrix.md" in text
     assert "paper/paper_experiment_matrix.json" in text
+    assert "completed relevant analysis results under `experiments/analysis-results/`" in text
+    assert "do not allow completed analysis results to remain paper-invisible" in text
+    assert "paper/evidence_ledger.json" in text or "paper/evidence_ledger.md" in text
+    assert "references/outline-evidence-contract-example.md" in text
+    assert "result_table" in text
+    assert "stop drafting and repair the paper contract first" in text
     assert "references/paper-experiment-matrix-template.md" in text
     assert "highlight hypotheses" in text
     assert "efficiency / cost / latency / token-overhead checks" in text
@@ -216,6 +300,7 @@ def test_idea_skill_adds_problem_importance_and_first_principles_memo() -> None:
     assert "whether the direction is emerging, stable, or late" in text
     assert "under-recognized" in text
     assert "a short first-principles memo" in text
+    assert "references/outline-seeding-example.md" in text
 
 
 def test_idea_skill_requires_bounded_divergence_and_why_now_checks() -> None:
@@ -255,6 +340,8 @@ def test_finalize_and_decision_skills_require_bundle_and_outline_actions() -> No
     decision_text = _skill_text("decision")
 
     assert "paper/paper_bundle_manifest.json" in finalize_text
+    assert "paper/evidence_ledger.json" in finalize_text
+    assert "evidence_ledger_path" in finalize_text
     assert "baseline_inventory_path" in finalize_text
     assert "release/open_source/manifest.json" in finalize_text
     assert "outline_path" in finalize_text
@@ -348,6 +435,7 @@ def test_stage_skill_progress_contracts_match_tool_call_keepalive_policy() -> No
     aligned_skills = (
         "intake-audit",
         "idea",
+        "optimize",
         "experiment",
         "analysis-campaign",
         "write",

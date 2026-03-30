@@ -768,7 +768,15 @@ npm --prefix src/ui run build</pre>
         return self.app.control_quest(quest_id, action=action, source=source)
 
     def workflow(self, quest_id: str) -> dict:
-        return self.app.quest_service.workflow(quest_id)
+        payload = self.app.quest_service.workflow(quest_id)
+        quest_root = self._fresh_quest_service()._quest_root(quest_id)
+        try:
+            frontier = self.app.artifact_service.get_optimization_frontier(quest_root)
+        except Exception:
+            frontier = {"ok": False}
+        if isinstance(payload, dict):
+            payload["optimization_frontier"] = frontier.get("optimization_frontier") if isinstance(frontier, dict) else None
+        return payload
 
     def quest_layout(self, quest_id: str) -> dict:
         quest_root = self._fresh_quest_service()._quest_root(quest_id)
@@ -837,11 +845,40 @@ npm --prefix src/ui run build</pre>
             branch_summary = self.app.artifact_service.list_research_branches(quest_root)
         except Exception:
             branch_summary = {"branches": []}
+        try:
+            optimization_frontier = self.app.artifact_service.get_optimization_frontier(quest_root)
+        except Exception:
+            optimization_frontier = {"ok": False}
         branch_summary_by_name = {
             str(item.get("branch_name") or "").strip(): item
             for item in (branch_summary.get("branches") or [])
             if str(item.get("branch_name") or "").strip()
         }
+        frontier_payload = (
+            dict(optimization_frontier.get("optimization_frontier") or {})
+            if isinstance(optimization_frontier, dict)
+            and isinstance(optimization_frontier.get("optimization_frontier"), dict)
+            else {}
+        )
+        best_branch_name = str(((frontier_payload.get("best_branch") or {}) if isinstance(frontier_payload.get("best_branch"), dict) else {}).get("branch_name") or "").strip() or None
+        stagnant_branch_names = {
+            str(item.get("branch_name") or "").strip()
+            for item in (frontier_payload.get("stagnant_branches") or [])
+            if isinstance(item, dict) and str(item.get("branch_name") or "").strip()
+        }
+        fusion_candidate_names = {
+            str(item.get("branch_name") or "").strip()
+            for item in (frontier_payload.get("fusion_candidates") or [])
+            if isinstance(item, dict) and str(item.get("branch_name") or "").strip()
+        }
+        candidate_count_by_branch: dict[str, int] = {}
+        for item in frontier_payload.get("implementation_candidates") or []:
+            if not isinstance(item, dict):
+                continue
+            branch_name = str(item.get("branch") or "").strip()
+            if not branch_name:
+                continue
+            candidate_count_by_branch[branch_name] = candidate_count_by_branch.get(branch_name, 0) + 1
         active_campaign = {}
         if active_analysis_campaign_id:
             try:
@@ -853,6 +890,11 @@ npm --prefix src/ui run build</pre>
                 active_campaign = {}
         campaign_parent_branch = (
             str(active_campaign.get("parent_branch") or "").strip() or None
+            if isinstance(active_campaign, dict)
+            else None
+        )
+        campaign_paper_line_branch = (
+            str(active_campaign.get("paper_line_branch") or "").strip() or None
             if isinstance(active_campaign, dict)
             else None
         )
@@ -903,6 +945,14 @@ npm --prefix src/ui run build</pre>
                     workflow_state["status_reason"] = "Analysis slice pending."
                 return workflow_state
             if branch_kind == "paper":
+                if campaign_paper_line_branch and ref == campaign_paper_line_branch and next_pending_slice_id is not None:
+                    workflow_state["analysis_state"] = "active"
+                    workflow_state["writing_state"] = "blocked_by_analysis"
+                    workflow_state["status_reason"] = (
+                        f"Analysis {campaign_completed_slices}/{campaign_total_slices} done"
+                        + (f" · next: {next_pending_slice_id}" if next_pending_slice_id else "")
+                    )
+                    return workflow_state
                 if ref == current_workspace_branch and workspace_mode == "paper":
                     workflow_state["writing_state"] = "completed" if active_anchor == "finalize" else "active"
                     workflow_state["status_reason"] = (
@@ -912,7 +962,7 @@ npm --prefix src/ui run build</pre>
                     workflow_state["writing_state"] = "ready"
                     workflow_state["status_reason"] = "Writing workspace prepared."
                 return workflow_state
-            if campaign_parent_branch and ref == campaign_parent_branch:
+            if campaign_parent_branch and not campaign_paper_line_branch and ref == campaign_parent_branch:
                 workflow_state["analysis_state"] = "completed" if next_pending_slice_id is None else "active"
                 if has_main_result:
                     workflow_state["writing_state"] = "ready" if next_pending_slice_id is None else "blocked_by_analysis"
@@ -955,6 +1005,11 @@ npm --prefix src/ui run build</pre>
             node["latest_main_experiment"] = summary.get("latest_main_experiment")
             node["experiment_count"] = summary.get("experiment_count")
             node["has_main_result"] = summary.get("has_main_result")
+            node["optimization_mode"] = frontier_payload.get("mode")
+            node["optimization_best"] = ref == best_branch_name
+            node["optimization_stagnant"] = ref in stagnant_branch_names
+            node["optimization_fusion_candidate"] = ref in fusion_candidate_names
+            node["optimization_candidate_count"] = candidate_count_by_branch.get(ref, 0)
         return payload
 
     def git_log(self, quest_id: str, path: str) -> dict:

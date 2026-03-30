@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..artifact.metrics import extract_latest_metric
-from ..shared import read_json, run_command
+from ..shared import read_json, run_command, slugify
 from .service import branch_exists, current_branch, head_commit
 
 
@@ -68,6 +68,12 @@ def list_branch_canvas(repo: Path, *, quest_id: str) -> dict[str, Any]:
             "run_id": state.get("run_id"),
             "run_kind": state.get("run_kind"),
             "idea_id": state.get("idea_id"),
+            "paper_line_id": state.get("paper_line_id"),
+            "paper_line_branch": state.get("paper_line_branch"),
+            "selected_outline_ref": state.get("selected_outline_ref"),
+            "source_branch": state.get("source_branch"),
+            "source_run_id": state.get("source_run_id"),
+            "source_idea_id": state.get("source_idea_id"),
             "parent_branch_recorded": state.get("parent_branch"),
             "worktree_root": state.get("worktree_root"),
             "latest_metric": state.get("latest_metric"),
@@ -356,7 +362,156 @@ def _collect_branch_state(repo: Path) -> dict[str, dict[str, Any]]:
         for item in state.get("recent_artifacts", []):
             if isinstance(item, dict):
                 item.pop("_sort_key", None)
+    for workspace_root in _canvas_workspace_roots(repo):
+        state_path = workspace_root / "paper" / "paper_line_state.json"
+        if not state_path.exists():
+            continue
+        payload = read_json(state_path, {})
+        if not isinstance(payload, dict) or not payload:
+            continue
+        paper_branch = str(payload.get("paper_branch") or "").strip() or current_branch(workspace_root)
+        if not paper_branch:
+            continue
+        state = branch_state[paper_branch]
+        state.setdefault("branch", paper_branch)
+        state["worktree_root"] = str(workspace_root)
+        state["paper_line_id"] = str(payload.get("paper_line_id") or "").strip() or state.get("paper_line_id")
+        state["paper_line_branch"] = paper_branch
+        state["selected_outline_ref"] = str(payload.get("selected_outline_ref") or "").strip() or state.get("selected_outline_ref")
+        state["source_branch"] = str(payload.get("source_branch") or "").strip() or state.get("source_branch")
+        state["source_run_id"] = str(payload.get("source_run_id") or "").strip() or state.get("source_run_id")
+        state["source_idea_id"] = str(payload.get("source_idea_id") or "").strip() or state.get("source_idea_id")
+        state["updated_at"] = str(payload.get("updated_at") or state.get("updated_at") or "")
+        if not state.get("parent_branch") and state.get("source_branch"):
+            state["parent_branch"] = state.get("source_branch")
+    for workspace_root in _canvas_workspace_roots(repo):
+        paper_root = workspace_root / "paper"
+        if not paper_root.exists():
+            continue
+        state_path = paper_root / "paper_line_state.json"
+        if state_path.exists():
+            continue
+        selected_outline = read_json(paper_root / "selected_outline.json", {})
+        bundle_manifest = read_json(paper_root / "paper_bundle_manifest.json", {})
+        selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
+        bundle_manifest = bundle_manifest if isinstance(bundle_manifest, dict) else {}
+        if not selected_outline and not bundle_manifest:
+            continue
+        paper_branch = str(bundle_manifest.get("paper_branch") or "").strip() or current_branch(workspace_root)
+        if not paper_branch:
+            continue
+        selected_outline_ref = str(
+            selected_outline.get("outline_id") or bundle_manifest.get("selected_outline_ref") or ""
+        ).strip() or None
+        source_run_id = str(bundle_manifest.get("source_run_id") or "").strip() or None
+        state = branch_state[paper_branch]
+        state.setdefault("branch", paper_branch)
+        state["worktree_root"] = str(workspace_root)
+        state["paper_line_id"] = state.get("paper_line_id") or slugify(
+            "::".join([paper_branch or "paper", selected_outline_ref or "outline", source_run_id or "run"]),
+            "paper-line",
+        )
+        state["paper_line_branch"] = paper_branch
+        state["selected_outline_ref"] = selected_outline_ref or state.get("selected_outline_ref")
+        state["source_branch"] = str(bundle_manifest.get("source_branch") or "").strip() or state.get("source_branch")
+        state["source_run_id"] = source_run_id or state.get("source_run_id")
+        state["source_idea_id"] = str(bundle_manifest.get("source_idea_id") or "").strip() or state.get("source_idea_id")
+        if not state.get("parent_branch") and state.get("source_branch"):
+            state["parent_branch"] = state.get("source_branch")
+    campaigns_root = repo / ".ds" / "analysis_campaigns"
+    if campaigns_root.exists():
+        for path in sorted(campaigns_root.glob("*.json")):
+            manifest = read_json(path, {})
+            if not isinstance(manifest, dict) or not manifest:
+                continue
+            campaign_id = str(manifest.get("campaign_id") or path.stem).strip() or path.stem
+            paper_line_id = str(manifest.get("paper_line_id") or "").strip() or None
+            paper_line_branch = str(manifest.get("paper_line_branch") or "").strip() or None
+            analysis_parent_branch = str(manifest.get("parent_branch") or "").strip() or None
+            selected_outline_ref = str(manifest.get("selected_outline_ref") or "").strip() or None
+            source_idea_id = str(manifest.get("active_idea_id") or "").strip() or None
+            if not paper_line_branch:
+                paper_line_branch = _infer_paper_line_branch_for_campaign(
+                    manifest,
+                    branch_state=branch_state,
+                )
+            for item in manifest.get("slices") or []:
+                if not isinstance(item, dict):
+                    continue
+                branch_name = str(item.get("branch") or "").strip()
+                if not branch_name:
+                    continue
+                state = branch_state[branch_name]
+                state.setdefault("branch", branch_name)
+                state["campaign_id"] = campaign_id
+                state["paper_line_id"] = paper_line_id or state.get("paper_line_id")
+                state["paper_line_branch"] = paper_line_branch or state.get("paper_line_branch")
+                state["analysis_parent_branch"] = analysis_parent_branch or state.get("analysis_parent_branch")
+                state["selected_outline_ref"] = selected_outline_ref or state.get("selected_outline_ref")
+                state["source_idea_id"] = source_idea_id or state.get("source_idea_id")
+                if item.get("worktree_root"):
+                    state["worktree_root"] = item.get("worktree_root")
     return branch_state
+
+
+def _canvas_workspace_roots(repo: Path) -> list[Path]:
+    roots: list[Path] = [repo]
+    research_state = read_json(repo / ".ds" / "research_state.json", {})
+    preferred_raw = str((research_state or {}).get("research_head_worktree_root") or "").strip()
+    if preferred_raw:
+        preferred = Path(preferred_raw)
+        if preferred.exists():
+            roots.append(preferred)
+    worktrees_root = repo / ".ds" / "worktrees"
+    if worktrees_root.exists():
+        roots.extend(path for path in sorted(worktrees_root.iterdir()) if path.is_dir())
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(root)
+    return deduped
+
+
+def _infer_paper_line_branch_for_campaign(
+    manifest: dict[str, Any],
+    *,
+    branch_state: dict[str, dict[str, Any]],
+) -> str | None:
+    selected_outline_ref = str(manifest.get("selected_outline_ref") or "").strip() or None
+    source_idea_id = str(manifest.get("active_idea_id") or "").strip() or None
+    source_run_id = str(manifest.get("parent_run_id") or "").strip() or None
+    source_branch = str(manifest.get("parent_branch") or "").strip() or None
+    ranked: list[tuple[int, str]] = []
+    for branch_name, state in branch_state.items():
+        if not branch_name.startswith("paper/"):
+            continue
+        score = 0
+        candidate_outline = str(state.get("selected_outline_ref") or "").strip() or None
+        candidate_idea = str(state.get("source_idea_id") or "").strip() or None
+        candidate_run = str(state.get("source_run_id") or "").strip() or None
+        candidate_branch = str(state.get("source_branch") or "").strip() or None
+        if selected_outline_ref:
+            if candidate_outline != selected_outline_ref:
+                continue
+            score += 2
+        if source_idea_id and candidate_idea == source_idea_id:
+            score += 4
+        if source_run_id and candidate_run == source_run_id:
+            score += 3
+        if source_branch and candidate_branch == source_branch:
+            score += 2
+        if score > 0:
+            ranked.append((score, branch_name))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+        return None
+    return ranked[0][1]
 
 
 def _resolve_run_result_payload(repo: Path, record: dict[str, Any]) -> dict[str, Any]:
@@ -469,9 +624,17 @@ def _infer_parent_ref(
 ) -> str | None:
     if ref == default_ref:
         return None
+    if classifications[ref]["branch_kind"] == "analysis":
+        paper_line_branch = str(state.get("paper_line_branch") or "").strip()
+        if paper_line_branch and paper_line_branch in refs and paper_line_branch != ref:
+            return paper_line_branch
     parent_branch = str(state.get("parent_branch") or "").strip()
     if parent_branch and parent_branch in refs and parent_branch != ref:
         return parent_branch
+    if classifications[ref]["branch_kind"] == "paper":
+        source_branch = str(state.get("source_branch") or "").strip()
+        if source_branch and source_branch in refs and source_branch != ref:
+            return source_branch
     if ref.startswith("idea/"):
         return default_ref
     if state.get("idea_id"):
@@ -479,6 +642,9 @@ def _infer_parent_ref(
         if candidate in refs:
             return candidate
     if classifications[ref]["branch_kind"] == "analysis":
+        analysis_parent_branch = str(state.get("analysis_parent_branch") or "").strip()
+        if analysis_parent_branch and analysis_parent_branch in refs and analysis_parent_branch != ref:
+            return analysis_parent_branch
         major_refs = [
             candidate
             for candidate, meta in classifications.items()

@@ -5,6 +5,7 @@ ARTIFACT_DIRS = {
     "idea": "ideas",
     "decision": "decisions",
     "progress": "progress",
+    "answer": "answers",
     "milestone": "milestones",
     "run": "runs",
     "report": "reports",
@@ -61,6 +62,8 @@ def guidance_for_kind(kind: str) -> str:
         return "Run recorded. Compare metrics, then decide whether to continue, branch, or stop."
     if kind == "milestone":
         return "Milestone recorded. Send a concise progress update to the active surface."
+    if kind == "answer":
+        return "Answer stored. This was a direct user-facing reply, not a long-running progress checkpoint."
     if kind == "report":
         return "Report saved. Use it to update SUMMARY.md and the next planning step."
     if kind == "approval":

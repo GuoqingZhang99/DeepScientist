@@ -2522,8 +2522,8 @@ export const quickstartTutorialDemoScenario: TutorialDemoScenario = {
   questId: '025',
   title: 'Memory',
   subtitle: {
-    en: 'A guided research workspace showing baseline recovery, branching ideas, failed pilots, a main run, analysis, and writing in one place.',
-    zh: '一个引导式科研工作区，把 baseline 恢复、idea 分叉、失败试错、主实验、分析和写作都放在同一个界面里。',
+    en: 'A guided research workspace showing baseline recovery, branching ideas, failed pilots, a main run, analysis, paper-line health, and writing in one place.',
+    zh: '一个引导式科研工作区，把 baseline 恢复、idea 分叉、失败试错、主实验、分析、paper line 健康状态和写作都放在同一个界面里。',
   },
   branch: 'run/ccpm-memory-map',
   baselineLabel: 'mandela-effect-official / gpt-oss-120b-dual-sglang',
@@ -2555,8 +2555,8 @@ export const quickstartTutorialDemoScenario: TutorialDemoScenario = {
       id: 'chat-2',
       role: 'assistant',
       content: {
-        en: 'Use this workspace like a live project: Explorer shows files, Canvas shows structure, Details summarizes evidence, and Studio shows the execution trace.',
-        zh: '你可以把这个工作区当成一个正在推进的真实项目：Explorer 看文件，Canvas 看结构，Details 看证据摘要，Studio 看执行轨迹。',
+        en: 'Use this workspace like a live project: Explorer shows files, Canvas shows structure, Details now highlights paper-line health and blockers, and Studio shows the execution trace.',
+        zh: '你可以把这个工作区当成一个正在推进的真实项目：Explorer 看文件，Canvas 看结构，Details 现在会突出 paper line 的健康状态与阻塞项，Studio 看执行轨迹。',
       },
     },
   ],

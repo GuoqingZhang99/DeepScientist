@@ -986,11 +986,18 @@ def test_git_branch_canvas_marks_active_paper_branch_after_analysis_completion(t
         experimental_designs=["Exp-writing"],
         todo_items=[
             {
+                "exp_id": "EXP-WRITE-001",
                 "todo_id": "todo-writing",
                 "slice_id": "slice-writing",
                 "title": "Writing slice",
                 "research_question": "RQ-writing",
                 "experimental_design": "Exp-writing",
+                "tier": "main_required",
+                "paper_placement": "main_text",
+                "paper_role": "main_text",
+                "section_id": "writing-check",
+                "item_id": "AN-WRITE-001",
+                "claim_links": ["C-writing"],
                 "completion_condition": "Finish the required supplementary experiment.",
             }
         ],
@@ -1001,6 +1008,10 @@ def test_git_branch_canvas_marks_active_paper_branch_after_analysis_completion(t
                 "goal": "Complete the final writing-facing check.",
                 "required_changes": "Keep the main claim comparable.",
                 "metric_contract": "Use the same accuracy contract.",
+                "section_id": "writing-check",
+                "item_id": "AN-WRITE-001",
+                "paper_role": "main_text",
+                "claim_links": ["C-writing"],
             }
         ],
     )
@@ -1033,3 +1044,102 @@ def test_git_branch_canvas_marks_active_paper_branch_after_analysis_completion(t
     assert nodes[paper_branch]["workflow_state"]["writing_state"] == "active"
     assert nodes[paper_branch]["workflow_state"]["status_reason"] == "Writing workspace active."
     assert nodes[parent_branch]["workflow_state"]["writing_state"] == "ready"
+
+
+def test_git_branch_canvas_parents_writing_facing_analysis_to_paper_line(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("canvas paper-line parent quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    _confirm_local_baseline(artifact, quest_root, baseline_id="baseline-paper-line")
+    artifact.submit_idea(
+        quest_root,
+        title="Paper-line route",
+        problem="Need supplementary slices to orbit an explicit paper line.",
+        hypothesis="A writing-facing campaign should parent analysis to the paper branch.",
+        mechanism="Open the paper line before launching the slice.",
+        decision_reason="Exercise the paper-line-first canvas path.",
+        next_target="experiment",
+    )
+    artifact.record_main_experiment(
+        quest_root,
+        run_id="main-paper-line-001",
+        title="Paper-line main run",
+        hypothesis="This route is strong enough to justify a paper line.",
+        setup="Use the confirmed baseline.",
+        execution="Completed the main run.",
+        results="One supplementary check remains.",
+        conclusion="Open a writing-facing campaign bound to the paper line.",
+        metric_rows=[{"metric_id": "acc", "value": 0.93}],
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Paper Line Outline",
+        detailed_outline={
+            "title": "Paper Line Outline",
+            "research_questions": ["RQ-paper-line"],
+            "experimental_designs": ["Exp-paper-line"],
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Use the first outline for the paper-line parent test.",
+    )
+    campaign = artifact.create_analysis_campaign(
+        quest_root,
+        campaign_title="Paper-line campaign",
+        campaign_goal="Verify that the active slice hangs off the paper line.",
+        selected_outline_ref="outline-001",
+        research_questions=["RQ-paper-line"],
+        experimental_designs=["Exp-paper-line"],
+        todo_items=[
+            {
+                "exp_id": "EXP-PAPER-LINE-001",
+                "todo_id": "todo-paper-line",
+                "slice_id": "slice-paper-line",
+                "title": "Paper-line slice",
+                "research_question": "RQ-paper-line",
+                "experimental_design": "Exp-paper-line",
+                "tier": "main_required",
+                "paper_placement": "main_text",
+                "paper_role": "main_text",
+                "section_id": "paper-line-check",
+                "item_id": "AN-PAPER-LINE-001",
+                "claim_links": ["C-paper-line"],
+                "completion_condition": "Finish the required paper-line slice.",
+            }
+        ],
+        slices=[
+            {
+                "slice_id": "slice-paper-line",
+                "title": "Paper-line slice",
+                "goal": "Keep one paper-facing slice pending.",
+                "required_changes": "Preserve the main comparison surface.",
+                "metric_contract": "Use the same accuracy contract.",
+                "section_id": "paper-line-check",
+                "item_id": "AN-PAPER-LINE-001",
+                "paper_role": "main_text",
+                "claim_links": ["C-paper-line"],
+            }
+        ],
+    )
+
+    app = DaemonApp(temp_home)
+    branches = app.handlers.git_branches(quest_id)
+    nodes = {item["ref"]: item for item in branches["nodes"]}
+    analysis_branch = campaign["slices"][0]["branch"]
+    paper_branch = str(campaign["manifest"]["paper_line_branch"] or "").strip()
+
+    assert paper_branch.startswith("paper/")
+    assert branches["active_workspace_ref"] == analysis_branch
+    assert nodes[analysis_branch]["parent_ref"] == paper_branch
+    assert nodes[analysis_branch]["paper_line_branch"] == paper_branch
+    assert nodes[paper_branch]["workflow_state"]["analysis_state"] == "active"
+    assert nodes[paper_branch]["workflow_state"]["writing_state"] == "blocked_by_analysis"

@@ -143,6 +143,53 @@ def test_handlers_quest_layout_roundtrip(temp_home: Path) -> None:
     assert refreshed["layout_json"]["preferences"]["curveMode"] == "full"
 
 
+def test_handlers_workflow_includes_optimization_frontier_when_available(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create(
+        "workflow frontier quest",
+        startup_contract={"need_research_paper": False},
+    )
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    baseline_root = quest_root / "baselines" / "local" / "workflow-frontier-baseline"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    write_json(
+        baseline_root / "RESULT.json",
+        {
+            "metrics_summary": {"acc": 0.81},
+            "metric_contract": {
+                "primary_metric_id": "acc",
+                "metrics": [{"metric_id": "acc", "direction": "maximize", "required": True}],
+            },
+            "primary_metric": {"metric_id": "acc", "value": 0.81, "direction": "maximize"},
+        },
+    )
+    app.artifact_service.confirm_baseline(
+        quest_root,
+        baseline_path="baselines/local/workflow-frontier-baseline",
+        baseline_id="workflow-frontier-baseline",
+        summary="Workflow frontier baseline",
+    )
+    app.artifact_service.submit_idea(
+        quest_root,
+        mode="create",
+        submission_mode="candidate",
+        title="Workflow candidate",
+        problem="Need a branchless optimization brief.",
+        hypothesis="A candidate brief should surface in workflow.",
+        mechanism="Delay promotion until ranking is finished.",
+        decision_reason="Keep the brief in the frontier.",
+        next_target="optimize",
+    )
+
+    workflow = app.handlers.workflow(quest_id)
+    assert workflow["optimization_frontier"]["mode"] in {"explore", "exploit", "fusion", "stop"}
+    assert workflow["optimization_frontier"]["candidate_backlog"]["candidate_brief_count"] == 1
+
+
 def _wait_for_json(url: str, *, timeout: float = 10.0) -> dict | list:
     deadline = time.time() + timeout
     last_error: Exception | None = None
@@ -3843,6 +3890,35 @@ def test_daemon_suppresses_auto_resume_after_repeated_crash_loop(temp_home: Path
     )
 
 
+def test_auto_continue_parks_after_repeated_unchanged_finalize_state(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("finalize auto park quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    app.quest_service.update_settings(quest_id, active_anchor="finalize")
+    app.quest_service.set_continuation_state(
+        quest_root,
+        policy="auto",
+        anchor="finalize",
+        reason="finalize_loop_test",
+    )
+
+    app._normalize_status_after_turn(quest_id, turn_reason="auto_continue")
+    first_snapshot = app.quest_service.snapshot(quest_id)
+    assert first_snapshot["same_fingerprint_auto_turn_count"] == 1
+    assert first_snapshot["continuation_policy"] == "auto"
+
+    app._normalize_status_after_turn(quest_id, turn_reason="auto_continue")
+    second_snapshot = app.quest_service.snapshot(quest_id)
+    assert second_snapshot["same_fingerprint_auto_turn_count"] >= 2
+    assert second_snapshot["continuation_policy"] == "wait_for_user_or_resume"
+    assert second_snapshot["continuation_anchor"] == "decision"
+    assert second_snapshot["continuation_reason"] == "unchanged_finalize_state"
+
+
 def test_daemon_retries_failed_runner_attempt_and_continues_with_retry_context(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
@@ -4711,17 +4787,17 @@ def test_stop_cancels_queued_mailbox_messages_and_preserves_audit(temp_home: Pat
     stop_payload = app.handlers.quest_control(quest_id, {"action": "stop", "source": "tui-ink"})
     assert stop_payload["ok"] is True
     assert stop_payload["snapshot"]["status"] == "stopped"
-    assert stop_payload["snapshot"]["pending_user_message_count"] == 0
-    assert stop_payload["cancelled_pending_user_message_count"] == 1
+    assert stop_payload["snapshot"]["pending_user_message_count"] == 1
+    assert stop_payload["cancelled_pending_user_message_count"] == 0
 
     queue_after_stop = json.loads((quest_root / ".ds" / "user_message_queue.json").read_text(encoding="utf-8"))
-    assert queue_after_stop["pending"] == []
+    assert [item["message_id"] for item in queue_after_stop["pending"]] == [queued_payload["message"]["id"]]
     completed_status_by_id = {
         str(item.get("message_id") or ""): str(item.get("status") or "")
         for item in queue_after_stop["completed"]
     }
     assert completed_status_by_id[initial_payload["message"]["id"]] == "accepted_by_run"
-    assert completed_status_by_id[queued_payload["message"]["id"]] == "cancelled_by_stop"
+    assert queued_payload["message"]["id"] not in completed_status_by_id
 
     follow_up = app.handlers.chat(quest_id, {"text": "Continue cleanly.", "source": "tui-ink"})
     assert follow_up["ok"] is True

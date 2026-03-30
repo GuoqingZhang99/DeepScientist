@@ -20,6 +20,7 @@ After finishing this guide, you should be able to:
 - use `/new`, `/use latest`, `/status`, and related commands from QQ
 - see the detected `openid` in the `Settings` page
 - run safe readiness checks and send probes from the `Settings` page
+- receive auto-generated metric timeline images after each recorded main experiment when QQ is the bound quest connector
 
 ### Deployment checklist before you start
 
@@ -220,6 +221,24 @@ When the connector is fully working, you should usually see all of these:
 - the `Snapshot` panel shows a discovered target and the bound target is no longer empty
 - clicking `Send probe` again no longer reports an empty delivery target
 - if a latest project already exists, plain text continues that project automatically; if no project exists yet, the bot returns help instead
+
+## 5.3 Automatic main-experiment metric charts
+
+When QQ is the bound quest connector, DeepScientist now auto-sends metric timeline charts after each recorded main experiment.
+
+Current behavior:
+
+- one chart per metric
+- the baseline is drawn as a horizontal dashed reference line when a baseline value exists
+- the system automatically respects whether the metric is `higher is better` or `lower is better`
+- any point that beats baseline gets a star marker
+- the latest point is filled with a deep Morandi red
+- earlier points are filled with a deep Morandi blue
+- if multiple metrics are present, DeepScientist sends them sequentially with about a 2 second gap
+
+These charts are generated from quest-local files and delivered as native QQ images.
+
+If you need to disable this automatic chart delivery, turn off `auto_send_main_experiment_png` in the QQ connector config.
 
 ### 5.2 Error quick decoder
 

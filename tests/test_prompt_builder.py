@@ -10,6 +10,7 @@ from deepscientist.home import ensure_home_layout, repo_root
 from deepscientist.memory import MemoryService
 from deepscientist.prompts import PromptBuilder
 from deepscientist.quest import QuestService
+from deepscientist.shared import write_json, write_text
 from deepscientist.skills import SkillInstaller
 
 
@@ -68,6 +69,32 @@ def test_prompt_builder_includes_layered_runtime_context(temp_home: Path) -> Non
     assert len(prompt) < 50000
 
 
+def test_prompt_builder_includes_recovery_resume_packet_for_daemon_recovery(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+    quest_root = Path(snapshot["quest_root"])
+    service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    service.update_runtime_state(
+        quest_root=quest_root,
+        last_resume_source="auto:daemon-recovery",
+        last_resume_at="2026-03-24T07:52:25+00:00",
+        last_recovery_abandoned_run_id="run-crashed-001",
+        last_recovery_summary="Recovered quest from stale runtime state; previous status `running`, abandoned run `run-crashed-001`.",
+    )
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="finalize",
+        user_message="",
+        model="gpt-5.4",
+        turn_reason="auto_continue",
+    )
+
+    assert "## Recovery Resume Packet" in prompt
+    assert "resume_source: auto:daemon-recovery" in prompt
+    assert "abandoned_run_id: run-crashed-001" in prompt
+    assert "this turn exists because the daemon/runtime previously died" in prompt
+
+
 def test_prompt_builder_stays_compact_and_avoids_redundant_stage_sop(temp_home: Path) -> None:
     builder, snapshot = _make_builder(temp_home)
     prompt = builder.build(
@@ -122,6 +149,96 @@ def test_prompt_builder_includes_shared_interaction_contract(temp_home: Path) ->
     assert "1 to 3 concrete options" in prompt
 
 
+def test_prompt_builder_includes_paper_contract_health_block(temp_home: Path) -> None:
+    builder, snapshot = _make_builder(temp_home)
+    quest_root = Path(snapshot["quest_root"])
+    paper_root = quest_root / "paper"
+    paper_root.mkdir(parents=True, exist_ok=True)
+    (paper_root / "outline").mkdir(parents=True, exist_ok=True)
+    write_json(
+        paper_root / "selected_outline.json",
+        {
+            "outline_id": "outline-001",
+            "title": "Health Outline",
+            "detailed_outline": {
+                "research_questions": ["RQ-health"],
+                "experimental_designs": ["EXP-health"],
+            },
+            "sections": [
+                {
+                    "section_id": "results-health",
+                    "title": "Health Results",
+                    "paper_role": "main_text",
+                    "required_items": ["AN-HEALTH-001"],
+                    "optional_items": [],
+                }
+            ],
+        },
+    )
+    write_json(
+        paper_root / "paper_line_state.json",
+        {
+            "paper_line_id": "paper-line-health",
+            "paper_branch": "paper/health",
+            "selected_outline_ref": "outline-001",
+            "open_supplementary_count": 1,
+            "draft_status": "missing",
+            "bundle_status": "missing",
+        },
+    )
+    analysis_root = quest_root / "experiments" / "analysis-results" / "analysis-health"
+    analysis_root.mkdir(parents=True, exist_ok=True)
+    write_json(
+        analysis_root / "todo_manifest.json",
+        {
+            "selected_outline_ref": "outline-001",
+            "todo_items": [
+                {
+                    "slice_id": "slice-health",
+                    "title": "Health Slice",
+                    "status": "pending",
+                    "tier": "main_required",
+                    "section_id": "results-health",
+                    "item_id": "AN-HEALTH-001",
+                    "paper_role": "main_text",
+                }
+            ],
+        },
+    )
+    write_text(analysis_root / "slice-health.md", "# Health Slice\n\nPending.\n")
+    analysis_manifest_root = quest_root / ".ds" / "analysis_campaigns"
+    analysis_manifest_root.mkdir(parents=True, exist_ok=True)
+    write_json(
+        analysis_manifest_root / "analysis-health.json",
+        {
+            "campaign_id": "analysis-health",
+            "paper_line_id": "paper-line-health",
+            "paper_line_branch": "paper/health",
+            "selected_outline_ref": "outline-001",
+            "slices": [
+                {
+                    "slice_id": "slice-health",
+                    "status": "pending",
+                    "branch": "analysis/idea/analysis-health-slice-health",
+                    "worktree_root": str(quest_root / ".ds" / "worktrees" / "analysis-health-slice-health"),
+                }
+            ],
+        },
+    )
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="write",
+        user_message="Continue the paper work.",
+        model="gpt-5.4",
+    )
+
+    assert "paper_contract_health: blocked" in prompt
+    assert "paper_health_counts: unresolved_required=1, unmapped_completed=0, blocking_pending=1" in prompt
+    assert "paper_recommended_next_stage: analysis-campaign" in prompt
+    assert "paper_health_tool:" in prompt
+
+
 def test_prompt_builder_includes_surface_and_attachment_summary_for_connector_turn(temp_home: Path) -> None:
     builder, snapshot = _make_builder(temp_home)
     quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
@@ -152,11 +269,8 @@ def test_prompt_builder_includes_surface_and_attachment_summary_for_connector_tu
     assert "active_surface: connector" in prompt
     assert "active_connector: qq" in prompt
     assert "active_chat_type: direct" in prompt
-    assert "qq_auto_send_main_experiment_png: True" in prompt
-    assert "qq_enable_markdown_send: False" in prompt
-    assert "qq_media_rule:" in prompt
-    assert "qq_visual_rule:" in prompt
-    assert "qq_structured_delivery_rule:" in prompt
+    assert "qq_surface_rule:" in prompt
+    assert "qq_detail_rule:" in prompt
     assert "## Current Turn Attachments" in prompt
     assert "attachment_count: 1" in prompt
     assert "label=report.pdf" in prompt
@@ -317,8 +431,9 @@ def test_prompt_builder_includes_recent_conversation_window(temp_home: Path) -> 
         model="gpt-5.4",
     )
 
-    assert "[user|cli] First user turn." in prompt
-    assert "[assistant|codex] First assistant turn." in prompt
+    assert "## Recent Conversation Window" in prompt
+    assert "conversation_tool:" in prompt
+    assert "artifact.get_conversation_context" in prompt
 
 
 def test_prompt_builder_includes_priority_memory_for_stage_and_message(temp_home: Path) -> None:
@@ -350,9 +465,9 @@ def test_prompt_builder_includes_priority_memory_for_stage_and_message(temp_home
     )
 
     assert "## Priority Memory For This Turn" in prompt
-    assert "Adapter ablation plan" in prompt
-    assert "Experiment debugging playbook" in prompt
-    assert "matches current user message" in prompt or "recent experiment" in prompt
+    assert "memory_lookup_tool:" in prompt
+    assert "memory.list_recent" in prompt
+    assert "memory.search" in prompt
 
 
 def test_prompt_builder_includes_active_user_requirements_for_auto_continue_turn(temp_home: Path) -> None:
@@ -412,8 +527,8 @@ def test_prompt_builder_includes_active_interactions(temp_home: Path) -> None:
         model="gpt-5.4",
     )
 
-    assert "Active interactions:" in prompt
-    assert "Should I continue with the current baseline route?" in prompt
+    assert "quest_state_tool:" in prompt
+    assert "artifact.get_quest_state" in prompt
 
 
 def test_prompt_builder_includes_progress_interact_cadence_guidance(temp_home: Path) -> None:
@@ -489,10 +604,112 @@ def test_prompt_builder_mentions_algorithm_first_mode_when_paper_disabled(temp_h
     )
 
     assert "## Research Delivery Policy" in prompt
+    assert "## Optimization Frontier Snapshot" in prompt
+    assert "optimization-state summary" in prompt
     assert "delivery_mode: algorithm_first" in prompt
     assert "the strongest justified algorithmic result" in prompt
     assert "do not default into `artifact.submit_paper_outline(...)`" in prompt
     assert "do not self-route into paper work by default" in prompt
+
+
+def test_prompt_builder_supports_optimize_as_standard_stage_skill(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    snapshot = service.create(
+        "optimize from a branch-backed line",
+        startup_contract={"need_research_paper": False},
+    )
+    service.update_settings(snapshot["quest_id"], active_anchor="optimize")
+    builder = PromptBuilder(repo_root(), temp_home)
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="optimize",
+        user_message="Continue the optimization loop from the current frontier.",
+        model="gpt-5.4",
+    )
+
+    assert "requested_skill: optimize" in prompt
+    assert "active_anchor: optimize" in prompt
+    assert "## Optimization Frontier Snapshot" in prompt
+    assert "frontier_mode:" in prompt
+    assert "Continue the optimization loop from the current frontier" in prompt
+
+
+def test_prompt_builder_includes_same_line_local_attempt_memory_for_optimize(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    snapshot = service.create(
+        "optimize with same-line local memory",
+        startup_contract={"need_research_paper": False},
+    )
+    quest_root = Path(snapshot["quest_root"])
+    artifact = ArtifactService(temp_home)
+    baseline_root = quest_root / "baselines" / "local" / "optimize-local-memory"
+    baseline_root.mkdir(parents=True, exist_ok=True)
+    write_json(
+        baseline_root / "RESULT.json",
+        {
+            "metrics_summary": {"acc": 0.81},
+            "metric_contract": {
+                "primary_metric_id": "acc",
+                "metrics": [{"metric_id": "acc", "direction": "maximize", "required": True}],
+            },
+            "primary_metric": {"metric_id": "acc", "value": 0.81, "direction": "maximize"},
+        },
+    )
+    artifact.confirm_baseline(
+        quest_root,
+        baseline_path="baselines/local/optimize-local-memory",
+        baseline_id="optimize-local-memory",
+        summary="Optimize local memory baseline",
+    )
+    line = artifact.submit_idea(
+        quest_root,
+        mode="create",
+        submission_mode="line",
+        title="Local memory line",
+        problem="Need same-line memory.",
+        hypothesis="A local candidate memory should be visible in the prompt.",
+        mechanism="Use a bounded local candidate pool.",
+        next_target="optimize",
+        decision_reason="Open the optimize line.",
+    )
+    artifact.record(
+        quest_root,
+        {
+            "kind": "report",
+            "status": "failed",
+            "report_type": "optimization_candidate",
+            "candidate_id": "cand-local-001",
+            "idea_id": line["idea_id"],
+            "branch": line["branch"],
+            "strategy": "exploit",
+            "mechanism_family": "adapter",
+            "summary": "Adapter patch failed in smoke.",
+            "details": {
+                "candidate_id": "cand-local-001",
+                "change_plan": "Tighten the adapter bottleneck.",
+                "failure_kind": "smoke_regression",
+            },
+        },
+        workspace_root=Path(line["worktree_root"]),
+    )
+    service.update_settings(snapshot["quest_id"], active_anchor="optimize")
+    builder = PromptBuilder(repo_root(), temp_home)
+
+    prompt = builder.build(
+        quest_id=snapshot["quest_id"],
+        skill_id="optimize",
+        user_message="Continue optimizing from the current line.",
+        model="gpt-5.4",
+    )
+
+    assert "frontier_same_line_local_attempt_memory:" in prompt
+    assert "cand-local-001 / failed / exploit / adapter / smoke_regression" in prompt
+    assert "optimization_local_memory_rule" in prompt
 
 
 def test_prompt_builder_documents_lineage_intent_rules(temp_home: Path) -> None:
@@ -587,7 +804,7 @@ def test_prompt_builder_mentions_baseline_gate_protocol(temp_home: Path) -> None
     )
 
     assert "baseline_gate: pending" in prompt
-    assert "confirmed_baseline_ref: none" in prompt
+    assert "quest_state_tool:" in prompt
     assert "artifact.confirm_baseline(...)" in prompt
     assert "artifact.waive_baseline(...)" in prompt
     assert "Attach, import, or publish alone does not open the downstream workflow" in prompt
@@ -634,12 +851,9 @@ def test_prompt_builder_includes_requested_baseline_and_prebound_runtime_policy(
         model="gpt-5.4",
     )
 
-    assert 'requested_baseline_ref: {"baseline_id": "demo-baseline", "variant_id": "v2"}' in prompt
-    assert 'startup_contract: {"baseline_mode": "existing", "scope": "baseline_only"}' in prompt
-    assert "confirmed_baseline_import_root: baselines/imported/demo-baseline" in prompt
-    assert "prebound_baseline_ready: True" in prompt
+    assert "quest_state_tool:" in prompt
     assert "active_baseline_metric_contract_json: baselines/imported/demo-baseline/json/metric_contract.json" in prompt
-    assert "do not redo baseline discovery or reproduction unless you find a concrete incompatibility" in prompt
+    assert "artifact.get_quest_state" in prompt
 
 
 def test_prompt_builder_includes_custom_existing_state_launch_guidance(temp_home: Path) -> None:
@@ -859,8 +1073,7 @@ def test_prompt_builder_hides_deleted_reusable_baselines(temp_home: Path) -> Non
         model="gpt-5.4",
     )
 
-    assert "baseline-keep" in prompt
-    assert "baseline-delete" not in prompt
+    assert "quest_state_tool:" in prompt
 
 
 def test_prompt_builder_includes_paper_bundle_and_claim_snapshot(temp_home: Path) -> None:
@@ -933,13 +1146,9 @@ def test_prompt_builder_includes_paper_bundle_and_claim_snapshot(temp_home: Path
     )
 
     assert "selected_outline_ref: outline-001" in prompt
-    assert "selected_outline_title: Outline Title" in prompt
-    assert "claim_status_counts: supported=1, partial=1, unsupported=0, deferred=0" in prompt
-    assert "downgrade_watchlist: C2 [partial]" in prompt
-    assert "baseline_inventory_status: paper/baseline_inventory.json [exists]" in prompt
-    assert "open_source_manifest_status: release/open_source/manifest.json [exists]" in prompt
-    assert "open_source_release_branch: release/demo" in prompt
-    assert "paper_state_rule:" in prompt
+    assert "paper_outline_tool:" in prompt
+    assert "paper_health_tool:" in prompt
+    assert "paper_contract_health:" in prompt
 
 
 def test_prompt_builder_mentions_long_running_bash_exec_monitoring_protocol(temp_home: Path) -> None:
@@ -989,8 +1198,8 @@ def test_prompt_builder_mentions_queued_user_message_mailbox(temp_home: Path) ->
     )
 
     assert "pending_user_message_count: 1" in prompt
-    assert "queued user messages waiting to be picked up via artifact.interact" in prompt
-    assert "immediately send one substantive artifact.interact(...) follow-up" in prompt
+    assert "quest_state_tool:" in prompt
+    assert "artifact.get_quest_state" in prompt
 
 
 def test_prompt_builder_mentions_immediate_acknowledgement_after_mailbox_poll(temp_home: Path) -> None:
@@ -1023,4 +1232,5 @@ def test_prompt_builder_mentions_memory_contract_without_redundant_stage_playboo
     assert "Use `memory` for reusable lessons, compact prior context, and cross-turn retrieval." in prompt
     assert 'pass `tags` as a JSON array such as `["stage:baseline", "type:repro-lesson"]`' in prompt
     assert "## Priority Memory For This Turn" in prompt
+    assert "memory_injection_rule:" in prompt
     assert "stage_contract_protocol:" in prompt

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from collections import deque
 import faulthandler
+import hashlib
 import json
 import mimetypes
 import os
@@ -68,7 +69,7 @@ from ..connector.lingzhu_support import (
     lingzhu_verify_auth_header,
 )
 from ..prompts import PromptBuilder
-from ..prompts.builder import STANDARD_SKILLS
+from ..prompts.builder import STANDARD_SKILLS, classify_turn_intent
 from ..connector.qq_profiles import list_qq_profiles, merge_qq_profile_config, normalize_qq_connector_config
 from ..quest import QuestService
 from ..runners import CodexRunner, RunRequest, get_runner_factory, register_builtin_runners
@@ -79,9 +80,11 @@ from ..team import SingleTeamService
 from ..connector.weixin_support import (
     DEFAULT_WEIXIN_BOT_TYPE,
     fetch_weixin_qrcode,
+    get_weixin_replay_cursor,
     normalize_weixin_base_url,
     normalize_weixin_cdn_base_url,
     poll_weixin_qrcode_status,
+    update_weixin_replay_cursor,
 )
 from .api import ApiHandlers, match_route
 from .sessions import SessionStore
@@ -138,6 +141,8 @@ _LINGZHU_SHORT_COMMAND_PREFIX_MAP = {
     "恢复": "resume",
 }
 _LINGZHU_SHORT_LATEST_ALIASES = {"latest", "newest", "最新", "最新的"}
+_WEIXIN_STALE_REPLAY_LIMIT_DEFAULT = 5
+_WEIXIN_STALE_REPLAY_INTERVAL_SECONDS_DEFAULT = 2.0
 _LINGZHU_DELETE_CONFIRM_ALIASES = {"确认", "强制", "--yes", "-y"}
 
 
@@ -450,6 +455,14 @@ class DaemonApp:
             ensure_dir(faulthandler_path.parent)
             self._faulthandler_stream = open(faulthandler_path, "a", encoding="utf-8")
             faulthandler.enable(file=self._faulthandler_stream)
+            dump_signal = getattr(signal, "SIGUSR1", None)
+            if dump_signal is not None:
+                faulthandler.register(
+                    dump_signal,
+                    file=self._faulthandler_stream,
+                    all_threads=True,
+                    chain=False,
+                )
         except Exception as exc:
             self.logger.log("warning", "daemon.faulthandler_enable_failed", error=str(exc))
 
@@ -1544,7 +1557,7 @@ class DaemonApp:
             reason=f"quest_{action}",
             user_id=source,
         )
-        if action == "stop":
+        if action == "stop" and source == "local-admin":
             cancel_reason = "cancelled_by_daemon_shutdown" if source == "local-admin" else "cancelled_by_stop"
             cancelled_pending = self.quest_service.cancel_pending_user_messages(
                 quest_id,
@@ -1640,6 +1653,23 @@ class DaemonApp:
         snapshot = self.quest_service.snapshot(quest_id)
         next_status = "running" if snapshot.get("status") == "running" else "active"
         snapshot = self.quest_service.set_status(quest_id, next_status)
+        recovery_abandoned_run_id = None
+        recovery_summary = None
+        if source.startswith("auto:daemon-recovery"):
+            recent_events = self.quest_service.events(quest_id)["events"]
+            for item in reversed(recent_events[-20:]):
+                if str(item.get("type") or "").strip() != "quest.runtime_reconciled":
+                    continue
+                recovery_abandoned_run_id = str(item.get("abandoned_run_id") or "").strip() or None
+                recovery_summary = str(item.get("summary") or "").strip() or None
+                break
+        self.quest_service.update_runtime_state(
+            quest_root=self.quest_service._quest_root(quest_id),
+            last_resume_source=source,
+            last_resume_at=utc_now(),
+            last_recovery_abandoned_run_id=recovery_abandoned_run_id,
+            last_recovery_summary=recovery_summary,
+        )
         summary = f"Quest {quest_id} resumed."
         event = self._append_control_event(
             quest_id,
@@ -1885,7 +1915,9 @@ class DaemonApp:
 
         runner_name = self._runner_name_for(snapshot)
         runner_cfg = self.runners_config.get(runner_name, {})
-        skill_id = self._turn_skill_for(snapshot, latest_user_message, turn_reason=turn_reason)
+        turn_intent = self._turn_intent_for(latest_user_message, turn_reason=turn_reason)
+        turn_mode = self._turn_mode_for(snapshot, latest_user_message, turn_reason=turn_reason)
+        skill_id = self._turn_skill_for(snapshot, latest_user_message, turn_reason=turn_reason, turn_mode=turn_mode)
         run_id = generate_id("run")
         model = str(runner_cfg.get("model", "gpt-5.4"))
         run_message = ""
@@ -1982,6 +2014,8 @@ class DaemonApp:
                 approval_policy=str(runner_cfg.get("approval_policy", "on-request")),
                 sandbox_mode=str(runner_cfg.get("sandbox_mode", "workspace-write")),
                 turn_reason=turn_reason,
+                turn_intent=turn_intent,
+                turn_mode=turn_mode,
                 reasoning_effort=reasoning_effort,
                 turn_id=turn_id,
                 attempt_index=attempt_index,
@@ -2127,7 +2161,7 @@ class DaemonApp:
                             }
                         ],
                     )
-                self._normalize_status_after_turn(quest_id)
+                self._normalize_status_after_turn(quest_id, turn_reason=turn_reason)
                 return
 
             failure_summary = f"Runner `{runner_name}` exited with code {result.exit_code} on attempt {attempt_index}/{max_attempts}."
@@ -2225,10 +2259,76 @@ class DaemonApp:
         return str(snapshot.get("runner") or configured.get("default_runner", "codex")).strip().lower()
 
     @staticmethod
-    def _turn_skill_for(snapshot: dict, latest_user_message: dict | None, *, turn_reason: str = "user_message") -> str:
+    def _stage_state_fingerprint(snapshot: dict) -> str:
+        paper_health = (
+            dict(snapshot.get("paper_contract_health") or {})
+            if isinstance(snapshot.get("paper_contract_health"), dict)
+            else {}
+        )
+        payload = {
+            "active_anchor": str(snapshot.get("active_anchor") or "").strip() or None,
+            "active_run_id": str(snapshot.get("active_run_id") or "").strip() or None,
+            "active_analysis_campaign_id": str(snapshot.get("active_analysis_campaign_id") or "").strip() or None,
+            "next_pending_slice_id": str(snapshot.get("next_pending_slice_id") or "").strip() or None,
+            "current_workspace_branch": str(snapshot.get("current_workspace_branch") or "").strip() or None,
+            "continuation_policy": str(snapshot.get("continuation_policy") or "").strip() or None,
+            "paper": {
+                "closure_state": str(paper_health.get("closure_state") or "").strip() or None,
+                "delivery_state": str(paper_health.get("delivery_state") or "").strip() or None,
+                "recommended_next_stage": str(paper_health.get("recommended_next_stage") or "").strip() or None,
+                "recommended_action": str(paper_health.get("recommended_action") or "").strip() or None,
+                "blocking_reasons": list(paper_health.get("blocking_reasons") or []),
+                "keep_bundle_fixed_by_default": bool(paper_health.get("keep_bundle_fixed_by_default")),
+            },
+        }
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _turn_intent_for(latest_user_message: dict | None, *, turn_reason: str = "user_message") -> str:
         if str(turn_reason or "").strip() == "auto_continue" or latest_user_message is None:
-            active_anchor = str(snapshot.get("active_anchor") or "").strip()
-            return active_anchor if active_anchor in STANDARD_SKILLS else "decision"
+            return "continue_stage"
+        return classify_turn_intent(str(latest_user_message.get("content") or "").strip())
+
+    @staticmethod
+    def _turn_mode_for(snapshot: dict, latest_user_message: dict | None, *, turn_reason: str = "user_message") -> str:
+        normalized_reason = str(turn_reason or "").strip() or "user_message"
+        if normalized_reason == "auto_continue":
+            resume_source = str(snapshot.get("last_resume_source") or "").strip()
+            if resume_source.startswith("auto:daemon-recovery"):
+                return "recovering"
+            continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+            if continuation_policy == "when_external_progress":
+                return "monitoring"
+            if continuation_policy in {"wait_for_user_or_resume", "none"}:
+                return "parked"
+            return "stage_execution"
+        turn_intent = DaemonApp._turn_intent_for(latest_user_message, turn_reason=turn_reason)
+        if turn_intent == "answer_user_question_first":
+            return "answering"
+        if turn_intent == "execute_user_command_first":
+            return "command_execution"
+        return "stage_execution"
+
+    @staticmethod
+    def _continuation_anchor_for(snapshot: dict) -> str:
+        continuation_anchor = str(snapshot.get("continuation_anchor") or "").strip()
+        if continuation_anchor in STANDARD_SKILLS:
+            return continuation_anchor
+        active_anchor = str(snapshot.get("active_anchor") or "").strip()
+        return active_anchor if active_anchor in STANDARD_SKILLS else "decision"
+
+    @staticmethod
+    def _turn_skill_for(
+        snapshot: dict,
+        latest_user_message: dict | None,
+        *,
+        turn_reason: str = "user_message",
+        turn_mode: str = "stage_execution",
+    ) -> str:
+        if turn_mode in {"answering", "command_execution", "recovering"}:
+            return "decision"
+        if str(turn_reason or "").strip() == "auto_continue" or latest_user_message is None:
+            return DaemonApp._continuation_anchor_for(snapshot)
         reply_target = str(latest_user_message.get("reply_to_interaction_id") or "").strip()
         if reply_target:
             for item in (snapshot.get("active_interactions") or []):
@@ -2252,6 +2352,9 @@ class DaemonApp:
                     or str(item.get("kind") or "") == "decision_request"
                 ):
                     return "decision"
+        continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+        if continuation_policy == "wait_for_user_or_resume":
+            return DaemonApp._continuation_anchor_for(snapshot)
         active_anchor = str(snapshot.get("active_anchor") or "").strip()
         return active_anchor if active_anchor in STANDARD_SKILLS else "decision"
 
@@ -2601,7 +2704,7 @@ class DaemonApp:
             ],
         )
 
-    def _normalize_status_after_turn(self, quest_id: str) -> None:
+    def _normalize_status_after_turn(self, quest_id: str, *, turn_reason: str = "user_message") -> None:
         with self._turn_lock:
             if bool((self._turn_state.get(quest_id) or {}).get("stop_requested")):
                 return
@@ -2609,6 +2712,46 @@ class DaemonApp:
         current_status = str(snapshot.get("status") or snapshot.get("display_status") or "active").strip() or "active"
         normalized_status = "active" if current_status == "running" else current_status
         snapshot = self.quest_service.mark_turn_finished(quest_id, status=normalized_status)
+        runtime_updates: dict[str, Any] = {}
+        current_fingerprint = self._stage_state_fingerprint(snapshot)
+        previous_fingerprint = str(snapshot.get("last_stage_fingerprint") or "").strip() or None
+        same_fingerprint_count = int(snapshot.get("same_fingerprint_auto_turn_count") or 0)
+        if str(turn_reason or "").strip() == "auto_continue":
+            same_fingerprint_count = same_fingerprint_count + 1 if previous_fingerprint == current_fingerprint else 1
+        else:
+            same_fingerprint_count = 0
+        runtime_updates.update(
+            {
+                "last_stage_fingerprint": current_fingerprint,
+                "last_stage_fingerprint_at": utc_now(),
+                "same_fingerprint_auto_turn_count": same_fingerprint_count,
+            }
+        )
+        if (
+            str(turn_reason or "").strip() == "auto_continue"
+            and str(snapshot.get("active_anchor") or "").strip() == "finalize"
+            and same_fingerprint_count >= 2
+            and int(snapshot.get("pending_user_message_count") or 0) == 0
+        ):
+            runtime_updates.update(
+                {
+                    "continuation_policy": "wait_for_user_or_resume",
+                    "continuation_anchor": "decision",
+                    "continuation_reason": "unchanged_finalize_state",
+                    "continuation_updated_at": utc_now(),
+                }
+            )
+            self.quest_service.update_runtime_state(
+                quest_root=self.quest_service._quest_root(quest_id),
+                **runtime_updates,
+            )
+            snapshot = self.quest_service.snapshot(quest_id)
+        else:
+            self.quest_service.update_runtime_state(
+                quest_root=self.quest_service._quest_root(quest_id),
+                **runtime_updates,
+            )
+            snapshot = self.quest_service.snapshot(quest_id)
         status = str(snapshot.get("status") or "")
         if status in {"stopped", "paused", "completed", "error"}:
             return
@@ -2618,11 +2761,23 @@ class DaemonApp:
             if int(snapshot.get("pending_user_message_count") or 0) > 0:
                 self.schedule_turn(quest_id, reason="queued_user_messages")
             else:
-                self._schedule_turn_later(quest_id, reason="auto_continue", delay_seconds=_AUTO_CONTINUE_DELAY_SECONDS)
+                continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+                if continuation_policy not in {"wait_for_user_or_resume", "none"}:
+                    self._schedule_turn_later(quest_id, reason="auto_continue", delay_seconds=_AUTO_CONTINUE_DELAY_SECONDS)
             return
         if int(snapshot.get("pending_user_message_count") or 0) > 0:
             self.schedule_turn(quest_id, reason="queued_user_messages")
             return
+        continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+        if continuation_policy == "none":
+            return
+        if continuation_policy == "wait_for_user_or_resume":
+            return
+        if continuation_policy == "when_external_progress":
+            counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
+            has_external_progress = bool(snapshot.get("active_run_id")) or int(counts.get("bash_running_count") or 0) > 0
+            if not has_external_progress:
+                return
         self._schedule_turn_later(quest_id, reason="auto_continue", delay_seconds=_AUTO_CONTINUE_DELAY_SECONDS)
 
     def _schedule_turn_later(self, quest_id: str, *, reason: str, delay_seconds: float) -> None:
@@ -2634,6 +2789,14 @@ class DaemonApp:
             status = str(snapshot.get("status") or snapshot.get("runtime_status") or "").strip().lower()
             if status in {"completed", "paused", "stopped", "error", "waiting_for_user"}:
                 return
+            continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+            if continuation_policy in {"none", "wait_for_user_or_resume"}:
+                return
+            if continuation_policy == "when_external_progress":
+                counts = snapshot.get("counts") if isinstance(snapshot.get("counts"), dict) else {}
+                has_external_progress = bool(snapshot.get("active_run_id")) or int(counts.get("bash_running_count") or 0) > 0
+                if not has_external_progress:
+                    return
             self.schedule_turn(quest_id, reason=reason)
 
         threading.Thread(
@@ -3491,6 +3654,13 @@ class DaemonApp:
                 normalized = {
                     **normalized,
                     "_qq_main_chat_binding": qq_binding,
+                }
+        if connector_name == "weixin":
+            replay = self._maybe_replay_weixin_pending_outbox(normalized)
+            if replay is not None:
+                normalized = {
+                    **normalized,
+                    "_weixin_replay": replay,
                 }
         reply = self._route_connector_message(connector_name, normalized)
         return {
@@ -5290,6 +5460,121 @@ class DaemonApp:
         resolved = dict(config) if isinstance(config, dict) else {}
         return lingzhu_health_payload(resolved, chat_completions_enabled=True)
 
+    @staticmethod
+    def _weixin_replay_limit(config: dict[str, Any]) -> int:
+        try:
+            limit = int(config.get("stale_replay_latest_limit") or _WEIXIN_STALE_REPLAY_LIMIT_DEFAULT)
+        except (TypeError, ValueError):
+            limit = _WEIXIN_STALE_REPLAY_LIMIT_DEFAULT
+        return max(0, min(limit, 20))
+
+    @staticmethod
+    def _weixin_replay_interval_seconds(config: dict[str, Any]) -> float:
+        try:
+            interval = float(
+                config.get("stale_replay_interval_seconds") or _WEIXIN_STALE_REPLAY_INTERVAL_SECONDS_DEFAULT
+            )
+        except (TypeError, ValueError):
+            interval = _WEIXIN_STALE_REPLAY_INTERVAL_SECONDS_DEFAULT
+        return max(0.0, min(interval, 30.0))
+
+    def _weixin_connector_root(self) -> Path:
+        return self.home / "logs" / "connectors" / "weixin"
+
+    def _weixin_queued_outbox_records(self, conversation_id: str) -> list[dict[str, Any]]:
+        outbox_path = self._weixin_connector_root() / "outbox.jsonl"
+        target_key = conversation_identity_key(conversation_id)
+        items: list[dict[str, Any]] = []
+        for record in read_jsonl(outbox_path):
+            if not isinstance(record, dict):
+                continue
+            current_conversation_id = str(record.get("conversation_id") or "").strip()
+            if not current_conversation_id:
+                continue
+            if conversation_identity_key(current_conversation_id) != target_key:
+                continue
+            delivery = record.get("delivery") if isinstance(record.get("delivery"), dict) else {}
+            if not bool(delivery.get("queued", False)):
+                continue
+            attachments = [dict(item) for item in (record.get("attachments") or []) if isinstance(item, dict)]
+            if not str(record.get("text") or "").strip() and not attachments:
+                continue
+            items.append(
+                {
+                    **dict(record),
+                    "attachments": attachments,
+                }
+            )
+        return items
+
+    def _weixin_pending_outbox_records(self, conversation_id: str, *, user_id: str) -> tuple[list[dict[str, Any]], int]:
+        records = self._weixin_queued_outbox_records(conversation_id)
+        baseline = get_weixin_replay_cursor(self._weixin_connector_root(), user_id)
+        applied_baseline = max(0, min(int(baseline), len(records)))
+        return records[applied_baseline:], len(records)
+
+    @staticmethod
+    def _weixin_replay_payload(record: dict[str, Any]) -> dict[str, Any]:
+        attachments = [dict(item) for item in (record.get("attachments") or []) if isinstance(item, dict)]
+        surface_actions = [dict(item) for item in (record.get("surface_actions") or []) if isinstance(item, dict)]
+        connector_hints = dict(record.get("connector_hints")) if isinstance(record.get("connector_hints"), dict) else {}
+        return {
+            "conversation_id": record.get("conversation_id"),
+            "reply_to_message_id": record.get("reply_to_message_id"),
+            "kind": record.get("kind"),
+            "message": str(record.get("text") or ""),
+            "attachments": attachments,
+            "surface_actions": surface_actions,
+            "connector_hints": connector_hints,
+            "quest_id": record.get("quest_id"),
+            "quest_root": record.get("quest_root"),
+            "importance": record.get("importance"),
+            "response_phase": record.get("response_phase"),
+        }
+
+    def _maybe_replay_weixin_pending_outbox(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        conversation_id = str(message.get("conversation_id") or "").strip()
+        sender_id = str(message.get("sender_id") or message.get("direct_id") or "").strip()
+        if not conversation_id or not sender_id:
+            return None
+        config = self.connectors_config.get("weixin", {})
+        resolved = dict(config) if isinstance(config, dict) else {}
+        limit = self._weixin_replay_limit(resolved)
+        if limit <= 0:
+            return {"replayed_count": 0, "dropped_count": 0, "total_pending": 0}
+        pending_records, total_count = self._weixin_pending_outbox_records(conversation_id, user_id=sender_id)
+        if not pending_records:
+            return {"replayed_count": 0, "dropped_count": 0, "total_pending": 0}
+        selected_records = pending_records[-limit:]
+        dropped_count = max(0, len(pending_records) - len(selected_records))
+        update_weixin_replay_cursor(
+            self._weixin_connector_root(),
+            user_id=sender_id,
+            queued_replay_cursor=total_count,
+            last_replay_trigger_message_id=str(message.get("message_id") or "").strip() or None,
+            last_replayed_count=len(selected_records),
+            last_replay_dropped_count=dropped_count,
+        )
+        channel = self._channel_with_bindings("weixin")
+        interval_seconds = self._weixin_replay_interval_seconds(resolved)
+        for index, record in enumerate(selected_records):
+            channel.send(self._weixin_replay_payload(record))
+            if index + 1 < len(selected_records) and interval_seconds > 0:
+                time.sleep(interval_seconds)
+        self.logger.log(
+            "info",
+            "connector.weixin_replay",
+            conversation_id=conversation_id,
+            replayed_count=len(selected_records),
+            dropped_count=dropped_count,
+            trigger_message_id=str(message.get("message_id") or "").strip() or None,
+        )
+        return {
+            "replayed_count": len(selected_records),
+            "dropped_count": dropped_count,
+            "total_pending": len(pending_records),
+        }
+
     def _lingzhu_state_path(self) -> Path:
         return self.home / "logs" / "connectors" / "lingzhu" / "metis_state.json"
 
@@ -5790,6 +6075,9 @@ class DaemonApp:
         current_cursor = max(after, int(last_event_id)) if last_event_id.isdigit() else after
         heartbeat_at = time.monotonic()
         idle_sleep_seconds = 0.35
+        force_fetch = True
+        event_path = self.quest_service._quest_root(quest_id) / ".ds" / "events.jsonl"
+        previous_event_state = None
 
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -5802,26 +6090,38 @@ class DaemonApp:
 
         try:
             while True:
-                stream_path = f"/api/quests/{quest_id}/events?{urlencode({'after': current_cursor, 'limit': limit, 'format': format_name, 'session_id': session_id})}"
-                payload = self.handlers.quest_events(quest_id, path=stream_path)
-                updates = payload.get("acp_updates") or []
-                if updates:
-                    for update in updates:
-                        update_cursor = str(((update.get("params") or {}).get("update") or {}).get("cursor") or "")
+                current_event_state = self.quest_service._path_state(event_path)
+                if force_fetch or current_event_state != previous_event_state:
+                    stream_path = f"/api/quests/{quest_id}/events?{urlencode({'after': current_cursor, 'limit': limit, 'format': format_name, 'session_id': session_id})}"
+                    payload = self.handlers.quest_events(quest_id, path=stream_path)
+                    previous_event_state = current_event_state
+                    updates = payload.get("acp_updates") or []
+                    if updates:
+                        for update in updates:
+                            update_cursor = str(((update.get("params") or {}).get("update") or {}).get("cursor") or "")
+                            self._write_sse_event(
+                                handler,
+                                event="acp_update",
+                                data=update,
+                                event_id=update_cursor or None,
+                            )
+                        current_cursor = int(payload.get("cursor") or current_cursor)
                         self._write_sse_event(
                             handler,
-                            event="acp_update",
-                            data=update,
-                            event_id=update_cursor or None,
+                            event="cursor",
+                            data={"cursor": current_cursor, "quest_id": quest_id},
                         )
-                    current_cursor = int(payload.get("cursor") or current_cursor)
-                    self._write_sse_event(
-                        handler,
-                        event="cursor",
-                        data={"cursor": current_cursor, "quest_id": quest_id},
-                    )
-                    heartbeat_at = time.monotonic()
-                    idle_sleep_seconds = 0.2
+                        heartbeat_at = time.monotonic()
+                        force_fetch = bool(payload.get("has_more"))
+                        idle_sleep_seconds = 0.05 if force_fetch else 0.2
+                    else:
+                        force_fetch = False
+                        now = time.monotonic()
+                        if now - heartbeat_at >= 10:
+                            handler.wfile.write(b": keep-alive\n\n")
+                            handler.wfile.flush()
+                            heartbeat_at = now
+                        idle_sleep_seconds = min(1.5, idle_sleep_seconds * 1.35)
                 else:
                     now = time.monotonic()
                     if now - heartbeat_at >= 10:
@@ -5881,49 +6181,75 @@ class DaemonApp:
 
         previous_snapshot: dict[str, dict[str, object]] = {}
         heartbeat_at = time.monotonic()
+        summary_path = self.bash_exec_service.summary_path(quest_root)
+        index_path = self.bash_exec_service.index_path(quest_root)
+        previous_summary_state = None
+        previous_index_state = None
+        has_active_sessions = False
+        last_full_refresh_at = 0.0
         try:
             while True:
-                sessions = list_payload()
-                current_snapshot = {
-                    str(item.get("bash_id") or ""): item
-                    for item in sessions
-                    if item.get("bash_id")
-                }
-                if not previous_snapshot:
-                    self._write_sse_event(
-                        handler,
-                        event="snapshot",
-                        data={"sessions": sessions},
+                current_summary_state = self.quest_service._path_state(summary_path)
+                current_index_state = self.quest_service._path_state(index_path)
+                should_refresh = (
+                    not previous_snapshot
+                    or current_summary_state != previous_summary_state
+                    or current_index_state != previous_index_state
+                    or (has_active_sessions and time.monotonic() - last_full_refresh_at >= 3.0)
+                )
+                if should_refresh:
+                    sessions = list_payload()
+                    current_snapshot = {
+                        str(item.get("bash_id") or ""): item
+                        for item in sessions
+                        if item.get("bash_id")
+                    }
+                    has_active_sessions = any(
+                        str(item.get("status") or "").strip().lower() in {"running", "terminating"}
+                        for item in current_snapshot.values()
                     )
-                    previous_snapshot = current_snapshot
-                    heartbeat_at = time.monotonic()
-                else:
-                    changed = [
-                        session
-                        for bash_id, session in current_snapshot.items()
-                        if previous_snapshot.get(bash_id) != session
-                    ]
-                    removed = set(previous_snapshot) - set(current_snapshot)
-                    for session in changed:
+                    previous_summary_state = self.quest_service._path_state(summary_path)
+                    previous_index_state = self.quest_service._path_state(index_path)
+                    last_full_refresh_at = time.monotonic()
+                    if not previous_snapshot:
                         self._write_sse_event(
                             handler,
-                            event="session",
-                            data={"session": session},
+                            event="snapshot",
+                            data={"sessions": sessions},
                         )
-                    for bash_id in removed:
-                        self._write_sse_event(
-                            handler,
-                            event="session",
-                            data={"session": {"bash_id": bash_id, "status": "terminated"}},
-                        )
-                    if changed or removed:
                         previous_snapshot = current_snapshot
                         heartbeat_at = time.monotonic()
-                    elif time.monotonic() - heartbeat_at >= 10:
-                        handler.wfile.write(b": keep-alive\n\n")
-                        handler.wfile.flush()
-                        heartbeat_at = time.monotonic()
-                time.sleep(0.4)
+                    else:
+                        changed = [
+                            session
+                            for bash_id, session in current_snapshot.items()
+                            if previous_snapshot.get(bash_id) != session
+                        ]
+                        removed = set(previous_snapshot) - set(current_snapshot)
+                        for session in changed:
+                            self._write_sse_event(
+                                handler,
+                                event="session",
+                                data={"session": session},
+                            )
+                        for bash_id in removed:
+                            self._write_sse_event(
+                                handler,
+                                event="session",
+                                data={"session": {"bash_id": bash_id, "status": "terminated"}},
+                            )
+                        if changed or removed:
+                            previous_snapshot = current_snapshot
+                            heartbeat_at = time.monotonic()
+                        elif time.monotonic() - heartbeat_at >= 10:
+                            handler.wfile.write(b": keep-alive\n\n")
+                            handler.wfile.flush()
+                            heartbeat_at = time.monotonic()
+                elif time.monotonic() - heartbeat_at >= 10:
+                    handler.wfile.write(b": keep-alive\n\n")
+                    handler.wfile.flush()
+                    heartbeat_at = time.monotonic()
+                time.sleep(0.5 if has_active_sessions else 2.0)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
 

@@ -7,6 +7,9 @@ description: Use when a quest needs concrete hypotheses, limitation analysis, ca
 
 Use this skill to turn the current baseline and problem frame into concrete, literature-grounded, testable directions.
 
+When `startup_contract.need_research_paper = false` and the quest already has a concrete optimization handle, `idea` may stop after selecting or seeding a direction and then hand off into `optimize` instead of insisting on the full paper-oriented ideation loop.
+In that algorithm-first case, `idea` should usually produce a small method-brief frontier and then defer candidate ranking, promotion, and bounded search to `optimize`.
+
 ## Interaction discipline
 
 - Follow the shared interaction contract injected by the system prompt.
@@ -38,6 +41,15 @@ The output must survive three checks at once:
 - novelty or at least clear research value
 - feasibility in the current repo and resource budget
 - manuscript defensibility if the line later becomes a paper claim
+
+When the route already looks likely to become a paper-facing line, seed one lightweight structured outline candidate during idea work.
+Use `artifact.submit_paper_outline(mode='candidate', ...)` for that seed instead of leaving the future paper structure only in prose.
+Use `references/outline-seeding-example.md` for the minimum acceptable shape.
+The idea-stage outline candidate is not the full paper line yet, but it should already name the likely `research_questions`, `experimental_designs`, and the first section-level evidence needs that later supplementary slices must satisfy.
+Keep that seed minimal and executable: a small section skeleton plus expected evidence items is better than a long narrative outline with no concrete evidence hooks.
+If the current research head, strongest measured branch, or active runtime refs are unclear after resume, call `artifact.get_quest_state(detail='summary')` and `artifact.list_research_branches(...)` before choosing a foundation.
+If the current brief / plan / status wording matters for direction choice, call `artifact.read_quest_documents(...)`.
+If earlier user conversation materially changes the direction-selection target, call `artifact.get_conversation_context(...)` before locking the next idea.
 
 Finishing one idea deliverable is not quest completion.
 After reporting a completed idea package, continue into the next justified stage unless a real blocking decision is still unresolved.
@@ -106,6 +118,10 @@ Break ties primarily through careful reasoning over:
 - Do not write, promote, or submit a final idea until the durable survey covers at least `5` and usually `5-10` task-modeling-related, mechanism-relevant, or otherwise directly usable papers.
 - Treat that literature floor as a hard gate, not a suggestion.
   If the direct task-modeling neighborhood truly contains fewer than `5` usable papers, record that evidence explicitly and fill the remaining slots with the closest adjacent papers whose mechanism can be translated into the current task and codebase.
+- Algorithm-first exception:
+  - when `startup_contract.need_research_paper = false` and a concrete optimization handle already exists, you may stop after a memory sweep plus a small targeted paper check instead of satisfying the full `5-10` paper floor
+  - use that exception only when the immediate goal is method-brief selection for `optimize`, not paper-level novelty claims
+  - if you use the exception, say explicitly that the output is an optimization brief frontier rather than a paper-ready idea package
 - Every fresh idea build or idea-refinement pass must begin with:
   - a memory sweep, and
   - an external literature sweep.
@@ -139,6 +155,11 @@ Break ties primarily through careful reasoning over:
   - what limitation it targets
   - why prior methods do not already solve it
   - what evidence would later be needed to defend the claim
+- When the likely next route is a paper-facing main experiment plus analysis package, do not stop at prose-only idea notes; seed the likely `research_questions`, `experimental_designs`, and per-section evidence needs in the outline candidate.
+- If the likely route already has a clear paper-facing structure, seed the future paper line early:
+  - identify the likely main-text sections
+  - identify which sections will need supplementary evidence rather than only the main run
+  - identify the concrete evidence items that must later be maintained in the paper line's outline folder or compiled outline contract
 - If the idea is not novel but still worth doing, state that honestly as:
   - replication value
   - transfer-to-new-setting value

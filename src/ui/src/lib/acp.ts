@@ -601,6 +601,14 @@ export function useQuestWorkspace(questId: string | null) {
   const historyRef = useRef<FeedItem[]>([])
   const pendingFeedRef = useRef<FeedItem[]>([])
   const detailsEnabledRef = useRef(false)
+  const sessionInFlightRef = useRef<{
+    questId: string
+    promise: Promise<SessionPayload | null>
+  } | null>(null)
+  const detailsInFlightRef = useRef<{
+    questId: string
+    promise: Promise<void>
+  } | null>(null)
   const detailsRefreshTimerRef = useRef<number | null>(null)
   const detailsRefreshInFlightRef = useRef(false)
   const detailsRefreshPendingRef = useRef(false)
@@ -664,40 +672,77 @@ export function useQuestWorkspace(questId: string | null) {
     }
   }, [])
 
-  const hydrateState = useCallback(async (targetQuestId: string) => {
-    const nextSession = await client.session(targetQuestId)
-    if (questIdRef.current !== targetQuestId) {
-      return null
+  const fetchSessionState = useCallback(async (targetQuestId: string) => {
+    const inFlight = sessionInFlightRef.current
+    if (inFlight && inFlight.questId === targetQuestId) {
+      return inFlight.promise
     }
-    setSession(nextSession)
-    setSnapshot(nextSession.snapshot)
-    return nextSession
+
+    const promise = client
+      .session(targetQuestId)
+      .then((nextSession) => {
+        if (questIdRef.current !== targetQuestId) {
+          return null
+        }
+        setSession(nextSession)
+        setSnapshot(nextSession.snapshot)
+        return nextSession
+      })
+      .finally(() => {
+        if (sessionInFlightRef.current?.promise === promise) {
+          sessionInFlightRef.current = null
+        }
+      })
+
+    sessionInFlightRef.current = {
+      questId: targetQuestId,
+      promise,
+    }
+    return promise
   }, [])
 
+  const hydrateState = useCallback(
+    async (targetQuestId: string) => fetchSessionState(targetQuestId),
+    [fetchSessionState]
+  )
+
   const hydrateDetailsState = useCallback(async (targetQuestId: string) => {
-    const [nextMemory, nextDocuments, nextWorkflow] = await Promise.all([
+    const inFlight = detailsInFlightRef.current
+    if (inFlight && inFlight.questId === targetQuestId) {
+      return inFlight.promise
+    }
+
+    const promise = Promise.all([
       client.memory(targetQuestId),
       client.documents(targetQuestId),
       client.workflow(targetQuestId),
     ])
-    if (questIdRef.current !== targetQuestId) {
-      return
+      .then(([nextMemory, nextDocuments, nextWorkflow]) => {
+        if (questIdRef.current !== targetQuestId) {
+          return
+        }
+        setMemory(nextMemory)
+        setDocuments(nextDocuments)
+        setWorkflow(nextWorkflow)
+        setDetailsReady(true)
+      })
+      .finally(() => {
+        if (detailsInFlightRef.current?.promise === promise) {
+          detailsInFlightRef.current = null
+        }
+      })
+
+    detailsInFlightRef.current = {
+      questId: targetQuestId,
+      promise,
     }
-    setMemory(nextMemory)
-    setDocuments(nextDocuments)
-    setWorkflow(nextWorkflow)
-    setDetailsReady(true)
+    return promise
   }, [])
 
-  const syncSessionSnapshot = useCallback(async (targetQuestId: string) => {
-    const nextSession = await client.session(targetQuestId)
-    if (questIdRef.current !== targetQuestId) {
-      return null
-    }
-    setSession(nextSession)
-    setSnapshot(nextSession.snapshot)
-    return nextSession
-  }, [])
+  const syncSessionSnapshot = useCallback(
+    async (targetQuestId: string) => fetchSessionState(targetQuestId),
+    [fetchSessionState]
+  )
 
   const clearDetailsRefresh = useCallback(() => {
     if (detailsRefreshTimerRef.current) {
@@ -1148,6 +1193,8 @@ export function useQuestWorkspace(questId: string | null) {
     setConnectionState(questId ? 'connecting' : 'connected')
     setError(null)
     detailsEnabledRef.current = false
+    sessionInFlightRef.current = null
+    detailsInFlightRef.current = null
     detailsRefreshInFlightRef.current = false
     clearDetailsRefresh()
     clearSessionRefresh()

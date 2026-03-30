@@ -114,12 +114,13 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
         flow_type = str(record.get("flow_type") or "").strip().lower()
         protocol_step = str(record.get("protocol_step") or "").strip().lower()
         if flow_type == "baseline_gate" and protocol_step == "confirm":
+            next_skill = "idea" if _need_research_paper_from_record(record) else "optimize"
             return _guidance(
                 current_anchor="baseline",
-                recommended_skill="idea",
+                recommended_skill=next_skill,
                 recommended_action="continue",
-                summary="Baseline gate confirmed. Move into idea selection relative to the accepted baseline.",
-                why_now="The accepted baseline is now explicitly available as the downstream comparison anchor, so ideation is the next real leverage point.",
+                summary="Baseline gate confirmed. Move into the next algorithmic route-selection stage relative to the accepted baseline.",
+                why_now="The accepted baseline is now explicitly available as the downstream comparison anchor, so the next leverage point is to choose and promote the strongest next direction.",
                 complete_when=[
                     "At least one candidate idea is recorded durably.",
                     "A decision artifact selects, rejects, or branches the current direction.",
@@ -165,23 +166,62 @@ def build_guidance_for_record(record: dict[str, Any]) -> dict[str, Any]:
     if kind == "idea":
         flow_type = str(record.get("flow_type") or "").strip().lower()
         protocol_step = str(record.get("protocol_step") or "").strip().lower()
-        if flow_type == "idea_submission" and protocol_step in {"create", "revise"}:
+        if flow_type == "idea_submission" and protocol_step == "candidate":
             return _guidance(
                 current_anchor="idea",
-                recommended_skill="experiment",
-                recommended_action="launch_experiment",
-                summary="Idea branch is ready. Continue with the main experiment on this active research node.",
-                why_now="The accepted idea already has its durable branch/worktree, so the next leverage point is evidence production rather than another route-selection loop.",
+                recommended_skill="optimize",
+                recommended_action="continue",
+                summary="Candidate idea recorded. Compare it against the other candidate briefs before promoting a durable branch.",
+                why_now="This candidate is a lightweight optimization brief rather than a committed research line. Rank or refine the candidate pool first, then promote only the strongest directions into durable branches.",
                 complete_when=[
-                    "A main experiment is recorded on this idea branch.",
-                    "Metrics versus baseline are written durably.",
+                    "The candidate pool is narrowed to the strongest 1 to 3 directions.",
+                    "Any promoted direction is resubmitted as a durable line with `submission_mode='line'`.",
+                ],
+                alternative_routes=[
+                    _route("continue", "Refine candidate pool", "Several candidate briefs still overlap or lack a clear winner.", "Improves selection quality, but delays implementation."),
+                    _route("launch_experiment", "Promote immediately", "This candidate is already clearly stronger than the alternatives.", "Moves faster, but risks under-explored alternatives."),
+                ],
+                suggested_artifact_calls=[
+                    _artifact_call(
+                        "artifact.submit_idea(mode='create', submission_mode='line', source_candidate_id=..., lineage_intent='continue_line'|'branch_alternative', ...)",
+                        "Promote the chosen candidate brief into a durable optimization line.",
+                    ),
+                    _artifact_call("artifact.record(kind='decision', ...)", "Record why a candidate was promoted, deferred, or rejected."),
+                ],
+                source_artifact_kind=kind,
+                source_artifact_id=artifact_id,
+                related_paths=[str(path) for path in related_paths],
+            )
+        if flow_type == "idea_submission" and protocol_step in {"create", "revise"}:
+            details = dict(record.get("details") or {}) if isinstance(record.get("details"), dict) else {}
+            next_target = _normalize_anchor(details.get("next_target") or record.get("next_target") or "experiment")
+            recommended_skill = next_target if next_target in {
+                "scout",
+                "baseline",
+                "idea",
+                "optimize",
+                "experiment",
+                "analysis-campaign",
+                "write",
+                "finalize",
+                "decision",
+            } else "experiment"
+            return _guidance(
+                current_anchor="idea",
+                recommended_skill=recommended_skill,
+                recommended_action="continue" if recommended_skill == "optimize" else "launch_experiment",
+                summary="Idea branch is ready. Continue with the next active optimization stage on this durable research node.",
+                why_now="The accepted idea already has its durable branch/worktree, so the next leverage point is the configured next stage rather than another route-selection loop.",
+                complete_when=[
+                    "The next configured stage starts from this branch.",
+                    "The resulting evidence or decision is written durably.",
                 ],
                 alternative_routes=[
                     _route("continue", "Inspect the branch once", "A quick branch sanity check is still needed before running.", "Adds caution, but should stay short."),
                     _route("launch_analysis_campaign", "Analyze first", "The idea package still has unresolved setup ambiguity that needs clarification.", "Can reduce wasted runs, but is unusual before a first main result."),
                 ],
                 suggested_artifact_calls=[
-                    _artifact_call("artifact.record_main_experiment(...)", "Record the first real main result on this branch."),
+                    _artifact_call("artifact.record_main_experiment(...)", "Record the first real main result on this branch when the next stage is experiment-oriented."),
                 ],
                 source_artifact_kind=kind,
                 source_artifact_id=artifact_id,

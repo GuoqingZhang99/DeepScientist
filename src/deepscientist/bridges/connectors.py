@@ -18,8 +18,11 @@ from ..connector.weixin_support import (
     WEIXIN_UPLOAD_MEDIA_FILE,
     WEIXIN_UPLOAD_MEDIA_IMAGE,
     WEIXIN_UPLOAD_MEDIA_VIDEO,
+    clear_weixin_context_send_state,
     download_weixin_remote_attachment,
+    get_weixin_context_entry,
     get_weixin_context_token,
+    mark_weixin_context_stale,
     normalize_weixin_base_url,
     normalize_weixin_cdn_base_url,
     send_weixin_message,
@@ -558,10 +561,11 @@ class QQConnectorBridge(BaseConnectorBridge):
             connector_delivery = item.get("connector_delivery") if isinstance(item.get("connector_delivery"), dict) else {}
             qq_delivery = connector_delivery.get("qq") if isinstance(connector_delivery.get("qq"), dict) else {}
             media_kind = str(qq_delivery.get("media_kind") or "").strip().lower()
+            allow_internal_auto_media = bool(qq_delivery.get("allow_internal_auto_media"))
             if media_kind not in {"image", "file"}:
                 residual_items.append(item)
                 continue
-            if not native_enabled:
+            if not native_enabled and not allow_internal_auto_media:
                 issues.append(
                     {
                         "attachment_index": index,
@@ -783,6 +787,7 @@ class WeixinConnectorBridge(BaseConnectorBridge):
     _MEDIA_SEND_INITIAL_DELAY_SECONDS = 0.8
     _TEXT_SEND_RETRY_DELAYS_SECONDS = (0.8, 1.5, 3.0)
     _MEDIA_SEND_RETRY_DELAYS_SECONDS = (1.5, 3.0, 5.0)
+    _STALE_CONTEXT_SUPPRESSED_KINDS = {"progress", "milestone", "assistant", "summary", "ack"}
 
     def deliver(self, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
         return self.deliver_direct(payload, config)
@@ -801,14 +806,26 @@ class WeixinConnectorBridge(BaseConnectorBridge):
                 "error": "Weixin outbound target is empty.",
             }
         connector_root = self._connector_root(config)
+        kind = str(payload.get("kind") or "").strip().lower()
+        context_entry = get_weixin_context_entry(connector_root, to_user_id)
         context_token = get_weixin_context_token(connector_root, to_user_id)
         if not context_token:
+            if kind in self._STALE_CONTEXT_SUPPRESSED_KINDS:
+                return self._queued_context_wait_response(
+                    reason=f"Weixin context_token is missing for `{to_user_id}`. Waiting for the next inbound message.",
+                )
             return {
                 "ok": False,
                 "queued": False,
                 "transport": "weixin-ilink",
                 "error": f"Weixin context_token is missing for `{to_user_id}`. Wait for one inbound message first.",
             }
+        if bool(context_entry.get("stale_context")) and kind in self._STALE_CONTEXT_SUPPRESSED_KINDS:
+            stale_since = str(context_entry.get("stale_since") or "").strip()
+            warning = "Weixin outbound is paused until the next inbound message refreshes context_token."
+            if stale_since:
+                warning = f"{warning} stale_since={stale_since}"
+            return self._queued_context_wait_response(reason=warning)
 
         native_attachments, residual_attachments, warnings = self._partition_native_attachments(payload.get("attachments"))
         rendered_text = self.render_text(payload.get("text"), residual_attachments)
@@ -896,6 +913,20 @@ class WeixinConnectorBridge(BaseConnectorBridge):
             else:
                 warnings.append("Weixin outbound payload contained neither text nor sendable attachments.")
         except Exception as exc:
+            if "ret=-2" in str(exc or "").lower():
+                mark_weixin_context_stale(
+                    connector_root,
+                    user_id=to_user_id,
+                    error=str(exc),
+                    kind=kind or None,
+                )
+                if kind in self._STALE_CONTEXT_SUPPRESSED_KINDS:
+                    queued = self._queued_context_wait_response(
+                        reason="Weixin send hit stale context and was deferred until the next inbound refresh.",
+                    )
+                    queued["parts"] = parts
+                    queued["warnings"] = [*warnings, *(queued.get("warnings") or [])]
+                    return queued
             return {
                 "ok": False,
                 "queued": False,
@@ -910,6 +941,12 @@ class WeixinConnectorBridge(BaseConnectorBridge):
         error_messages = [str(item.get("error") or "").strip() for item in failed if str(item.get("error") or "").strip()]
         error_messages.extend(warnings)
         last_success = succeeded[-1] if succeeded else {}
+        if succeeded:
+            clear_weixin_context_send_state(
+                connector_root,
+                user_id=to_user_id,
+                kind=kind or None,
+            )
         return {
             "ok": bool(succeeded),
             "queued": False,
@@ -919,6 +956,17 @@ class WeixinConnectorBridge(BaseConnectorBridge):
             "parts": parts,
             "warnings": warnings,
             "error": "; ".join(error_messages) if error_messages else None,
+        }
+
+    @staticmethod
+    def _queued_context_wait_response(*, reason: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "queued": True,
+            "transport": "weixin-ilink",
+            "parts": [],
+            "warnings": [str(reason or "").strip()],
+            "error": None,
         }
 
     @staticmethod

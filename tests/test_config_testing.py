@@ -40,6 +40,7 @@ def test_default_config_removes_report_palette_settings_and_keeps_qq_media_polic
     assert connectors_payload["qq"]["auto_send_slice_png"] is True
     assert connectors_payload["qq"]["auto_send_paper_pdf"] is True
     assert connectors_payload["qq"]["enable_file_upload_experimental"] is False
+    assert connectors_payload["weixin"]["auto_send_main_experiment_png"] is True
 
 
 def test_config_normalization_strips_legacy_report_palette_block(temp_home: Path) -> None:

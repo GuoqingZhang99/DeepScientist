@@ -99,6 +99,211 @@ export interface QuestSummary {
   paths?: Record<string, string | null | undefined>
   recent_artifacts?: RecentArtifact[]
   recent_runs?: RecentRun[]
+  idea_lines?: Array<{
+    idea_line_id: string
+    idea_id: string
+    idea_branch?: string | null
+    idea_title?: string | null
+    lineage_intent?: string | null
+    parent_branch?: string | null
+    latest_main_run_id?: string | null
+    latest_main_run_branch?: string | null
+    paper_line_id?: string | null
+    paper_branch?: string | null
+    selected_outline_ref?: string | null
+    analysis_campaign_count?: number
+    analysis_slice_count?: number
+    completed_analysis_slice_count?: number
+    mapped_analysis_slice_count?: number
+    required_count?: number
+    ready_required_count?: number
+    unmapped_count?: number
+    open_supplementary_count?: number
+    draft_status?: string | null
+    bundle_status?: string | null
+    updated_at?: string | null
+    paths?: Record<string, string | null | undefined>
+  }>
+  active_idea_line_ref?: string | null
+  paper_lines?: Array<{
+    paper_line_id: string
+    paper_branch?: string | null
+    paper_root?: string | null
+    workspace_root?: string | null
+    source_branch?: string | null
+    source_run_id?: string | null
+    source_idea_id?: string | null
+    selected_outline_ref?: string | null
+    title?: string | null
+    required_count?: number
+    ready_required_count?: number
+    section_count?: number
+    ready_section_count?: number
+    unmapped_count?: number
+    open_supplementary_count?: number
+    draft_status?: string | null
+    bundle_status?: string | null
+    updated_at?: string | null
+    paths?: Record<string, string | null | undefined>
+  }>
+  active_paper_line_ref?: string | null
+  paper_contract_health?: {
+    paper_line_id?: string | null
+    paper_branch?: string | null
+    selected_outline_ref?: string | null
+    contract_ok?: boolean
+    writing_ready?: boolean
+    finalize_ready?: boolean
+    required_count?: number
+    ready_required_count?: number
+    section_count?: number
+    ready_section_count?: number
+    ledger_item_count?: number
+    unresolved_required_count?: number
+    unmapped_completed_count?: number
+    open_supplementary_count?: number
+    blocking_open_supplementary_count?: number
+    draft_status?: string | null
+    bundle_status?: string | null
+    blocking_reasons?: string[]
+    recommended_next_stage?: string | null
+    recommended_action?: string | null
+    unresolved_required_items?: Array<{
+      section_id?: string | null
+      section_title?: string | null
+      item_id?: string | null
+      status?: string | null
+    }>
+    unmapped_completed_items?: Array<{
+      campaign_id?: string | null
+      slice_id?: string | null
+      item_id?: string | null
+      section_id?: string | null
+      title?: string | null
+    }>
+    blocking_pending_slices?: Array<{
+      campaign_id?: string | null
+      slice_id?: string | null
+      item_id?: string | null
+      section_id?: string | null
+      title?: string | null
+    }>
+  } | null
+  paper_contract?: {
+    paper_root?: string | null
+    workspace_root?: string | null
+    paper_branch?: string | null
+    source_branch?: string | null
+    selected_outline_ref?: string | null
+    title?: string | null
+    story?: string | null
+    research_questions?: string[]
+    experimental_designs?: string[]
+    contributions?: string[]
+    evidence_contract?: Record<string, unknown> | null
+    evidence_summary?: {
+      item_count?: number
+      main_text_ready_count?: number
+      appendix_item_count?: number
+      unmapped_item_count?: number
+    } | null
+    summary?: string | null
+    sections?: Array<{
+      section_id: string
+      title: string
+      paper_role?: string | null
+      status?: string | null
+      claims?: string[]
+      required_items?: string[]
+      optional_items?: string[]
+      result_table?: Array<{
+        item_id?: string | null
+        title?: string | null
+        kind?: string | null
+        paper_role?: string | null
+        status?: string | null
+        claim_links?: string[]
+        metric_summary?: string | null
+        result_summary?: string | null
+        source_paths?: string[]
+        updated_at?: string | null
+      }>
+    }>
+    paths?: Record<string, string | null | undefined>
+    bundle_manifest?: Record<string, unknown> | null
+    outline_payload?: Record<string, unknown> | null
+  } | null
+  paper_evidence?: {
+    paper_root?: string | null
+    workspace_root?: string | null
+    selected_outline_ref?: string | null
+    item_count?: number
+    main_text_ready_count?: number
+    appendix_item_count?: number
+    unmapped_item_count?: number
+    paths?: Record<string, string | null | undefined>
+    items?: Array<{
+      item_id?: string | null
+      title?: string | null
+      kind?: string | null
+      paper_role?: string | null
+      section_id?: string | null
+      status?: string | null
+      claim_links?: string[]
+      setup?: string | null
+      result_summary?: string | null
+      source_paths?: string[]
+      key_metrics?: Array<{
+        metric_id?: string | null
+        value?: unknown
+        direction?: string | null
+        decimals?: number | null
+      }>
+    }>
+  } | null
+  analysis_inventory?: {
+    campaign_count?: number
+    slice_count?: number
+    completed_slice_count?: number
+    mapped_slice_count?: number
+    campaigns?: Array<{
+      campaign_id: string
+      title?: string | null
+      active_idea_id?: string | null
+      parent_run_id?: string | null
+      parent_branch?: string | null
+      paper_line_id?: string | null
+      paper_line_branch?: string | null
+      paper_line_root?: string | null
+      selected_outline_ref?: string | null
+      todo_manifest_path?: string | null
+      campaign_path?: string | null
+      summary_path?: string | null
+      summary_excerpt?: string | null
+      slice_count?: number
+      completed_slice_count?: number
+      mapped_slice_count?: number
+      pending_slice_count?: number
+      slices?: Array<{
+        slice_id: string
+        title?: string | null
+        status?: string | null
+        tier?: string | null
+        exp_id?: string | null
+        paper_role?: string | null
+        section_id?: string | null
+        item_id?: string | null
+        claim_links?: string[]
+        branch?: string | null
+        worktree_root?: string | null
+        mapped?: boolean | null
+        research_question?: string | null
+        experimental_design?: string | null
+        result_path?: string | null
+        result_excerpt?: string | null
+      }>
+    }>
+  } | null
 }
 
 export type BaselineRegistryVariant = {
@@ -828,6 +1033,94 @@ export interface WorkflowPayload {
     document_id?: string
     writable?: boolean
   }>
+  optimization_frontier?: {
+    mode?: string | null
+    frontier_reason?: string | null
+    active_anchor?: string | null
+    best_branch?: {
+      branch_name?: string | null
+      branch_no?: string | null
+      idea_id?: string | null
+      idea_title?: string | null
+      lineage_intent?: string | null
+      updated_at?: string | null
+    } | null
+    best_run?: {
+      run_id?: string | null
+      summary?: string | null
+      verdict?: string | null
+      status?: string | null
+      delta_vs_baseline?: number | null
+      recommended_next_route?: string | null
+      updated_at?: string | null
+    } | null
+    top_branches?: Array<{
+      branch_name?: string | null
+      branch_no?: string | null
+      idea_id?: string | null
+      idea_title?: string | null
+      method_brief?: string | null
+      selection_scores?: Record<string, unknown> | null
+      mechanism_family?: string | null
+      change_layer?: string | null
+      source_lens?: string | null
+      lineage_intent?: string | null
+      has_main_result?: boolean
+      updated_at?: string | null
+      latest_main_experiment?: {
+        run_id?: string | null
+        delta_vs_baseline?: number | null
+        recommended_next_route?: string | null
+        breakthrough?: boolean | null
+        updated_at?: string | null
+      } | null
+    }>
+    candidate_briefs?: Array<{
+      idea_id?: string | null
+      title?: string | null
+      problem?: string | null
+      method_brief?: string | null
+      selection_scores?: Record<string, unknown> | null
+      mechanism_family?: string | null
+      change_layer?: string | null
+      source_lens?: string | null
+      next_target?: string | null
+      candidate_root?: string | null
+      idea_md_path?: string | null
+      idea_draft_path?: string | null
+      updated_at?: string | null
+    }>
+    implementation_candidates?: Array<{
+      candidate_id?: string | null
+      idea_id?: string | null
+      branch?: string | null
+      strategy?: string | null
+      status?: string | null
+      summary?: string | null
+      linked_run_id?: string | null
+      artifact_path?: string | null
+      updated_at?: string | null
+    }>
+    candidate_backlog?: {
+      candidate_brief_count?: number
+      implementation_candidate_count?: number
+      active_implementation_candidate_count?: number
+      failed_implementation_candidate_count?: number
+    } | null
+    stagnant_branches?: Array<{
+      branch_name?: string | null
+      branch_no?: string | null
+      idea_id?: string | null
+      idea_title?: string | null
+    }>
+    fusion_candidates?: Array<{
+      branch_name?: string | null
+      idea_id?: string | null
+      idea_title?: string | null
+      latest_main_run_id?: string | null
+    }>
+    recommended_next_actions?: string[]
+  } | null
 }
 
 export interface QuestArtifactRecord {

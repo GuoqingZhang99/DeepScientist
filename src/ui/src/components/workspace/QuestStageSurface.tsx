@@ -792,6 +792,11 @@ export function QuestStageSurface({
   const idea = asRecord(details.idea)
   const branch = asRecord(details.branch)
   const experiment = asRecord(details.experiment)
+  const ideaMethodBrief = asString(idea.method_brief) || asString(branch.method_brief)
+  const ideaSelectionScores = asRecord(idea.selection_scores) || asRecord(branch.selection_scores)
+  const ideaMechanismFamily = asString(idea.mechanism_family) || asString(branch.mechanism_family)
+  const ideaChangeLayer = asString(idea.change_layer) || asString(branch.change_layer)
+  const ideaSourceLens = asString(idea.source_lens) || asString(branch.source_lens)
   const paperDrafting = asRecord(paper.drafting)
   const paperBuild = stagePaperBuild
   const bundleManifest = asRecord(paperBuild.bundle_manifest)
@@ -1250,6 +1255,22 @@ export function QuestStageSurface({
                   ) : null}
                 </div>
               ))}
+            </div>
+          </StageSection>
+            ) : null}
+
+            {(ideaMethodBrief || Object.keys(ideaSelectionScores).length || ideaMechanismFamily || ideaChangeLayer || ideaSourceLens) ? (
+          <StageSection title="Method Layer" hint="This is the optimization-facing method object attached to the idea or branch.">
+            <div className="grid gap-4">
+              <StageKeyValueList
+                items={[
+                  { label: 'Mechanism Family', value: ideaMechanismFamily },
+                  { label: 'Change Layer', value: ideaChangeLayer },
+                  { label: 'Source Lens', value: ideaSourceLens },
+                ]}
+              />
+              <StageInlineContent title="Method Brief" value={ideaMethodBrief} />
+              <StageInlineContent title="Selection Scores" value={ideaSelectionScores} tone="muted" />
             </div>
           </StageSection>
             ) : null}

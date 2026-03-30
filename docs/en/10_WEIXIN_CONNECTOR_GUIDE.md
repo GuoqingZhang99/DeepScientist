@@ -20,6 +20,7 @@ After binding succeeds, DeepScientist can:
 - copy inbound attachments into the active quest under `userfiles/weixin/...`
 - send text replies back to the same WeChat context
 - send native WeChat images, videos, and files when the agent attaches a real local file
+- send auto-generated metric timeline images after each recorded main experiment when WeChat is the bound quest connector
 
 Inbound media is materialized into the quest, not kept only in an ephemeral connector cache. The current path shape is:
 
@@ -87,7 +88,10 @@ Current behavior:
 - inbound image, video, and file attachments are downloaded and copied into quest-local `userfiles/weixin/...`
 - media-only inbound messages are no longer dropped
 - outbound text replies use the runtime-managed `context_token`
+- if the WeChat `context_token` is missing or goes stale, low-priority outbound updates are queued instead of being dropped
+- after the next inbound WeChat message refreshes the session, DeepScientist replays only the latest `5` queued updates, with a `2s` gap between sends
 - outbound image, video, and file delivery works when the agent sends a real local file path
+- outbound main-experiment metric charts are sent automatically as native WeChat images
 
 ![Quest-local media flow](../images/weixin/weixin-quest-media-flow.svg)
 
@@ -108,6 +112,22 @@ userfiles/...
 ```
 
 instead of depending on an arbitrary external URL.
+
+## 5.1 Automatic main-experiment metric charts
+
+When WeChat is the bound quest connector, DeepScientist now auto-sends metric timeline charts after each recorded main experiment.
+
+Current behavior:
+
+- one chart per metric
+- the baseline is drawn as a horizontal dashed reference line when a baseline value exists
+- the system automatically respects whether the metric is `higher is better` or `lower is better`
+- any point that beats baseline gets a star marker
+- the latest point is filled with a deep Morandi red
+- earlier points are filled with a deep Morandi blue
+- if multiple metrics are present, DeepScientist sends them sequentially with about a 2 second gap
+
+These charts are generated from quest-local files and delivered as native WeChat images in the bound thread.
 
 ## 6. Troubleshooting
 

@@ -53,6 +53,7 @@ _OVERSIZED_EVENT_PREFIX_BYTES = 4096
 _EVENT_TYPE_BYTES_RE = re.compile(rb'"(?:type|event_type)"\s*:\s*"([^"]+)"')
 _EVENT_TOOL_NAME_BYTES_RE = re.compile(rb'"tool_name"\s*:\s*"([^"]+)"')
 _EVENT_RUN_ID_BYTES_RE = re.compile(rb'"run_id"\s*:\s*"([^"]+)"')
+CONTINUATION_POLICIES = {"auto", "when_external_progress", "wait_for_user_or_resume", "none"}
 
 
 def _oversized_event_placeholder(*, prefix: bytes, line_bytes: int) -> dict[str, Any]:
@@ -182,6 +183,8 @@ class QuestService:
         self._codex_history_cache: dict[str, dict[str, Any]] = {}
         self._runtime_state_locks_lock = threading.Lock()
         self._runtime_state_locks: dict[str, threading.Lock] = {}
+        self._artifact_projection_locks_lock = threading.Lock()
+        self._artifact_projection_locks: dict[str, threading.Lock] = {}
 
     def _quest_root(self, quest_id: str) -> Path:
         return self.quests_root / quest_id
@@ -443,7 +446,228 @@ class QuestService:
             str(path),
         )
 
-    def _collect_artifacts(self, quest_root: Path) -> list[dict[str, Any]]:
+    @staticmethod
+    def _artifact_projection_path(quest_root: Path) -> Path:
+        return quest_root / ".ds" / "cache" / "artifact_projection.v2.json"
+
+    @staticmethod
+    def _artifact_projection_lock_path(quest_root: Path) -> Path:
+        return quest_root / ".ds" / "artifact_projection.lock"
+
+    @staticmethod
+    def _json_compatible_state(value: Any) -> Any:
+        if isinstance(value, tuple):
+            return [QuestService._json_compatible_state(item) for item in value]
+        if isinstance(value, list):
+            return [QuestService._json_compatible_state(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): QuestService._json_compatible_state(item)
+                for key, item in value.items()
+            }
+        return value
+
+    @contextmanager
+    def _artifact_projection_lock(self, quest_root: Path):
+        lock_key = str(quest_root.resolve())
+        with self._artifact_projection_locks_lock:
+            thread_lock = self._artifact_projection_locks.setdefault(lock_key, threading.Lock())
+        with thread_lock:
+            lock_path = self._artifact_projection_lock_path(quest_root)
+            ensure_dir(lock_path.parent)
+            with lock_path.open("a+", encoding="utf-8") as handle:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _artifact_index_collection_state(self, quest_root: Path) -> list[list[Any]]:
+        states: list[list[Any]] = []
+        for root in self._artifact_roots(quest_root):
+            artifacts_root = root / "artifacts"
+            if not artifacts_root.exists():
+                continue
+            try:
+                label = str(root.relative_to(quest_root))
+            except ValueError:
+                label = str(root)
+            states.append(
+                [
+                    label,
+                    self._json_compatible_state(self._path_state(artifacts_root / "_index.jsonl")),
+                ]
+            )
+        return states
+
+    def _artifact_projection_state(self, quest_root: Path) -> tuple[str, Any]:
+        index_state = self._artifact_index_collection_state(quest_root)
+        if index_state and all(item[1] is not None for item in index_state):
+            return "index", index_state
+        if not index_state:
+            return "index", []
+        return "raw", self._json_compatible_state(self._artifact_collection_state(quest_root))
+
+    def _projection_artifact_item(
+        self,
+        *,
+        record: dict[str, Any],
+        artifact_path: Path,
+        workspace_root: Path,
+    ) -> dict[str, Any]:
+        return {
+            "kind": artifact_path.parent.name,
+            "path": str(artifact_path),
+            "payload": copy.deepcopy(record),
+            "workspace_root": str(workspace_root),
+        }
+
+    def _write_artifact_projection_locked(
+        self,
+        quest_root: Path,
+        *,
+        state_kind: str,
+        state: Any,
+        artifacts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        projection_path = self._artifact_projection_path(quest_root)
+        ensure_dir(projection_path.parent)
+        payload = {
+            "schema_version": 2,
+            "generated_at": utc_now(),
+            "state_kind": state_kind,
+            "state": self._json_compatible_state(state),
+            "artifacts": copy.deepcopy(artifacts),
+        }
+        write_json(projection_path, payload)
+        return copy.deepcopy(artifacts)
+
+    def refresh_artifact_projection(
+        self,
+        quest_root: Path,
+        *,
+        state_kind: str | None = None,
+        state: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        resolved_state_kind, resolved_state = (
+            (state_kind, state)
+            if state_kind is not None and state is not None
+            else self._artifact_projection_state(quest_root)
+        )
+        artifacts = self._collect_artifacts_raw(quest_root)
+        return self._write_artifact_projection_locked(
+            quest_root,
+            state_kind=resolved_state_kind,
+            state=resolved_state,
+            artifacts=artifacts,
+        )
+
+    def update_artifact_projection(
+        self,
+        quest_root: Path,
+        *,
+        record: dict[str, Any],
+        artifact_path: Path,
+        workspace_root: Path,
+        previous_state_kind: str | None = None,
+        previous_state: Any | None = None,
+        current_state_kind: str | None = None,
+        current_state: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        resolved_previous_kind = previous_state_kind
+        resolved_previous_state = self._json_compatible_state(previous_state) if previous_state is not None else None
+        resolved_current_kind, resolved_current_state = (
+            (current_state_kind, self._json_compatible_state(current_state))
+            if current_state_kind is not None and current_state is not None
+            else self._artifact_projection_state(quest_root)
+        )
+        projection_path = self._artifact_projection_path(quest_root)
+        with self._artifact_projection_lock(quest_root):
+            payload = read_json(projection_path, {})
+            projected_artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else None
+            can_incrementally_update = (
+                isinstance(payload, dict)
+                and int(payload.get("schema_version") or 0) == 2
+                and isinstance(projected_artifacts, list)
+                and resolved_previous_kind is not None
+                and payload.get("state_kind") == resolved_previous_kind
+                and self._json_compatible_state(payload.get("state")) == resolved_previous_state
+            )
+            if not can_incrementally_update:
+                return self.refresh_artifact_projection(
+                    quest_root,
+                    state_kind=resolved_current_kind,
+                    state=resolved_current_state,
+                )
+
+            artifacts: list[dict[str, Any]] = [
+                dict(item)
+                for item in projected_artifacts
+                if isinstance(item, dict)
+            ]
+            next_item = self._projection_artifact_item(
+                record=record,
+                artifact_path=artifact_path,
+                workspace_root=workspace_root,
+            )
+            next_identity = self._artifact_item_identity(
+                artifact_path,
+                record,
+                kind=str(next_item.get("kind") or ""),
+            )
+            try:
+                next_mtime_ns = artifact_path.stat().st_mtime_ns
+            except OSError:
+                next_mtime_ns = 0
+            replaced = False
+            for index, existing in enumerate(artifacts):
+                existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+                existing_path = Path(str(existing.get("path") or artifact_path))
+                if (
+                    self._artifact_item_identity(
+                        existing_path,
+                        existing_payload,
+                        kind=str(existing.get("kind") or existing_path.parent.name or ""),
+                    )
+                    != next_identity
+                ):
+                    continue
+                try:
+                    existing_mtime_ns = existing_path.stat().st_mtime_ns
+                except OSError:
+                    existing_mtime_ns = 0
+                if self._artifact_item_rank(
+                    record,
+                    path=artifact_path,
+                    mtime_ns=next_mtime_ns,
+                ) >= self._artifact_item_rank(
+                    existing_payload,
+                    path=existing_path,
+                    mtime_ns=existing_mtime_ns,
+                ):
+                    artifacts[index] = next_item
+                replaced = True
+                break
+            if not replaced:
+                artifacts.append(next_item)
+            artifacts.sort(
+                key=lambda item: str(
+                    ((item.get("payload") or {}).get("updated_at"))
+                    or ((item.get("payload") or {}).get("created_at"))
+                    or item.get("path")
+                    or ""
+                )
+            )
+            return self._write_artifact_projection_locked(
+                quest_root,
+                state_kind=resolved_current_kind,
+                state=resolved_current_state,
+                artifacts=artifacts,
+            )
+
+    def _collect_artifacts_raw(self, quest_root: Path) -> list[dict[str, Any]]:
         artifacts_by_identity: dict[str, dict[str, Any]] = {}
         for root in self._artifact_roots(quest_root):
             artifacts_root = root / "artifacts"
@@ -494,6 +718,43 @@ class QuestService:
         )
         return artifacts
 
+    def _collect_artifacts(self, quest_root: Path) -> list[dict[str, Any]]:
+        state_kind, state = self._artifact_projection_state(quest_root)
+        projection_path = self._artifact_projection_path(quest_root)
+        cached_projection = self._read_cached_json(projection_path, {})
+        if (
+            isinstance(cached_projection, dict)
+            and int(cached_projection.get("schema_version") or 0) == 2
+            and cached_projection.get("state_kind") == state_kind
+            and self._json_compatible_state(cached_projection.get("state")) == self._json_compatible_state(state)
+            and isinstance(cached_projection.get("artifacts"), list)
+        ):
+            return [
+                dict(item)
+                for item in cached_projection.get("artifacts") or []
+                if isinstance(item, dict)
+            ]
+
+        with self._artifact_projection_lock(quest_root):
+            cached_projection = self._read_cached_json(projection_path, {})
+            if (
+                isinstance(cached_projection, dict)
+                and int(cached_projection.get("schema_version") or 0) == 2
+                and cached_projection.get("state_kind") == state_kind
+                and self._json_compatible_state(cached_projection.get("state")) == self._json_compatible_state(state)
+                and isinstance(cached_projection.get("artifacts"), list)
+            ):
+                return [
+                    dict(item)
+                    for item in cached_projection.get("artifacts") or []
+                    if isinstance(item, dict)
+                ]
+            return self.refresh_artifact_projection(
+                quest_root,
+                state_kind=state_kind,
+                state=state,
+            )
+
     def _active_baseline_attachment(self, quest_root: Path, workspace_root: Path) -> dict[str, Any] | None:
         attachments: list[dict[str, Any]] = []
         seen_paths: set[str] = set()
@@ -521,6 +782,856 @@ class QuestService:
                 str(item.get("source_baseline_id") or ""),
             ),
         )
+
+    @staticmethod
+    def _markdown_excerpt(path: Path, *, max_lines: int = 8) -> str | None:
+        if not path.exists() or not path.is_file():
+            return None
+        text = read_text(path, "")
+        if not text.strip():
+            return None
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return None
+        excerpt = "\n".join(lines[:max_lines]).strip()
+        return excerpt or None
+
+    def _snapshot_workspace_candidates(self, quest_root: Path, workspace_root: Path) -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+
+        def add(path: Path | None) -> None:
+            if path is None:
+                return
+            resolved = path.resolve()
+            key = str(resolved)
+            if key in seen or not resolved.exists():
+                return
+            seen.add(key)
+            candidates.append(resolved)
+
+        add(workspace_root)
+        add(quest_root)
+        worktrees_root = quest_root / ".ds" / "worktrees"
+        if worktrees_root.exists():
+            for item in sorted(worktrees_root.iterdir()):
+                if item.is_dir():
+                    add(item)
+        return candidates
+
+    @staticmethod
+    def _path_mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _best_paper_root(self, quest_root: Path, workspace_root: Path) -> Path | None:
+        best_root: Path | None = None
+        best_rank: tuple[int, float] = (-1, -1.0)
+        for candidate in self._snapshot_workspace_candidates(quest_root, workspace_root):
+            paper_root = candidate / "paper"
+            if not paper_root.exists() or not paper_root.is_dir():
+                continue
+            selected_outline = paper_root / "selected_outline.json"
+            bundle_manifest = paper_root / "paper_bundle_manifest.json"
+            draft = paper_root / "draft.md"
+            score = 0
+            if selected_outline.exists():
+                score += 4
+            if bundle_manifest.exists():
+                score += 5
+            if draft.exists():
+                score += 2
+            latest = max(
+                self._path_mtime(selected_outline),
+                self._path_mtime(bundle_manifest),
+                self._path_mtime(draft),
+                self._path_mtime(paper_root),
+            )
+            rank = (score, latest)
+            if rank > best_rank:
+                best_rank = rank
+                best_root = paper_root
+        return best_root
+
+    def _outline_record_from_paper_root(self, paper_root: Path) -> dict[str, Any]:
+        outline_root = paper_root / "outline"
+        manifest_path = outline_root / "manifest.json"
+        if manifest_path.exists():
+            manifest = read_json(manifest_path, {})
+            if isinstance(manifest, dict) and manifest:
+                manifest_sections = [
+                    dict(item) for item in (manifest.get("sections") or []) if isinstance(item, dict)
+                ]
+                by_id = {
+                    str(item.get("section_id") or "").strip(): dict(item)
+                    for item in manifest_sections
+                    if str(item.get("section_id") or "").strip()
+                }
+                section_order = [
+                    str(item).strip() for item in (manifest.get("section_order") or []) if str(item).strip()
+                ]
+                sections_root = outline_root / "sections"
+                if sections_root.exists():
+                    for section_dir in sorted(sections_root.iterdir()):
+                        if not section_dir.is_dir():
+                            continue
+                        section_id = section_dir.name
+                        section = dict(by_id.get(section_id) or {})
+                        section.setdefault("section_id", section_id)
+                        section.setdefault("title", section_id)
+                        result_table_payload = read_json(section_dir / "result_table.json", {})
+                        rows = result_table_payload.get("rows") if isinstance(result_table_payload, dict) else []
+                        section["result_table"] = rows if isinstance(rows, list) else []
+                        by_id[section_id] = section
+                ordered_sections: list[dict[str, Any]] = []
+                emitted: set[str] = set()
+                for section_id in section_order:
+                    section = by_id.get(section_id)
+                    if section is None:
+                        continue
+                    ordered_sections.append(section)
+                    emitted.add(section_id)
+                for section_id, section in by_id.items():
+                    if section_id in emitted:
+                        continue
+                    ordered_sections.append(section)
+                return {
+                    "schema_version": 1,
+                    "outline_id": manifest.get("outline_id"),
+                    "status": manifest.get("status"),
+                    "title": manifest.get("title"),
+                    "note": manifest.get("note"),
+                    "story": manifest.get("story"),
+                    "ten_questions": manifest.get("ten_questions") if isinstance(manifest.get("ten_questions"), list) else [],
+                    "detailed_outline": manifest.get("detailed_outline") if isinstance(manifest.get("detailed_outline"), dict) else {},
+                    "sections": ordered_sections,
+                    "evidence_contract": manifest.get("evidence_contract") if isinstance(manifest.get("evidence_contract"), dict) else None,
+                    "created_at": manifest.get("created_at"),
+                    "updated_at": manifest.get("updated_at"),
+                }
+        selected_outline_path = paper_root / "selected_outline.json"
+        payload = read_json(selected_outline_path, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def _paper_evidence_payload(self, quest_root: Path, workspace_root: Path) -> dict[str, Any] | None:
+        best_payload: dict[str, Any] | None = None
+        best_rank: tuple[str, float] = ("", -1.0)
+        for candidate in self._snapshot_workspace_candidates(quest_root, workspace_root):
+            paper_root = candidate / "paper"
+            ledger_json_path = paper_root / "evidence_ledger.json"
+            if not ledger_json_path.exists():
+                continue
+            payload = read_json(ledger_json_path, {})
+            if not isinstance(payload, dict) or not payload:
+                continue
+            items = [dict(item) for item in (payload.get("items") or []) if isinstance(item, dict)]
+            latest = max(
+                self._path_mtime(ledger_json_path),
+                self._path_mtime(paper_root / "evidence_ledger.md"),
+                self._path_mtime(paper_root),
+            )
+            rank = (str(payload.get("updated_at") or payload.get("created_at") or ""), latest)
+            if rank < best_rank:
+                continue
+            best_rank = rank
+            best_payload = {
+                "paper_root": str(paper_root),
+                "workspace_root": str(paper_root.parent),
+                "selected_outline_ref": str(payload.get("selected_outline_ref") or "").strip() or None,
+                "item_count": len(items),
+                "main_text_ready_count": sum(
+                    1
+                    for item in items
+                    if str(item.get("paper_role") or "").strip() == "main_text"
+                    and str(item.get("status") or "").strip().lower() in {"ready", "completed", "analyzed", "written", "recorded", "supported"}
+                ),
+                "appendix_item_count": sum(
+                    1 for item in items if str(item.get("paper_role") or "").strip() == "appendix"
+                ),
+                "unmapped_item_count": sum(
+                    1
+                    for item in items
+                    if not str(item.get("section_id") or "").strip() or not str(item.get("paper_role") or "").strip()
+                ),
+                "items": items[:40],
+                "paths": {
+                    "ledger_json": str(ledger_json_path),
+                    "ledger_md": str(paper_root / "evidence_ledger.md") if (paper_root / "evidence_ledger.md").exists() else None,
+                },
+            }
+        return best_payload
+
+    def _paper_contract_payload(self, quest_root: Path, workspace_root: Path) -> dict[str, Any] | None:
+        paper_root = self._best_paper_root(quest_root, workspace_root)
+        if paper_root is None:
+            return None
+        selected_outline_path = paper_root / "selected_outline.json"
+        selected_outline = self._outline_record_from_paper_root(paper_root)
+        selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
+        detailed_outline = (
+            dict(selected_outline.get("detailed_outline") or {})
+            if isinstance(selected_outline.get("detailed_outline"), dict)
+            else {}
+        )
+        outline_manifest_path = paper_root / "outline" / "manifest.json"
+        bundle_manifest_path = paper_root / "paper_bundle_manifest.json"
+        bundle_manifest = read_json(bundle_manifest_path, {})
+        bundle_manifest = bundle_manifest if isinstance(bundle_manifest, dict) else {}
+        experiment_matrix_path = paper_root / "paper_experiment_matrix.md"
+        experiment_matrix_json_path = paper_root / "paper_experiment_matrix.json"
+        claim_map_path = paper_root / "claim_evidence_map.json"
+        paper_line_state_path = paper_root / "paper_line_state.json"
+        evidence_ledger = self._paper_evidence_payload(quest_root, workspace_root)
+        checklist_path = paper_root / "review" / "submission_checklist.json"
+        draft_path = paper_root / "draft.md"
+        status_path = paper_root.parent / "status.md"
+        summary_path = paper_root.parent / "SUMMARY.md"
+
+        raw_sections = selected_outline.get("sections") if isinstance(selected_outline.get("sections"), list) else []
+        sections = []
+        if raw_sections:
+            for index, raw in enumerate(raw_sections, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                title = str(raw.get("title") or raw.get("section_id") or "").strip()
+                if not title:
+                    title = f"Section {index}"
+                sections.append(
+                    {
+                        "section_id": str(raw.get("section_id") or slugify(title, f"section-{index}")).strip() or slugify(title, f"section-{index}"),
+                        "title": title,
+                        "paper_role": str(raw.get("paper_role") or "").strip() or None,
+                        "status": str(raw.get("status") or "").strip() or None,
+                        "claims": raw.get("claims") if isinstance(raw.get("claims"), list) else [],
+                        "required_items": raw.get("required_items") if isinstance(raw.get("required_items"), list) else [],
+                        "optional_items": raw.get("optional_items") if isinstance(raw.get("optional_items"), list) else [],
+                        "result_table": raw.get("result_table") if isinstance(raw.get("result_table"), list) else [],
+                    }
+                )
+        else:
+            for item in detailed_outline.get("experimental_designs") or []:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                sections.append(
+                    {
+                        "section_id": slugify(text, "section"),
+                        "title": text,
+                        "paper_role": "main_text",
+                        "status": "recorded",
+                        "claims": [],
+                        "required_items": [],
+                        "optional_items": [],
+                        "result_table": [],
+                    }
+                )
+
+        return {
+            "paper_root": str(paper_root),
+            "workspace_root": str(paper_root.parent),
+            "paper_branch": str(bundle_manifest.get("paper_branch") or "").strip() or current_branch(paper_root.parent),
+            "source_branch": str(bundle_manifest.get("source_branch") or "").strip() or None,
+            "selected_outline_ref": str(selected_outline.get("outline_id") or bundle_manifest.get("selected_outline_ref") or "").strip() or None,
+            "title": str(selected_outline.get("title") or bundle_manifest.get("title") or "").strip() or None,
+            "story": str(selected_outline.get("story") or "").strip() or None,
+            "research_questions": detailed_outline.get("research_questions") if isinstance(detailed_outline.get("research_questions"), list) else [],
+            "experimental_designs": detailed_outline.get("experimental_designs") if isinstance(detailed_outline.get("experimental_designs"), list) else [],
+            "contributions": detailed_outline.get("contributions") if isinstance(detailed_outline.get("contributions"), list) else [],
+            "evidence_contract": selected_outline.get("evidence_contract") if isinstance(selected_outline.get("evidence_contract"), dict) else None,
+            "sections": sections,
+            "evidence_summary": {
+                "item_count": int((evidence_ledger or {}).get("item_count") or 0),
+                "main_text_ready_count": int((evidence_ledger or {}).get("main_text_ready_count") or 0),
+                "appendix_item_count": int((evidence_ledger or {}).get("appendix_item_count") or 0),
+                "unmapped_item_count": int((evidence_ledger or {}).get("unmapped_item_count") or 0),
+            },
+            "summary": str(bundle_manifest.get("summary") or "").strip() or self._markdown_excerpt(summary_path),
+            "paths": {
+                "selected_outline": str(selected_outline_path) if selected_outline_path.exists() else None,
+                "outline_manifest": str(outline_manifest_path) if outline_manifest_path.exists() else None,
+                "experiment_matrix": str(experiment_matrix_path) if experiment_matrix_path.exists() else None,
+                "experiment_matrix_json": str(experiment_matrix_json_path) if experiment_matrix_json_path.exists() else None,
+                "bundle_manifest": str(bundle_manifest_path) if bundle_manifest_path.exists() else None,
+                "claim_evidence_map": str(claim_map_path) if claim_map_path.exists() else None,
+                "paper_line_state": str(paper_line_state_path) if paper_line_state_path.exists() else None,
+                "evidence_ledger_json": str(((evidence_ledger or {}).get("paths") or {}).get("ledger_json")) if ((evidence_ledger or {}).get("paths") or {}).get("ledger_json") else None,
+                "evidence_ledger_md": str(((evidence_ledger or {}).get("paths") or {}).get("ledger_md")) if ((evidence_ledger or {}).get("paths") or {}).get("ledger_md") else None,
+                "submission_checklist": str(checklist_path) if checklist_path.exists() else None,
+                "draft": str(draft_path) if draft_path.exists() else None,
+                "status": str(status_path) if status_path.exists() else None,
+                "summary": str(summary_path) if summary_path.exists() else None,
+            },
+            "bundle_manifest": bundle_manifest or None,
+            "outline_payload": selected_outline or None,
+        }
+
+    def _paper_lines_payload(self, quest_root: Path, workspace_root: Path) -> tuple[list[dict[str, Any]], str | None]:
+        lines_by_id: dict[str, dict[str, Any]] = {}
+        active_ref: str | None = None
+        for candidate in self._snapshot_workspace_candidates(quest_root, workspace_root):
+            paper_root = candidate / "paper"
+            if not paper_root.exists() or not paper_root.is_dir():
+                continue
+            state_path = paper_root / "paper_line_state.json"
+            payload = read_json(state_path, {}) if state_path.exists() else {}
+            if not isinstance(payload, dict) or not payload:
+                contract = self._paper_contract_payload(quest_root, candidate)
+                if not contract:
+                    continue
+                bundle_manifest = (
+                    dict(contract.get("bundle_manifest") or {})
+                    if isinstance(contract.get("bundle_manifest"), dict)
+                    else {}
+                )
+                payload = {
+                    "paper_line_id": slugify(
+                        "::".join(
+                            [
+                                str(contract.get("paper_branch") or "paper").strip() or "paper",
+                                str(contract.get("selected_outline_ref") or "outline").strip() or "outline",
+                                str(bundle_manifest.get("source_run_id") or "run").strip() or "run",
+                            ]
+                        ),
+                        "paper-line",
+                    ),
+                    "paper_branch": contract.get("paper_branch"),
+                    "paper_root": str(paper_root),
+                    "workspace_root": str(candidate),
+                    "source_branch": contract.get("source_branch"),
+                    "source_run_id": bundle_manifest.get("source_run_id"),
+                    "source_idea_id": bundle_manifest.get("source_idea_id"),
+                    "selected_outline_ref": contract.get("selected_outline_ref"),
+                    "title": contract.get("title"),
+                    "required_count": sum(len(item.get("required_items") or []) for item in (contract.get("sections") or [])),
+                    "ready_required_count": int((contract.get("evidence_summary") or {}).get("main_text_ready_count") or 0),
+                    "section_count": len(contract.get("sections") or []),
+                    "ready_section_count": 0,
+                    "unmapped_count": int((contract.get("evidence_summary") or {}).get("unmapped_item_count") or 0),
+                    "open_supplementary_count": 0,
+                    "draft_status": "present" if (paper_root / "draft.md").exists() else "missing",
+                    "bundle_status": "present" if (paper_root / "paper_bundle_manifest.json").exists() else "missing",
+                    "updated_at": "",
+                }
+            paper_line_id = str(payload.get("paper_line_id") or "").strip()
+            if not paper_line_id:
+                continue
+            payload["paths"] = {
+                "paper_line_state": str(state_path) if state_path.exists() else None,
+                "paper_root": str(paper_root),
+            }
+            current = lines_by_id.get(paper_line_id)
+            if current is None or str(payload.get("updated_at") or "") >= str(current.get("updated_at") or ""):
+                lines_by_id[paper_line_id] = payload
+            if str(candidate) == str(workspace_root):
+                active_ref = paper_line_id
+        lines = sorted(lines_by_id.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        if not active_ref and lines:
+            active_ref = str(lines[0].get("paper_line_id") or "").strip() or None
+        return lines, active_ref
+
+    def _analysis_inventory_payload(self, quest_root: Path, workspace_root: Path) -> dict[str, Any] | None:
+        manifest_by_id: dict[str, dict[str, Any]] = {}
+        campaigns_root = quest_root / ".ds" / "analysis_campaigns"
+        if campaigns_root.exists():
+            for path in sorted(campaigns_root.glob("*.json")):
+                payload = read_json(path, {})
+                if not isinstance(payload, dict) or not payload:
+                    continue
+                campaign_id = str(payload.get("campaign_id") or path.stem).strip() or path.stem
+                manifest_by_id[campaign_id] = payload
+        campaigns_by_id: dict[str, dict[str, Any]] = {}
+        for candidate in self._snapshot_workspace_candidates(quest_root, workspace_root):
+            analysis_root = candidate / "experiments" / "analysis-results"
+            if not analysis_root.exists() or not analysis_root.is_dir():
+                continue
+            for campaign_dir in sorted(analysis_root.iterdir()):
+                if not campaign_dir.is_dir():
+                    continue
+                campaign_id = campaign_dir.name
+                todo_manifest_path = campaign_dir / "todo_manifest.json"
+                campaign_md_path = campaign_dir / "campaign.md"
+                summary_md_path = campaign_dir / "SUMMARY.md"
+                todo_manifest = read_json(todo_manifest_path, {})
+                todo_manifest = todo_manifest if isinstance(todo_manifest, dict) else {}
+                campaign_manifest = dict(manifest_by_id.get(campaign_id) or {})
+                todo_items = todo_manifest.get("todo_items") if isinstance(todo_manifest.get("todo_items"), list) else []
+                manifest_slices = {
+                    str(item.get("slice_id") or "").strip(): dict(item)
+                    for item in (campaign_manifest.get("slices") or [])
+                    if isinstance(item, dict) and str(item.get("slice_id") or "").strip()
+                }
+                slice_files = []
+                for path in sorted(campaign_dir.glob("*.md")):
+                    if path.name in {"campaign.md", "SUMMARY.md"}:
+                        continue
+                    slice_files.append(path)
+                slices: list[dict[str, Any]] = []
+                for index, path in enumerate(slice_files):
+                    matched_todo = todo_items[index] if index < len(todo_items) and isinstance(todo_items[index], dict) else {}
+                    slice_id = str(matched_todo.get("slice_id") or path.stem).strip() or path.stem
+                    title = str(matched_todo.get("title") or path.stem).strip() or path.stem
+                    manifest_slice = dict(manifest_slices.get(slice_id) or {})
+                    slices.append(
+                        {
+                            "slice_id": slice_id,
+                            "title": title,
+                            "status": str(manifest_slice.get("status") or matched_todo.get("status") or "completed").strip() or "completed",
+                            "tier": str(matched_todo.get("tier") or "").strip() or None,
+                            "exp_id": str(matched_todo.get("exp_id") or "").strip() or None,
+                            "paper_role": str(matched_todo.get("paper_placement") or matched_todo.get("paper_role") or "").strip() or None,
+                            "section_id": str(matched_todo.get("section_id") or "").strip() or None,
+                            "item_id": str(matched_todo.get("item_id") or "").strip() or None,
+                            "claim_links": matched_todo.get("claim_links") if isinstance(matched_todo.get("claim_links"), list) else [],
+                            "research_question": str(matched_todo.get("research_question") or "").strip() or None,
+                            "experimental_design": str(matched_todo.get("experimental_design") or "").strip() or None,
+                            "branch": str(manifest_slice.get("branch") or "").strip() or None,
+                            "worktree_root": str(manifest_slice.get("worktree_root") or "").strip() or None,
+                            "mapped": bool(
+                                str(matched_todo.get("section_id") or "").strip()
+                                and str(matched_todo.get("item_id") or "").strip()
+                                and str(matched_todo.get("paper_placement") or matched_todo.get("paper_role") or "").strip()
+                            ),
+                            "result_path": str(path),
+                            "result_excerpt": self._markdown_excerpt(path, max_lines=6),
+                        }
+                    )
+                record = {
+                    "campaign_id": campaign_id,
+                    "title": str((todo_manifest.get("campaign_origin") or {}).get("reason") or campaign_id).strip() or campaign_id,
+                    "active_idea_id": str(campaign_manifest.get("active_idea_id") or "").strip() or None,
+                    "parent_run_id": str(campaign_manifest.get("parent_run_id") or "").strip() or None,
+                    "parent_branch": str(campaign_manifest.get("parent_branch") or "").strip() or None,
+                    "paper_line_id": str(campaign_manifest.get("paper_line_id") or "").strip() or None,
+                    "paper_line_branch": str(campaign_manifest.get("paper_line_branch") or "").strip() or None,
+                    "paper_line_root": str(campaign_manifest.get("paper_line_root") or "").strip() or None,
+                    "selected_outline_ref": str(campaign_manifest.get("selected_outline_ref") or todo_manifest.get("selected_outline_ref") or "").strip() or None,
+                    "todo_manifest_path": str(todo_manifest_path) if todo_manifest_path.exists() else None,
+                    "campaign_path": str(campaign_md_path) if campaign_md_path.exists() else None,
+                    "summary_path": str(summary_md_path) if summary_md_path.exists() else None,
+                    "summary_excerpt": self._markdown_excerpt(summary_md_path, max_lines=10),
+                    "updated_at": str(campaign_manifest.get("updated_at") or "").strip() or None,
+                    "slice_count": len(slices),
+                    "completed_slice_count": sum(1 for item in slices if str(item.get("status") or "") == "completed"),
+                    "mapped_slice_count": sum(1 for item in slices if bool(item.get("mapped"))),
+                    "pending_slice_count": sum(1 for item in slices if str(item.get("status") or "") != "completed"),
+                    "slices": slices,
+                    "_rank": (
+                        len(slices),
+                        max(
+                            self._path_mtime(summary_md_path),
+                            self._path_mtime(campaign_md_path),
+                            self._path_mtime(todo_manifest_path),
+                            self._path_mtime(campaigns_root / f"{campaign_id}.json"),
+                            self._path_mtime(campaign_dir),
+                        ),
+                    ),
+                }
+                current = campaigns_by_id.get(campaign_id)
+                if current is None or record["_rank"] >= current["_rank"]:
+                    campaigns_by_id[campaign_id] = record
+
+        if not campaigns_by_id:
+            return None
+        campaigns = []
+        total_slices = 0
+        total_completed = 0
+        total_mapped = 0
+        for item in sorted(
+            campaigns_by_id.values(),
+            key=lambda payload: (payload["_rank"][1], payload["campaign_id"]),
+            reverse=True,
+        ):
+            total_slices += int(item.get("slice_count") or 0)
+            total_completed += int(item.get("completed_slice_count") or 0)
+            total_mapped += int(item.get("mapped_slice_count") or 0)
+            campaigns.append({key: value for key, value in item.items() if key != "_rank"})
+        return {
+            "campaign_count": len(campaigns),
+            "slice_count": total_slices,
+            "completed_slice_count": total_completed,
+            "mapped_slice_count": total_mapped,
+            "campaigns": campaigns,
+        }
+
+    def _idea_lines_payload(
+        self,
+        quest_root: Path,
+        *,
+        paper_lines: list[dict[str, Any]],
+        analysis_inventory: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        artifacts = self._collect_artifacts(quest_root)
+        research_state = self.read_research_state(quest_root)
+        active_idea_id = str(research_state.get("active_idea_id") or "").strip() or None
+        active_ref: str | None = None
+        lines_by_id: dict[str, dict[str, Any]] = {}
+
+        def ensure_line(idea_id: str) -> dict[str, Any]:
+            current = lines_by_id.get(idea_id)
+            if current is None:
+                current = {
+                    "idea_line_id": idea_id,
+                    "idea_id": idea_id,
+                    "idea_branch": None,
+                    "idea_title": None,
+                    "lineage_intent": None,
+                    "parent_branch": None,
+                    "latest_main_run_id": None,
+                    "latest_main_run_branch": None,
+                    "paper_line_id": None,
+                    "paper_branch": None,
+                    "selected_outline_ref": None,
+                    "analysis_campaign_count": 0,
+                    "analysis_slice_count": 0,
+                    "completed_analysis_slice_count": 0,
+                    "mapped_analysis_slice_count": 0,
+                    "required_count": 0,
+                    "ready_required_count": 0,
+                    "unmapped_count": 0,
+                    "open_supplementary_count": 0,
+                    "draft_status": None,
+                    "bundle_status": None,
+                    "updated_at": "",
+                    "paths": {
+                        "idea_md": None,
+                        "idea_draft": None,
+                        "paper_line_state": None,
+                    },
+                }
+                lines_by_id[idea_id] = current
+            return current
+
+        def updated_rank(value: object) -> str:
+            return str(value or "").strip()
+
+        for artifact in artifacts:
+            kind = str(artifact.get("kind") or "").strip()
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            if not payload:
+                continue
+            idea_id = str(payload.get("idea_id") or "").strip()
+            if not idea_id:
+                continue
+            entry = ensure_line(idea_id)
+            if kind == "ideas":
+                current_rank = updated_rank(entry.get("updated_at"))
+                candidate_rank = updated_rank(payload.get("updated_at") or payload.get("created_at"))
+                if candidate_rank >= current_rank:
+                    details = dict(payload.get("details") or {}) if isinstance(payload.get("details"), dict) else {}
+                    paths = dict(payload.get("paths") or {}) if isinstance(payload.get("paths"), dict) else {}
+                    entry["idea_branch"] = str(payload.get("branch") or "").strip() or entry.get("idea_branch")
+                    entry["idea_title"] = str(details.get("title") or payload.get("title") or "").strip() or entry.get("idea_title")
+                    entry["lineage_intent"] = str(payload.get("lineage_intent") or details.get("lineage_intent") or "").strip() or entry.get("lineage_intent")
+                    entry["parent_branch"] = str(payload.get("parent_branch") or details.get("parent_branch") or "").strip() or entry.get("parent_branch")
+                    entry["updated_at"] = candidate_rank or entry.get("updated_at")
+                    entry["paths"] = {
+                        **dict(entry.get("paths") or {}),
+                        "idea_md": str(paths.get("idea_md") or "").strip() or dict(entry.get("paths") or {}).get("idea_md"),
+                        "idea_draft": str(paths.get("idea_draft_md") or details.get("idea_draft_path") or "").strip()
+                        or dict(entry.get("paths") or {}).get("idea_draft"),
+                    }
+            elif kind == "runs":
+                branch = str(payload.get("branch") or "").strip()
+                run_id = str(payload.get("run_id") or "").strip()
+                run_kind = str(payload.get("run_kind") or "").strip().lower()
+                if not run_id or branch.startswith("analysis/") or branch.startswith("paper/") or run_kind.startswith("analysis"):
+                    continue
+                current_rank = updated_rank(entry.get("latest_main_run_updated_at"))
+                candidate_rank = updated_rank(payload.get("updated_at") or payload.get("created_at"))
+                if candidate_rank >= current_rank:
+                    entry["latest_main_run_id"] = run_id
+                    entry["latest_main_run_branch"] = branch or entry.get("latest_main_run_branch")
+                    entry["latest_main_run_updated_at"] = candidate_rank
+                    entry["updated_at"] = max(updated_rank(entry.get("updated_at")), candidate_rank)
+
+        for line in paper_lines:
+            idea_id = str(line.get("source_idea_id") or "").strip()
+            if not idea_id:
+                continue
+            entry = ensure_line(idea_id)
+            current_rank = updated_rank(entry.get("paper_line_updated_at"))
+            candidate_rank = updated_rank(line.get("updated_at"))
+            if candidate_rank >= current_rank:
+                entry["paper_line_id"] = str(line.get("paper_line_id") or "").strip() or entry.get("paper_line_id")
+                entry["paper_branch"] = str(line.get("paper_branch") or "").strip() or entry.get("paper_branch")
+                entry["selected_outline_ref"] = str(line.get("selected_outline_ref") or "").strip() or entry.get("selected_outline_ref")
+                entry["required_count"] = int(line.get("required_count") or 0)
+                entry["ready_required_count"] = int(line.get("ready_required_count") or 0)
+                entry["unmapped_count"] = int(line.get("unmapped_count") or 0)
+                entry["open_supplementary_count"] = int(line.get("open_supplementary_count") or 0)
+                entry["draft_status"] = str(line.get("draft_status") or "").strip() or None
+                entry["bundle_status"] = str(line.get("bundle_status") or "").strip() or None
+                entry["paper_line_updated_at"] = candidate_rank
+                entry["updated_at"] = max(updated_rank(entry.get("updated_at")), candidate_rank)
+                entry["paths"] = {
+                    **dict(entry.get("paths") or {}),
+                    "paper_line_state": str(((line.get("paths") or {}) if isinstance(line.get("paths"), dict) else {}).get("paper_line_state") or "").strip()
+                    or dict(entry.get("paths") or {}).get("paper_line_state"),
+                }
+
+        campaigns = list((analysis_inventory or {}).get("campaigns") or []) if isinstance(analysis_inventory, dict) else []
+        for campaign in campaigns:
+            if not isinstance(campaign, dict):
+                continue
+            matched_idea_id = str(campaign.get("active_idea_id") or "").strip()
+            if not matched_idea_id:
+                matched_run_id = str(campaign.get("parent_run_id") or "").strip()
+                matched_branch = str(campaign.get("parent_branch") or "").strip()
+                for candidate in lines_by_id.values():
+                    if matched_run_id and matched_run_id == str(candidate.get("latest_main_run_id") or "").strip():
+                        matched_idea_id = str(candidate.get("idea_id") or "").strip()
+                        break
+                    if matched_branch and matched_branch in {
+                        str(candidate.get("idea_branch") or "").strip(),
+                        str(candidate.get("latest_main_run_branch") or "").strip(),
+                    }:
+                        matched_idea_id = str(candidate.get("idea_id") or "").strip()
+                        break
+            if not matched_idea_id:
+                continue
+            entry = ensure_line(matched_idea_id)
+            entry["analysis_campaign_count"] = int(entry.get("analysis_campaign_count") or 0) + 1
+            entry["analysis_slice_count"] = int(entry.get("analysis_slice_count") or 0) + int(campaign.get("slice_count") or 0)
+            entry["completed_analysis_slice_count"] = int(entry.get("completed_analysis_slice_count") or 0) + int(
+                campaign.get("completed_slice_count") or 0
+            )
+            entry["mapped_analysis_slice_count"] = int(entry.get("mapped_analysis_slice_count") or 0) + int(
+                campaign.get("mapped_slice_count") or 0
+            )
+            if not entry.get("paper_line_id") and str(campaign.get("paper_line_id") or "").strip():
+                entry["paper_line_id"] = str(campaign.get("paper_line_id") or "").strip()
+                entry["paper_branch"] = str(campaign.get("paper_line_branch") or "").strip() or entry.get("paper_branch")
+                entry["selected_outline_ref"] = str(campaign.get("selected_outline_ref") or "").strip() or entry.get("selected_outline_ref")
+            entry["updated_at"] = max(
+                updated_rank(entry.get("updated_at")),
+                updated_rank(campaign.get("updated_at")),
+            )
+
+        lines = sorted(
+            lines_by_id.values(),
+            key=lambda item: (
+                0 if str(item.get("idea_id") or "").strip() == active_idea_id else 1,
+                str(item.get("updated_at") or ""),
+                str(item.get("idea_line_id") or ""),
+            ),
+        )
+        for item in lines:
+            if not item.get("open_supplementary_count"):
+                pending = max(
+                    0,
+                    int(item.get("analysis_slice_count") or 0) - int(item.get("completed_analysis_slice_count") or 0),
+                )
+                item["open_supplementary_count"] = pending
+            item.pop("latest_main_run_updated_at", None)
+            item.pop("paper_line_updated_at", None)
+        if active_idea_id and active_idea_id in lines_by_id:
+            active_ref = active_idea_id
+        elif lines:
+            active_ref = str(lines[0].get("idea_line_id") or "").strip() or None
+        return lines, active_ref
+
+    def _paper_contract_health_payload(
+        self,
+        *,
+        paper_contract: dict[str, Any] | None,
+        paper_evidence: dict[str, Any] | None,
+        analysis_inventory: dict[str, Any] | None,
+        paper_lines: list[dict[str, Any]],
+        active_paper_line_ref: str | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(paper_contract, dict) or not paper_contract:
+            return None
+        evidence_items = [
+            dict(item) for item in ((paper_evidence or {}).get("items") or []) if isinstance(item, dict)
+        ]
+        ledger_by_item = {
+            str(item.get("item_id") or "").strip(): item
+            for item in evidence_items
+            if str(item.get("item_id") or "").strip()
+        }
+        unresolved_required_items: list[dict[str, Any]] = []
+        ready_section_count = 0
+        for section in paper_contract.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            required_items = [str(item).strip() for item in (section.get("required_items") or []) if str(item).strip()]
+            section_ready = True
+            for item_id in required_items:
+                ledger_item = ledger_by_item.get(item_id)
+                status = str((ledger_item or {}).get("status") or "").strip().lower()
+                if status not in {"ready", "completed", "analyzed", "written", "recorded", "supported"}:
+                    unresolved_required_items.append(
+                        {
+                            "section_id": str(section.get("section_id") or "").strip() or None,
+                            "section_title": str(section.get("title") or "").strip() or None,
+                            "item_id": item_id,
+                            "status": str((ledger_item or {}).get("status") or "").strip() or None,
+                        }
+                    )
+                    section_ready = False
+            if required_items and section_ready:
+                ready_section_count += 1
+
+        selected_outline_ref = str(paper_contract.get("selected_outline_ref") or "").strip() or None
+        active_line = next(
+            (
+                dict(item)
+                for item in paper_lines
+                if isinstance(item, dict)
+                and str(item.get("paper_line_id") or "").strip()
+                and str(item.get("paper_line_id") or "").strip() == str(active_paper_line_ref or "").strip()
+            ),
+            dict(paper_lines[0]) if paper_lines else {},
+        )
+        active_line_id = str(active_line.get("paper_line_id") or "").strip() or None
+        active_line_branch = str(active_line.get("paper_branch") or "").strip() or None
+
+        campaigns = [dict(item) for item in ((analysis_inventory or {}).get("campaigns") or []) if isinstance(item, dict)]
+        relevant_campaigns: list[dict[str, Any]] = []
+        for campaign in campaigns:
+            campaign_outline = str(campaign.get("selected_outline_ref") or "").strip() or None
+            campaign_line_id = str(campaign.get("paper_line_id") or "").strip() or None
+            campaign_line_branch = str(campaign.get("paper_line_branch") or "").strip() or None
+            if active_line_id and campaign_line_id == active_line_id:
+                relevant_campaigns.append(campaign)
+                continue
+            if active_line_branch and campaign_line_branch == active_line_branch:
+                relevant_campaigns.append(campaign)
+                continue
+            if selected_outline_ref and campaign_outline == selected_outline_ref:
+                relevant_campaigns.append(campaign)
+
+        unmapped_completed_items: list[dict[str, Any]] = []
+        blocking_pending_slices: list[dict[str, Any]] = []
+        for campaign in relevant_campaigns:
+            for slice_item in campaign.get("slices") or []:
+                if not isinstance(slice_item, dict):
+                    continue
+                status = str(slice_item.get("status") or "").strip().lower()
+                if status == "completed" and not bool(slice_item.get("mapped")):
+                    unmapped_completed_items.append(
+                        {
+                            "campaign_id": str(campaign.get("campaign_id") or "").strip() or None,
+                            "slice_id": str(slice_item.get("slice_id") or "").strip() or None,
+                            "item_id": str(slice_item.get("item_id") or "").strip() or None,
+                            "section_id": str(slice_item.get("section_id") or "").strip() or None,
+                            "title": str(slice_item.get("title") or "").strip() or None,
+                        }
+                    )
+                if status in {"", "pending"}:
+                    paper_role = str(slice_item.get("paper_role") or "").strip().lower()
+                    tier = str(slice_item.get("tier") or "").strip().lower()
+                    if paper_role == "main_text" or tier == "main_required":
+                        blocking_pending_slices.append(
+                            {
+                                "campaign_id": str(campaign.get("campaign_id") or "").strip() or None,
+                                "slice_id": str(slice_item.get("slice_id") or "").strip() or None,
+                                "item_id": str(slice_item.get("item_id") or "").strip() or None,
+                                "section_id": str(slice_item.get("section_id") or "").strip() or None,
+                                "title": str(slice_item.get("title") or "").strip() or None,
+                            }
+                        )
+
+        contract_ok = not unresolved_required_items and not unmapped_completed_items
+        writing_ready = contract_ok and not blocking_pending_slices
+        draft_path = str((paper_contract.get("paths") or {}).get("draft") or "").strip()
+        draft_status = str(active_line.get("draft_status") or "").strip() or ("present" if draft_path else "missing")
+        bundle_status = str(active_line.get("bundle_status") or "").strip() or (
+            "present" if str((paper_contract.get("paths") or {}).get("bundle_manifest") or "").strip() else "missing"
+        )
+        bundle_manifest = (
+            dict(paper_contract.get("bundle_manifest") or {})
+            if isinstance(paper_contract.get("bundle_manifest"), dict)
+            else {}
+        )
+        submission_checklist_path = str(((paper_contract.get("paths") or {}).get("submission_checklist") or "")).strip()
+        submission_checklist = read_json(Path(submission_checklist_path), {}) if submission_checklist_path else {}
+        submission_checklist = submission_checklist if isinstance(submission_checklist, dict) else {}
+        overall_status = str(submission_checklist.get("overall_status") or bundle_manifest.get("status") or "").strip().lower()
+        delivered_at = str(
+            bundle_manifest.get("paper_delivered_to_user_at")
+            or bundle_manifest.get("delivered_at")
+            or submission_checklist.get("paper_delivered_to_user_at")
+            or ""
+        ).strip() or None
+        closure_state = "bundle_not_ready"
+        delivery_state = "not_ready"
+        keep_bundle_fixed_by_default = False
+        if bundle_status == "present":
+            closure_state = "delivery_ready"
+            delivery_state = "bundle_ready"
+        if delivered_at or "delivered" in overall_status:
+            delivery_state = "delivered"
+            closure_state = "delivered_continue_research" if "continue" in overall_status else "delivered_parked"
+            keep_bundle_fixed_by_default = True
+
+        if unmapped_completed_items:
+            recommended_next_stage = "write"
+            recommended_action = "sync_paper_contract"
+        elif unresolved_required_items or blocking_pending_slices:
+            recommended_next_stage = "analysis-campaign"
+            recommended_action = "complete_required_supplementary"
+        elif draft_status != "present":
+            recommended_next_stage = "write"
+            recommended_action = "draft_paper"
+        elif bundle_status != "present":
+            recommended_next_stage = "write"
+            recommended_action = "prepare_bundle"
+        else:
+            recommended_next_stage = "finalize"
+            recommended_action = "finalize_paper_line"
+
+        blocking_reasons: list[str] = []
+        if unmapped_completed_items:
+            blocking_reasons.append("completed analysis remains unmapped into the paper contract")
+        if unresolved_required_items:
+            blocking_reasons.append("required outline items are still unresolved")
+        if blocking_pending_slices:
+            blocking_reasons.append("main-text supplementary slices are still pending")
+
+        return {
+            "paper_line_id": active_line_id,
+            "paper_branch": active_line_branch,
+            "selected_outline_ref": selected_outline_ref,
+            "contract_ok": contract_ok,
+            "writing_ready": writing_ready,
+            "finalize_ready": writing_ready and bundle_status == "present",
+            "closure_state": closure_state,
+            "delivery_state": delivery_state,
+            "delivered_at": delivered_at,
+            "keep_bundle_fixed_by_default": keep_bundle_fixed_by_default,
+            "required_count": sum(
+                len(section.get("required_items") or [])
+                for section in (paper_contract.get("sections") or [])
+                if isinstance(section, dict)
+            ),
+            "ready_required_count": max(
+                0,
+                sum(
+                    len(section.get("required_items") or [])
+                    for section in (paper_contract.get("sections") or [])
+                    if isinstance(section, dict)
+                )
+                - len(unresolved_required_items),
+            ),
+            "section_count": len([section for section in (paper_contract.get("sections") or []) if isinstance(section, dict)]),
+            "ready_section_count": ready_section_count,
+            "ledger_item_count": len(evidence_items),
+            "unresolved_required_count": len(unresolved_required_items),
+            "unmapped_completed_count": len(unmapped_completed_items),
+            "open_supplementary_count": int(active_line.get("open_supplementary_count") or 0),
+            "blocking_open_supplementary_count": len(blocking_pending_slices),
+            "draft_status": draft_status,
+            "bundle_status": bundle_status,
+            "blocking_reasons": blocking_reasons,
+            "recommended_next_stage": recommended_next_stage,
+            "recommended_action": recommended_action,
+            "unresolved_required_items": unresolved_required_items[:12],
+            "unmapped_completed_items": unmapped_completed_items[:12],
+            "blocking_pending_slices": blocking_pending_slices[:12],
+        }
 
     @staticmethod
     def _latest_metric_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -878,9 +1989,26 @@ class QuestService:
             "requested_baseline_ref": quest_yaml.get("requested_baseline_ref"),
             "startup_contract": quest_yaml.get("startup_contract"),
             "runner": quest_yaml.get("default_runner", "codex"),
+            "active_workspace_root": str(workspace_root),
+            "research_head_branch": research_state.get("research_head_branch"),
+            "research_head_worktree_root": research_state.get("research_head_worktree_root"),
+            "current_workspace_branch": research_state.get("current_workspace_branch"),
+            "current_workspace_root": research_state.get("current_workspace_root"),
+            "active_idea_id": research_state.get("active_idea_id"),
             "active_baseline_id": active_baseline_id,
             "active_baseline_variant_id": active_baseline_variant_id,
             "active_run_id": runtime_state.get("active_run_id"),
+            "continuation_policy": runtime_state.get("continuation_policy") or "auto",
+            "continuation_anchor": runtime_state.get("continuation_anchor"),
+            "continuation_reason": runtime_state.get("continuation_reason"),
+            "continuation_updated_at": runtime_state.get("continuation_updated_at"),
+            "last_resume_source": runtime_state.get("last_resume_source"),
+            "last_resume_at": runtime_state.get("last_resume_at"),
+            "last_recovery_abandoned_run_id": runtime_state.get("last_recovery_abandoned_run_id"),
+            "last_recovery_summary": runtime_state.get("last_recovery_summary"),
+            "last_stage_fingerprint": runtime_state.get("last_stage_fingerprint"),
+            "last_stage_fingerprint_at": runtime_state.get("last_stage_fingerprint_at"),
+            "same_fingerprint_auto_turn_count": int(runtime_state.get("same_fingerprint_auto_turn_count") or 0),
             "pending_decisions": pending_decisions,
             "waiting_interaction_id": waiting_interaction_id,
             "default_reply_interaction_id": default_reply_interaction_id,
@@ -1089,7 +2217,7 @@ class QuestService:
         return entries
 
     def snapshot_fast(self, quest_id: str) -> dict:
-        return self._snapshot(quest_id)
+        return self.summary_compact(quest_id)
 
     def snapshot(self, quest_id: str) -> dict:
         return self._snapshot(quest_id)
@@ -1206,6 +2334,22 @@ class QuestService:
         bash_service = BashExecService(self.home)
         bash_summary = bash_service.summary(quest_root)
         latest_bash_session = bash_summary.get("latest_session")
+        paper_contract = self._paper_contract_payload(quest_root, workspace_root)
+        paper_evidence = self._paper_evidence_payload(quest_root, workspace_root)
+        analysis_inventory = self._analysis_inventory_payload(quest_root, workspace_root)
+        paper_lines, active_paper_line_ref = self._paper_lines_payload(quest_root, workspace_root)
+        idea_lines, active_idea_line_ref = self._idea_lines_payload(
+            quest_root,
+            paper_lines=paper_lines,
+            analysis_inventory=analysis_inventory,
+        )
+        paper_contract_health = self._paper_contract_health_payload(
+            paper_contract=paper_contract,
+            paper_evidence=paper_evidence,
+            analysis_inventory=analysis_inventory,
+            paper_lines=paper_lines,
+            active_paper_line_ref=active_paper_line_ref,
+        )
         paths = {
             "brief": str(workspace_root / "brief.md"),
             "plan": str(workspace_root / "plan.md"),
@@ -1277,11 +2421,27 @@ class QuestService:
             "paper_parent_branch": research_state.get("paper_parent_branch"),
             "paper_parent_worktree_root": research_state.get("paper_parent_worktree_root"),
             "paper_parent_run_id": research_state.get("paper_parent_run_id"),
+            "idea_lines": idea_lines,
+            "active_idea_line_ref": active_idea_line_ref,
+            "paper_lines": paper_lines,
+            "active_paper_line_ref": active_paper_line_ref,
+            "paper_contract_health": paper_contract_health,
             "next_pending_slice_id": research_state.get("next_pending_slice_id"),
             "workspace_mode": research_state.get("workspace_mode") or "quest",
             "active_baseline_id": active_baseline_id,
             "active_baseline_variant_id": active_baseline_variant_id,
             "active_run_id": runtime_state.get("active_run_id"),
+            "continuation_policy": runtime_state.get("continuation_policy") or "auto",
+            "continuation_anchor": runtime_state.get("continuation_anchor"),
+            "continuation_reason": runtime_state.get("continuation_reason"),
+            "continuation_updated_at": runtime_state.get("continuation_updated_at"),
+            "last_resume_source": runtime_state.get("last_resume_source"),
+            "last_resume_at": runtime_state.get("last_resume_at"),
+            "last_recovery_abandoned_run_id": runtime_state.get("last_recovery_abandoned_run_id"),
+            "last_recovery_summary": runtime_state.get("last_recovery_summary"),
+            "last_stage_fingerprint": runtime_state.get("last_stage_fingerprint"),
+            "last_stage_fingerprint_at": runtime_state.get("last_stage_fingerprint_at"),
+            "same_fingerprint_auto_turn_count": int(runtime_state.get("same_fingerprint_auto_turn_count") or 0),
             "pending_decisions": pending_decisions,
             "active_interactions": active_interactions,
             "recent_reply_threads": recent_reply_threads,
@@ -1320,6 +2480,9 @@ class QuestService:
             "artifact_count": len(artifacts),
             "recent_artifacts": artifacts[-5:],
             "recent_runs": recent_runs[-5:],
+            "paper_contract": paper_contract,
+            "paper_evidence": paper_evidence,
+            "analysis_inventory": analysis_inventory,
             "guidance": guidance,
         }
         with self._snapshot_cache_lock:
@@ -2689,6 +3852,17 @@ class QuestService:
             "last_tool_activity_at": None,
             "last_tool_activity_name": None,
             "tool_calls_since_last_artifact_interact": 0,
+            "continuation_policy": "auto",
+            "continuation_anchor": None,
+            "continuation_reason": None,
+            "continuation_updated_at": None,
+            "last_resume_source": None,
+            "last_resume_at": None,
+            "last_recovery_abandoned_run_id": None,
+            "last_recovery_summary": None,
+            "last_stage_fingerprint": None,
+            "last_stage_fingerprint_at": None,
+            "same_fingerprint_auto_turn_count": 0,
             "pending_user_message_count": pending_count,
             "last_delivered_batch_id": None,
             "last_delivered_at": None,
@@ -2754,6 +3928,20 @@ class QuestService:
         merged = {**defaults, **payload}
         merged["pending_user_message_count"] = int(merged.get("pending_user_message_count") or 0)
         merged["tool_calls_since_last_artifact_interact"] = int(merged.get("tool_calls_since_last_artifact_interact") or 0)
+        merged["continuation_policy"] = self._normalize_continuation_policy(
+            merged.get("continuation_policy"),
+            default=str(defaults.get("continuation_policy") or "auto"),
+        )
+        merged["continuation_anchor"] = str(merged.get("continuation_anchor") or "").strip() or None
+        merged["continuation_reason"] = str(merged.get("continuation_reason") or "").strip() or None
+        merged["continuation_updated_at"] = str(merged.get("continuation_updated_at") or "").strip() or None
+        merged["last_resume_source"] = str(merged.get("last_resume_source") or "").strip() or None
+        merged["last_resume_at"] = str(merged.get("last_resume_at") or "").strip() or None
+        merged["last_recovery_abandoned_run_id"] = str(merged.get("last_recovery_abandoned_run_id") or "").strip() or None
+        merged["last_recovery_summary"] = str(merged.get("last_recovery_summary") or "").strip() or None
+        merged["last_stage_fingerprint"] = str(merged.get("last_stage_fingerprint") or "").strip() or None
+        merged["last_stage_fingerprint_at"] = str(merged.get("last_stage_fingerprint_at") or "").strip() or None
+        merged["same_fingerprint_auto_turn_count"] = int(merged.get("same_fingerprint_auto_turn_count") or 0)
         merged["retry_state"] = dict(merged.get("retry_state") or {}) if isinstance(merged.get("retry_state"), dict) else None
         return merged
 
@@ -2773,6 +3961,17 @@ class QuestService:
         last_tool_activity_at: str | None | object = _UNSET,
         last_tool_activity_name: str | None | object = _UNSET,
         tool_calls_since_last_artifact_interact: int | object = _UNSET,
+        continuation_policy: str | object = _UNSET,
+        continuation_anchor: str | None | object = _UNSET,
+        continuation_reason: str | None | object = _UNSET,
+        continuation_updated_at: str | None | object = _UNSET,
+        last_resume_source: str | None | object = _UNSET,
+        last_resume_at: str | None | object = _UNSET,
+        last_recovery_abandoned_run_id: str | None | object = _UNSET,
+        last_recovery_summary: str | None | object = _UNSET,
+        last_stage_fingerprint: str | None | object = _UNSET,
+        last_stage_fingerprint_at: str | None | object = _UNSET,
+        same_fingerprint_auto_turn_count: int | object = _UNSET,
         pending_user_message_count: int | object = _UNSET,
         last_delivered_batch_id: str | None | object = _UNSET,
         last_delivered_at: str | None | object = _UNSET,
@@ -2810,6 +4009,43 @@ class QuestService:
                 state["last_tool_activity_name"] = str(last_tool_activity_name).strip() if last_tool_activity_name else None
             if tool_calls_since_last_artifact_interact is not _UNSET:
                 state["tool_calls_since_last_artifact_interact"] = max(0, int(tool_calls_since_last_artifact_interact))
+            continuation_changed = False
+            if continuation_policy is not _UNSET:
+                state["continuation_policy"] = self._normalize_continuation_policy(continuation_policy)
+                continuation_changed = True
+            if continuation_anchor is not _UNSET:
+                normalized_anchor = str(continuation_anchor or "").strip() or None
+                if normalized_anchor is not None:
+                    from ..prompts.builder import STANDARD_SKILLS
+
+                    if normalized_anchor not in STANDARD_SKILLS:
+                        allowed = ", ".join(STANDARD_SKILLS)
+                        raise ValueError(
+                            f"Unsupported continuation anchor `{normalized_anchor}`. Allowed values: {allowed}."
+                        )
+                state["continuation_anchor"] = normalized_anchor
+                continuation_changed = True
+            if continuation_reason is not _UNSET:
+                state["continuation_reason"] = str(continuation_reason or "").strip() or None
+                continuation_changed = True
+            if continuation_updated_at is not _UNSET:
+                state["continuation_updated_at"] = str(continuation_updated_at or "").strip() or None
+            elif continuation_changed:
+                state["continuation_updated_at"] = now
+            if last_resume_source is not _UNSET:
+                state["last_resume_source"] = str(last_resume_source or "").strip() or None
+            if last_resume_at is not _UNSET:
+                state["last_resume_at"] = str(last_resume_at or "").strip() or None
+            if last_recovery_abandoned_run_id is not _UNSET:
+                state["last_recovery_abandoned_run_id"] = str(last_recovery_abandoned_run_id or "").strip() or None
+            if last_recovery_summary is not _UNSET:
+                state["last_recovery_summary"] = str(last_recovery_summary or "").strip() or None
+            if last_stage_fingerprint is not _UNSET:
+                state["last_stage_fingerprint"] = str(last_stage_fingerprint or "").strip() or None
+            if last_stage_fingerprint_at is not _UNSET:
+                state["last_stage_fingerprint_at"] = str(last_stage_fingerprint_at or "").strip() or None
+            if same_fingerprint_auto_turn_count is not _UNSET:
+                state["same_fingerprint_auto_turn_count"] = max(0, int(same_fingerprint_auto_turn_count or 0))
             if pending_user_message_count is not _UNSET:
                 state["pending_user_message_count"] = max(0, int(pending_user_message_count))
             if last_delivered_batch_id is not _UNSET:
@@ -2837,6 +4073,26 @@ class QuestService:
                 quest_data["updated_at"] = now
                 write_yaml(quest_root / "quest.yaml", quest_data)
             return state
+
+    @staticmethod
+    def _normalize_continuation_policy(value: object, *, default: str = "auto") -> str:
+        normalized = str(value or "").strip().lower() or default
+        return normalized if normalized in CONTINUATION_POLICIES else default
+
+    def set_continuation_state(
+        self,
+        quest_root: Path,
+        *,
+        policy: str,
+        anchor: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        return self.update_runtime_state(
+            quest_root=quest_root,
+            continuation_policy=policy,
+            continuation_anchor=anchor,
+            continuation_reason=reason,
+        )
 
     def _enqueue_user_message(self, quest_root: Path, record: dict[str, Any]) -> dict[str, Any]:
         queue_payload = self._read_message_queue(quest_root)
@@ -3055,11 +4311,13 @@ class QuestService:
         artifact_id: str | None,
         kind: str,
         message: str,
+        dedupe_key: str | None = None,
         response_phase: str | None = None,
         reply_mode: str | None = None,
         surface_actions: list[dict[str, Any]] | None = None,
         connector_hints: dict[str, Any] | None = None,
         created_at: str | None = None,
+        counts_as_visible: bool = True,
     ) -> dict[str, Any]:
         timestamp = created_at or utc_now()
         payload = {
@@ -3070,6 +4328,7 @@ class QuestService:
             "artifact_id": artifact_id,
             "kind": kind,
             "message": message,
+            "dedupe_key": str(dedupe_key or "").strip() or None,
             "response_phase": response_phase,
             "reply_mode": reply_mode,
             "surface_actions": [dict(item) for item in (surface_actions or []) if isinstance(item, dict)],
@@ -3077,15 +4336,17 @@ class QuestService:
             "created_at": timestamp,
         }
         append_jsonl(self._interaction_journal_path(quest_root), payload)
-        self.update_runtime_state(
-            quest_root=quest_root,
-            active_interaction_id=interaction_id or artifact_id,
-            last_artifact_interact_at=timestamp,
-            last_tool_activity_at=timestamp,
-            last_tool_activity_name="artifact.interact",
-            tool_calls_since_last_artifact_interact=0,
-            pending_user_message_count=len((self._read_message_queue(quest_root).get("pending") or [])),
-        )
+        runtime_updates: dict[str, Any] = {
+            "quest_root": quest_root,
+            "active_interaction_id": interaction_id or artifact_id,
+            "last_tool_activity_at": timestamp,
+            "last_tool_activity_name": "artifact.interact",
+            "tool_calls_since_last_artifact_interact": 0,
+            "pending_user_message_count": len((self._read_message_queue(quest_root).get("pending") or [])),
+        }
+        if counts_as_visible:
+            runtime_updates["last_artifact_interact_at"] = timestamp
+        self.update_runtime_state(**runtime_updates)
         return payload
 
     def record_tool_activity(
@@ -3133,13 +4394,25 @@ class QuestService:
         runtime_state = self._read_runtime_state(quest_root)
         last_artifact_interact_at = str(runtime_state.get("last_artifact_interact_at") or "").strip() or None
         last_tool_activity_at = str(runtime_state.get("last_tool_activity_at") or "").strip() or None
+        tool_count = int(runtime_state.get("tool_calls_since_last_artifact_interact") or 0)
+        silence_seconds = self._seconds_since_iso_timestamp(last_artifact_interact_at)
+        inspection_due = bool(
+            tool_count >= 25
+            or (
+                tool_count > 0
+                and silence_seconds is not None
+                and silence_seconds >= 30 * 60
+            )
+        )
         return {
             "last_artifact_interact_at": last_artifact_interact_at,
-            "seconds_since_last_artifact_interact": self._seconds_since_iso_timestamp(last_artifact_interact_at),
-            "tool_calls_since_last_artifact_interact": int(runtime_state.get("tool_calls_since_last_artifact_interact") or 0),
+            "seconds_since_last_artifact_interact": silence_seconds,
+            "tool_calls_since_last_artifact_interact": tool_count,
             "last_tool_activity_at": last_tool_activity_at,
             "seconds_since_last_tool_activity": self._seconds_since_iso_timestamp(last_tool_activity_at),
             "last_tool_activity_name": str(runtime_state.get("last_tool_activity_name") or "").strip() or None,
+            "inspection_due": inspection_due,
+            "user_update_due": False,
         }
 
     def latest_artifact_interaction_records(self, quest_root: Path, limit: int = 10) -> list[dict[str, Any]]:

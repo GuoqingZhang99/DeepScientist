@@ -2543,12 +2543,26 @@ const GraphViewport = React.memo(function GraphViewport({
       {toolbar ? <div className="lab-quest-graph-toolbar">{toolbar}</div> : null}
       {isLoading ? (
         <div className="lab-quest-graph-overlay" aria-label="Loading graph">
-          <Skeleton className="h-6 w-48" />
+          <div className="lab-quest-graph-overlay-card">
+            <div className="lab-quest-graph-overlay-title">Loading branch canvas…</div>
+            <div className="lab-quest-graph-overlay-body">
+              Quest graph state is being rebuilt from durable branch and artifact records.
+            </div>
+            <div className="lab-quest-graph-overlay-skeletons" aria-hidden="true">
+              <Skeleton className="h-3 w-40" />
+              <Skeleton className="h-3 w-56" />
+            </div>
+          </div>
         </div>
       ) : null}
       {isError ? (
         <div className="lab-quest-graph-overlay" aria-label="Graph error">
-          <div className="lab-quest-empty">Graph data unavailable.</div>
+          <div className="lab-quest-graph-overlay-card is-error">
+            <div className="lab-quest-graph-overlay-title">Graph data unavailable.</div>
+            <div className="lab-quest-graph-overlay-body">
+              The branch canvas could not be reconstructed from the current quest state.
+            </div>
+          </div>
         </div>
       ) : null}
       <GraphHoverCard card={hoverCard} />

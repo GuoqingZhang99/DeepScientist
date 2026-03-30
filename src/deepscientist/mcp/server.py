@@ -62,7 +62,7 @@ def _progress_watchdog_note(tool_call_count: int) -> str:
     return (
         "By the way, you have gone "
         f"{tool_call_count} tool calls without notifying the user via artifact.interact(...). "
-        "Please report your latest progress now."
+        "Inspect whether the user-visible state actually changed; only send a progress update if there is a real new checkpoint, blocker, or route change."
     )
 
 
@@ -71,7 +71,7 @@ def _visibility_watchdog_note(seconds_since_last_update: int) -> str:
     return (
         "By the way, it has been "
         f"{minutes} minutes since the last user-visible artifact.interact(...). "
-        "Send one concise progress update now before continuing with background work."
+        "Inspect the current run or task state now. Only send a new user-visible update if the frontier materially changed or the user explicitly needs a fresh checkpoint."
     )
 
 
@@ -114,11 +114,16 @@ def _attach_interaction_watchdog(
     state_change_note: str | None = None,
 ) -> dict[str, Any]:
     enriched = dict(payload)
-    enriched["interaction_watchdog"] = dict(watchdog or {})
+    interaction_watchdog = dict(watchdog or {})
     notes = _collect_interaction_watchdog_notes(
         watchdog,
         state_change_note=state_change_note,
     )
+    interaction_watchdog["user_update_due"] = bool(
+        interaction_watchdog.get("user_update_due")
+        or any(str(item.get("kind") or "") == "state_change" for item in notes)
+    )
+    enriched["interaction_watchdog"] = interaction_watchdog
     if not notes:
         return enriched
     enriched["watchdog_notes"] = notes
@@ -557,19 +562,26 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         name="submit_idea",
         description=(
             "Create or revise the active research idea. "
-            "Normal research flow should use mode=create together with lineage_intent=continue_line or branch_alternative, so each durable idea submission becomes a new branch/worktree and a new user-visible research node. "
+            "Normal research flow should use mode=create together with submission_mode='line' and lineage_intent=continue_line or branch_alternative, so each durable idea submission becomes a new branch/worktree and a new user-visible research node. "
+            "submission_mode='candidate' records a candidate idea brief without opening a new branch yet. "
             "mode=revise is maintenance-only for refining the current active idea.md in place. "
             "When foundation_ref is omitted, lineage_intent infers the parent and default foundation from the active research line."
         ),
     )
     def submit_idea(
         mode: str = "create",
+        submission_mode: str = "line",
         idea_id: str | None = None,
         lineage_intent: str | None = None,
         title: str = "",
         problem: str = "",
         hypothesis: str = "",
         mechanism: str = "",
+        method_brief: str = "",
+        selection_scores: dict[str, Any] | None = None,
+        mechanism_family: str = "",
+        change_layer: str = "",
+        source_lens: str = "",
         expected_gain: str = "",
         evidence_paths: list[str] | None = None,
         risks: list[str] | None = None,
@@ -578,17 +590,24 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         foundation_reason: str = "",
         next_target: str = "experiment",
         draft_markdown: str = "",
+        source_candidate_id: str | None = None,
         comment: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return service.submit_idea(
             context.require_quest_root(),
             mode=mode,
+            submission_mode=submission_mode,
             idea_id=idea_id,
             lineage_intent=lineage_intent,
             title=title,
             problem=problem,
             hypothesis=hypothesis,
             mechanism=mechanism,
+            method_brief=method_brief,
+            selection_scores=selection_scores,
+            mechanism_family=mechanism_family,
+            change_layer=change_layer,
+            source_lens=source_lens,
             expected_gain=expected_gain,
             evidence_paths=evidence_paths,
             risks=risks,
@@ -597,6 +616,7 @@ def build_artifact_server(context: McpContext) -> FastMCP:
             foundation_reason=foundation_reason,
             next_target=next_target,
             draft_markdown=draft_markdown,
+            source_candidate_id=source_candidate_id,
         )
 
     @server.tool(
@@ -618,6 +638,117 @@ def build_artifact_server(context: McpContext) -> FastMCP:
     )
     def resolve_runtime_refs(comment: str | dict[str, Any] | None = None) -> dict[str, Any]:
         return service.resolve_runtime_refs(context.require_quest_root())
+
+    @server.tool(
+        name="get_paper_contract_health",
+        description=(
+            "Inspect whether the active paper line is actually unblocked for writing or finalize work. "
+            "Use detail='summary' for a compact decision surface or detail='full' for exact blocking items."
+        ),
+    )
+    def get_paper_contract_health(
+        detail: str = "summary",
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.get_paper_contract_health(
+            context.require_quest_root(),
+            detail=detail,
+        )
+
+    @server.tool(
+        name="get_quest_state",
+        description=(
+            "Read the current quest runtime state without mutating anything. "
+            "Use detail='summary' for a compact operational view or detail='full' for recent artifacts, runs, and active interactions."
+        ),
+    )
+    def get_quest_state(
+        detail: str = "summary",
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.get_quest_state(
+            context.require_quest_root(),
+            detail=detail,
+        )
+
+    @server.tool(
+        name="get_global_status",
+        description=(
+            "Read a concise quest-global status summary for direct user questions such as overall progress, paper readiness, or the latest measured result. "
+            "Use detail='brief' for a compact answer surface or detail='full' for more structured context."
+        ),
+    )
+    def get_global_status(
+        detail: str = "brief",
+        locale: str = "zh",
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.get_global_status(
+            context.require_quest_root(),
+            detail=detail,
+            locale=locale,
+        )
+
+    @server.tool(
+        name="get_method_scoreboard",
+        description=(
+            "Read or refresh the quest-level method scoreboard so overall experiment history and the current incumbent line are explicit."
+        ),
+    )
+    def get_method_scoreboard(comment: str | dict[str, Any] | None = None) -> dict[str, Any]:
+        return service.refresh_method_scoreboard(context.require_quest_root())
+
+    @server.tool(
+        name="get_optimization_frontier",
+        description=(
+            "Read a compact optimization-frontier summary for algorithm-first quests. "
+            "It summarizes candidate briefs, promoted lines, recent implementation candidates, stagnant branches, fusion opportunities, and the recommended next mode."
+        ),
+    )
+    def get_optimization_frontier(
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.get_optimization_frontier(
+            context.require_quest_root(),
+        )
+
+    @server.tool(
+        name="read_quest_documents",
+        description=(
+            "Read durable quest documents such as brief, plan, status, summary, and active user requirements. "
+            "Use mode='excerpt' for compact recovery or mode='full' when exact document wording matters."
+        ),
+    )
+    def read_quest_documents(
+        names: list[str] | None = None,
+        mode: str = "excerpt",
+        max_lines: int = 12,
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.read_quest_documents(
+            context.require_quest_root(),
+            names=names,
+            mode=mode,
+            max_lines=max_lines,
+        )
+
+    @server.tool(
+        name="get_conversation_context",
+        description=(
+            "Read a recent window of quest conversation history. "
+            "Use this when earlier user/assistant continuity matters and the current prompt intentionally keeps only a compact turn launcher."
+        ),
+    )
+    def get_conversation_context(
+        limit: int = 12,
+        include_attachments: bool = False,
+        comment: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return service.get_conversation_context(
+            context.require_quest_root(),
+            limit=limit,
+            include_attachments=include_attachments,
+        )
 
     @server.tool(
         name="get_analysis_campaign",
@@ -957,7 +1088,14 @@ def build_artifact_server(context: McpContext) -> FastMCP:
     def render_git_graph(comment: str | dict[str, Any] | None = None) -> dict[str, Any]:
         return service.render_git_graph(context.require_quest_root())
 
-    @server.tool(name="interact", description="Send a structured user-facing update and optionally fetch new inbound messages.")
+    @server.tool(
+        name="interact",
+        description=(
+            "Send a structured user-facing interaction and optionally fetch new inbound messages. "
+            "Use kind='answer' for direct user questions, kind='progress' for long-running checkpoint updates, "
+            "kind='milestone' for material state changes, and kind='decision_request' only for true blocking decisions."
+        ),
+    )
     def interact(
         kind: str = "progress",
         message: str = "",
@@ -977,6 +1115,9 @@ def build_artifact_server(context: McpContext) -> FastMCP:
         reply_schema: dict[str, Any] | None = None,
         reply_to_interaction_id: str | None = None,
         supersede_open_requests: bool = True,
+        dedupe_key: str | None = None,
+        suppress_if_unchanged: bool | None = None,
+        min_interval_seconds: int | None = None,
         comment: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result = service.interact(
@@ -999,6 +1140,9 @@ def build_artifact_server(context: McpContext) -> FastMCP:
             reply_schema=reply_schema,
             reply_to_interaction_id=reply_to_interaction_id,
             supersede_open_requests=supersede_open_requests,
+            dedupe_key=dedupe_key,
+            suppress_if_unchanged=suppress_if_unchanged,
+            min_interval_seconds=min_interval_seconds,
         )
         result["interaction_watchdog"] = quest_service.artifact_interaction_watchdog_status(context.require_quest_root())
         return result

@@ -63,6 +63,7 @@ It exists to test whether the current evidence can support a stable narrative.
 Writing should happen on a dedicated `paper/*` branch/worktree derived from the source main-experiment `run/*` branch.
 Treat that paper branch as the writing surface, and treat the parent run branch as the evidence source that writing must faithfully reflect.
 Do not run new main experiments from the paper branch; if writing exposes a missing evidence requirement, route back through `decision`, `activate_branch`, `experiment`, or `analysis-campaign`.
+Once an outline is selected, treat that branch/worktree as an active paper line with its own contract, not just as a late draft folder.
 
 If the evidence is incomplete, contradictory, or too weak, the correct output is:
 
@@ -84,6 +85,17 @@ The approved outline should be a real structured object, typically containing:
   - `methodology`
   - `experimental_designs`
   - `contributions`
+
+Treat the approved outline as the paper contract, not just a narrative sketch.
+It should decide:
+
+- which sections exist
+- which experiments or analysis items each section depends on
+- which evidence belongs in main text, appendix, or reference-only support
+
+If the selected outline is missing those links, repair the outline and matrix before further drafting.
+Prefer an author-facing outline folder under `paper/outline/` with section-level files, and treat `paper/selected_outline.json` as the compiled compatibility view of that contract.
+`paper/evidence_ledger.json` remains the runtime truth of what evidence actually exists and where it maps.
 
 ## Writing mental guardrails
 
@@ -120,8 +132,27 @@ Before writing seriously, confirm:
 - the claims you intend to write are backed by durable artifacts
 - the code/diff path is available for method fidelity checks
 - the evaluation contract is explicit
+- the active paper line is known
+- the selected outline is present and reflects the current evidence line
+- `paper/outline/manifest.json` and any relevant section files are present when the outline folder flow is enabled
+- `paper/evidence_ledger.json` or `paper/evidence_ledger.md` reflects the current mapped paper evidence set
+- `paper/paper_experiment_matrix.md` reflects the current paper-facing experiment and analysis frontier when that planning surface is in use
+- completed relevant analysis results under `experiments/analysis-results/` are mapped into the selected outline or matrix rather than floating only as standalone reports
 
 If major claims lack evidence, surface the gap first.
+If the selected outline, outline folder, evidence ledger, or matrix feels underspecified, read `references/outline-evidence-contract-example.md` before drafting further.
+For paper-facing work, use this hard order instead of drifting between surfaces:
+
+1. refresh the active outline folder section files first when they exist
+2. sync the compiled `paper/selected_outline.json`
+3. confirm `paper/evidence_ledger.json` reflects the same mapped evidence set
+4. only then draft, revise, review, or bundle prose
+
+Do not draft first and promise to repair the paper contract later.
+If the current blocker set is not obvious from files, call `artifact.get_paper_contract_health(detail='full')` before deciding whether to keep writing or to return to contract repair / supplementary work.
+If the active quest status, current workspace, recent durable runs, or pending interaction state is unclear after a restart, call `artifact.get_quest_state(detail='summary')` first.
+If the exact current brief/plan/status/summary wording matters for the current drafting decision, call `artifact.read_quest_documents(...)` instead of relying on prompt-injected excerpts.
+If you need earlier user/assistant continuity to interpret the current writing request, call `artifact.get_conversation_context(...)` before changing the route.
 
 ## Truth sources
 
@@ -139,12 +170,19 @@ Use these as the canonical evidence base:
 
 Do not rely on memory alone for numbers.
 Always prefer direct artifact paths for claims.
+Do not keep drafting from remembered storyline summaries if the active paper line already has a stricter durable contract in its outline folder, selected outline, evidence ledger, experiment matrix, or paper-facing analysis mirrors.
 
 ## Required durable outputs
 
 The write stage should usually produce most of the following:
 
-- `paper/outline.md` or equivalent outline
+- `paper/outline/manifest.json`
+- `paper/outline/sections/<section_id>/section.md`
+- `paper/outline/sections/<section_id>/result_table.json`
+- `paper/outline/sections/<section_id>/experiment_setup.md`
+- `paper/outline/sections/<section_id>/findings.md`
+- `paper/outline/sections/<section_id>/impact.md`
+- `paper/outline.md` or equivalent outline view
 - `paper/selected_outline.json`
 - `paper/paper_experiment_matrix.md`
 - `paper/paper_experiment_matrix.json`
@@ -172,7 +210,8 @@ The write stage should usually produce most of the following:
 
 The exact paths may vary, but the structure and meaning should remain clear.
 
-Treat the approved outline as the authoritative blueprint for the draft.
+Treat the author-facing outline folder and compiled selected outline together as the authoritative blueprint for the draft.
+If both exist, update the outline folder first and then keep `paper/selected_outline.json` synchronized as the compiled compatibility output.
 Treat `paper/draft.md` or the equivalent working note as the running evidence ledger where useful findings, citation notes, and writing decisions are accumulated as work proceeds.
 After every significant search, plot, paragraph, revision pass, or claim downgrade, update the working note and writing plan immediately so important writing state is not trapped in transient chat output.
 For any substantial paper-writing line, keep `paper/writing_plan.md` or an equivalent durable plan detailed enough that another agent could resume from it without reconstructing the full logic from chat alone.
@@ -212,8 +251,10 @@ For any paper-like writing line that has more than a trivial single-result story
 - `paper/paper_experiment_matrix.json`
 
 Use `references/paper-experiment-matrix-template.md` when helpful.
+Use `references/outline-evidence-contract-example.md` when the paper line needs a concrete example of section binding, `required_items`, and `result_table` updates.
 
-The paper experiment matrix is the durable experiment-control surface for the paper line.
+The paper experiment matrix is the planning and reporting surface for the paper line.
+It is not the master truth when it disagrees with the selected outline contract or `paper/evidence_ledger.json`.
 It exists to prevent two common failures:
 
 - an outline that overweights post-hoc analysis and under-specifies paper-typical experiments
@@ -230,6 +271,18 @@ It should cover the full paper-facing experiment program beyond the already-fini
 - highlight-validation experiments that test the method's most likely reader-facing strengths rather than merely assuming those strengths
 - failure-boundary or limitation-surface analyses
 - case study or trace walkthrough rows as optional supporting material rather than mandatory core evidence
+
+The matrix should also act as the ingestion gate for completed follow-up analysis:
+
+- if a completed analysis campaign or slice is relevant to a paper claim, it must appear in the matrix as `main_required`, `appendix`, `reference_only`, or be excluded with a written reason
+- do not allow completed analysis results to remain paper-invisible
+
+The outline should be revised in lockstep with that matrix:
+
+- before analysis begins, seed the section structure and expected evidence items
+- after each completed slice, update the matching section's `result_table`
+- if the outline folder exists, update the section's `experiment_setup.md`, `findings.md`, and `impact.md` instead of leaving those changes only in prose notes
+- if a result weakens the claim, downgrade the section contract before polishing prose
 
 Case study is usually optional.
 Do not let it displace stronger quantitative evidence.
@@ -342,6 +395,15 @@ After every meaningful experiment outcome, even a null result or exclusion:
 Do not decide the next supplementary experiment from memory alone when the matrix exists.
 The matrix should be the authoritative experiment-routing surface for the paper line, and the selected outline's `experimental_designs` should stay consistent with that matrix rather than drifting away from it.
 
+Before drafting any section, verify all of the following:
+
+- the section exists in the selected outline
+- the section's required experiment or analysis items are present in `paper/paper_experiment_matrix.*`
+- every main-text-required item for that section is already completed or honestly blocked
+- no completed relevant analysis slice remains unmapped
+
+If any of those checks fails, stop drafting and repair the paper contract first.
+
 ## Venue template selection
 
 For paper-like writing, use a real venue template rather than improvising a blank LaTeX tree.
@@ -385,14 +447,18 @@ For paper-like deliverables, the safest default order is:
 2. activate or create the dedicated `paper/*` branch/worktree derived from the source run branch before durable outline selection or drafting
 3. choose the venue template from `templates/`, copy it into `paper/latex/`, and default general ML work to `templates/iclr2026/` unless a stronger venue target exists
 4. if the line benefits from an explicit outline contract, record one or more outline candidates with `artifact.submit_paper_outline(mode='candidate', ...)`
-5. if one outline should become the durable paper contract, select or revise it with `artifact.submit_paper_outline(mode='select'|'revise', ...)`
-6. create or refresh `paper/paper_experiment_matrix.md` and `paper/paper_experiment_matrix.json` before stabilizing the experiments section
-7. if the selected outline or matrix still exposes evidence gaps, launch an outline-bound and matrix-bound `artifact.create_analysis_campaign(...)` before drafting the experiments section as if it were settled
-8. plan and generate decisive figures or tables
-9. draft sections directly from the evidence and the current working outline; do not force extra outline rounds when direct drafting is clearer and safer
-10. run harsh review and revision cycles
-11. proof, package, submit `artifact.submit_paper_bundle(...)` when the bundle is ready, and then pass to `finalize`
-12. if the final paper PDF exists and QQ milestone media is enabled in config, the bundle-ready milestone may attach that PDF once
+5. if one outline should become the durable paper contract, select or revise it with `artifact.submit_paper_outline(mode='select'|'revise', ...)`; that selection should be treated as opening or refreshing the active paper line
+6. if the outline folder flow is enabled, create or refresh `paper/outline/manifest.json` and the relevant section files before stabilizing the experiments section
+7. create or refresh `paper/paper_experiment_matrix.md` and `paper/paper_experiment_matrix.json` before stabilizing the experiments section
+8. if the selected outline or matrix still exposes evidence gaps, launch an outline-bound and matrix-bound `artifact.create_analysis_campaign(...)` before drafting the experiments section as if it were settled
+9. after every completed follow-up slice, reopen the selected outline and confirm the corresponding `result_table` row now reflects the real result rather than a placeholder
+10. if the outline folder exists, immediately sync the affected section files so experiment setup, findings, and impact stay current on the paper line
+11. after that sync, confirm `paper/evidence_ledger.json` and the paper line summary still agree before continuing prose work
+12. plan and generate decisive figures or tables
+13. draft sections directly from the evidence and the current working outline; do not force extra outline rounds when direct drafting is clearer and safer
+14. run harsh review and revision cycles
+15. proof, package, submit `artifact.submit_paper_bundle(...)` when the bundle is ready, and then pass to `finalize`
+16. if the final paper PDF exists and QQ milestone media is enabled in config, the bundle-ready milestone may attach that PDF once
 
 Before real drafting, force one explicit planning pass that stabilizes at least:
 
@@ -1202,6 +1268,7 @@ Preferred artifact choices:
   - draft readiness when a user-facing checkpoint helps
 - use `approval` when the user explicitly confirms a submission-critical choice
 - use `artifact.submit_paper_outline(mode='candidate'|'select'|'revise', ...)` for the real outline lifecycle instead of leaving outline choice only in prose
+- when `mode='select'`, treat the selected outline as the activation point of the active paper line and keep its folder/json contract synchronized
 - use `artifact.submit_paper_bundle(...)` before leaving the writing stage when the draft, plan, references, and packaging evidence are durable enough
 - continue writing on the dedicated `paper/*` branch/worktree after analysis slices finish; treat the parent run or idea branch as the evidence source, not the drafting surface
 
@@ -1239,7 +1306,7 @@ Use these references when the deliverable is paper-like and you need a denser op
 
 Exit the write stage only when one of the following is durably true:
 
-- the current draft is evidence-complete enough for `finalize`, including a selected outline and a durable paper bundle manifest when the deliverable is paper-like
+- the current draft is evidence-complete enough for `finalize`, including an active paper line, a selected outline, synchronized outline contract files, and a durable paper bundle manifest when the deliverable is paper-like
 - a clear evidence gap has been recorded and the quest is routed backward
 - a packaging or proofing blocker has been recorded and the next action is explicit
 

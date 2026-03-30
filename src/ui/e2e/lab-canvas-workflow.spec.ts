@@ -71,4 +71,17 @@ test.describe('lab canvas workflow', () => {
     const optionTexts = await metricSelect.locator('option').allTextContents()
     expect(optionTexts).toEqual(expect.arrayContaining(fixture.metric_keys))
   })
+
+  test('details view exposes the paper-line audit surfaces', async ({ page }) => {
+    await page.goto(`/projects/${fixture.quest_id}`)
+
+    const detailsNav = page.getByText('Details', { exact: true }).first()
+    await expect(detailsNav).toBeVisible({ timeout: 30_000 })
+    await detailsNav.click()
+
+    await expect(page.getByText('Idea Lines', { exact: true })).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByText('Paper Contract Health', { exact: true })).toBeVisible()
+    await expect(page.getByText('Paper Contract', { exact: true })).toBeVisible()
+    await expect(page.getByText('Paper Lines', { exact: true })).toBeVisible()
+  })
 })

@@ -566,6 +566,10 @@ class BashExecService:
         normalized_agent_instance_ids = {item for item in (agent_instance_ids or []) if item}
         normalized_agent_ids = {item for item in (agent_ids or []) if item}
         normalized_chat_session = _normalize_string(chat_session_id)
+        if normalized_status in {"running", "terminating"}:
+            summary = self.summary(quest_root)
+            if int(summary.get("running_count") or 0) <= 0:
+                return []
         sessions: list[dict[str, Any]] = []
         for bash_id in self._list_session_ids(quest_root):
             try:

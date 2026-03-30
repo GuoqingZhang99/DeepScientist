@@ -642,6 +642,8 @@ class CodexRunner:
             user_message=request.message,
             model=request.model,
             turn_reason=request.turn_reason,
+            turn_intent=request.turn_intent,
+            turn_mode=request.turn_mode,
             retry_context=request.retry_context,
         )
         write_text(run_root / "prompt.md", prompt)
@@ -663,6 +665,8 @@ class CodexRunner:
                 "workspace_root": str(workspace_root),
                 "cwd": str(workspace_root),
                 "turn_reason": request.turn_reason,
+                "turn_intent": request.turn_intent,
+                "turn_mode": request.turn_mode,
             },
         )
 
@@ -681,6 +685,8 @@ class CodexRunner:
         env["DS_WORKTREE_ROOT"] = str(workspace_root)
         env["DS_RUN_ID"] = request.run_id
         env["DS_TURN_REASON"] = request.turn_reason
+        env["DS_TURN_INTENT"] = request.turn_intent
+        env["DS_TURN_MODE"] = request.turn_mode
         quest_yaml = read_yaml(request.quest_root / "quest.yaml", {})
         env["DS_ACTIVE_ANCHOR"] = str(quest_yaml.get("active_anchor", "baseline"))
         env["DS_CONVERSATION_ID"] = f"quest:{request.quest_id}"
@@ -954,10 +960,11 @@ class CodexRunner:
         for filename in ("config.toml", "auth.json"):
             source_path = source / filename
             target_path = target / filename
-            if source_path.exists() and not target_path.exists():
-                if source_path.resolve() == target_path.resolve():
-                    continue
-                shutil.copy2(source_path, target_path)
+            if not source_path.exists():
+                continue
+            if source_path.resolve() == target_path.resolve():
+                continue
+            shutil.copy2(source_path, target_path)
         config_path = target / "config.toml"
         if profile and config_path.exists():
             adapted_text, _ = adapt_profile_only_provider_config(read_text(config_path), profile=profile)

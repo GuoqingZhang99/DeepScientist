@@ -1848,6 +1848,47 @@
   pointer-events: none;
 }
 
+.lab-quest-graph-overlay-card {
+  width: min(440px, calc(100% - 48px));
+  border-radius: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 22px 48px rgba(15, 23, 42, 0.12);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lab-quest-graph-overlay-card.is-error {
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+.lab-quest-graph-overlay-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--lab-text-primary);
+}
+
+.lab-quest-graph-overlay-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--lab-text-secondary);
+}
+
+.lab-quest-graph-overlay-skeletons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+:is(.dark, [data-theme="dark"]) .lab-quest-graph-overlay-card {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(24, 26, 32, 0.88);
+  box-shadow: 0 28px 56px rgba(0, 0, 0, 0.34);
+}
+
 .lab-quest-graph-toolbar {
   position: absolute;
   top: 14px;

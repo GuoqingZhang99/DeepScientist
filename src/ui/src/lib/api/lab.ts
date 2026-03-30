@@ -34,6 +34,21 @@ import type {
 import { apiClient } from './client'
 
 const LAB_BASE = (projectId: string) => `/api/v1/projects/${projectId}/lab`
+const LOCAL_QUEST_SESSION_TTL_MS = 3000
+const LOCAL_QUEST_BRANCHES_TTL_MS = 8000
+const LOCAL_QUEST_LAYOUT_TTL_MS = 5000
+
+type LocalQuestRequestCacheEntry<T> = {
+  expiresAt: number
+  promise: Promise<T>
+}
+
+const localQuestSummaryCache = new Map<string, LocalQuestRequestCacheEntry<QuestSummary>>()
+const localQuestBranchesCache = new Map<string, LocalQuestRequestCacheEntry<GitBranchesPayload | null>>()
+const localQuestLayoutCache = new Map<
+  string,
+  LocalQuestRequestCacheEntry<{ layout_json?: Record<string, unknown> | null; updated_at?: string | null } | null>
+>()
 
 type LabRequestOptions = {
   silent?: boolean
@@ -52,6 +67,30 @@ function isLocalLabFallbackError(error: unknown) {
   if (!error || typeof error !== 'object') return false
   const status = (error as { response?: { status?: number } }).response?.status
   return status === 401 || status === 403 || status === 404 || status === 405 || status === 501 || status === 502 || status === 503
+}
+
+function loadWithShortCache<T>(
+  cache: Map<string, LocalQuestRequestCacheEntry<T>>,
+  key: string,
+  ttlMs: number,
+  loader: () => Promise<T>
+): Promise<T> {
+  const now = Date.now()
+  const cached = cache.get(key)
+  if (cached && cached.expiresAt > now) {
+    return cached.promise
+  }
+  const promise = loader().catch((error) => {
+    if (cache.get(key)?.promise === promise) {
+      cache.delete(key)
+    }
+    throw error
+  })
+  cache.set(key, {
+    expiresAt: now + ttlMs,
+    promise,
+  })
+  return promise
 }
 
 async function shouldUseLocalQuestLab(projectId: string): Promise<boolean> {
@@ -2550,8 +2589,10 @@ function buildTraceEdges(
 }
 
 async function loadLocalQuestSummary(projectId: string): Promise<QuestSummary> {
-  const session = await questClient.session(projectId)
-  return session.snapshot as QuestSummary
+  return loadWithShortCache(localQuestSummaryCache, projectId, LOCAL_QUEST_SESSION_TTL_MS, async () => {
+    const session = await questClient.session(projectId)
+    return session.snapshot as QuestSummary
+  })
 }
 
 async function loadLocalQuestWorkflow(projectId: string): Promise<WorkflowPayload | null> {
@@ -2580,21 +2621,25 @@ async function loadLocalQuestNodeTraces(
 }
 
 async function loadLocalQuestBranches(projectId: string): Promise<GitBranchesPayload | null> {
-  try {
-    return await questClient.gitBranches(projectId)
-  } catch {
-    return null
-  }
+  return loadWithShortCache(localQuestBranchesCache, projectId, LOCAL_QUEST_BRANCHES_TTL_MS, async () => {
+    try {
+      return await questClient.gitBranches(projectId)
+    } catch {
+      return null
+    }
+  })
 }
 
 async function loadLocalQuestLayout(
   projectId: string
 ): Promise<{ layout_json?: Record<string, unknown> | null; updated_at?: string | null } | null> {
-  try {
-    return await questClient.layout(projectId)
-  } catch {
-    return null
-  }
+  return loadWithShortCache(localQuestLayoutCache, projectId, LOCAL_QUEST_LAYOUT_TTL_MS, async () => {
+    try {
+      return await questClient.layout(projectId)
+    } catch {
+      return null
+    }
+  })
 }
 
 async function loadLocalQuestArtifacts(projectId: string): Promise<QuestArtifactListPayload | null> {

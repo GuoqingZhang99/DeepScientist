@@ -289,6 +289,12 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
             "submit_idea",
             "list_research_branches",
             "resolve_runtime_refs",
+            "get_paper_contract_health",
+            "get_quest_state",
+            "get_global_status",
+            "get_optimization_frontier",
+            "read_quest_documents",
+            "get_conversation_context",
             "get_analysis_campaign",
             "record_main_experiment",
             "create_analysis_campaign",
@@ -459,6 +465,20 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         refs_after_main = _unwrap_tool_result(await server.call_tool("resolve_runtime_refs", {}))
         assert refs_after_main["latest_main_run_id"] == "main-mcp-001"
         assert refs_after_main["active_idea_id"] == idea_result["idea_id"]
+        quest_state_summary = _unwrap_tool_result(await server.call_tool("get_quest_state", {"detail": "summary"}))
+        assert quest_state_summary["ok"] is True
+        assert quest_state_summary["quest_state"]["active_idea_id"] == idea_result["idea_id"]
+        docs_excerpt = _unwrap_tool_result(
+            await server.call_tool(
+                "read_quest_documents",
+                {"names": ["brief", "status"], "mode": "excerpt"},
+            )
+        )
+        assert docs_excerpt["ok"] is True
+        assert docs_excerpt["count"] == 2
+        convo_context = _unwrap_tool_result(await server.call_tool("get_conversation_context", {"limit": 5}))
+        assert convo_context["ok"] is True
+        assert convo_context["count"] >= 0
 
         branches_after_run = _unwrap_tool_result(await server.call_tool("list_research_branches", {}))
         assert branches_after_run["ok"] is True
@@ -521,6 +541,10 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         outlines_before = _unwrap_tool_result(await server.call_tool("list_paper_outlines", {}))
         assert outlines_before["selected_outline_ref"] is None
         assert outlines_before["count"] == 0
+        paper_health_before = _unwrap_tool_result(
+            await server.call_tool("get_paper_contract_health", {"detail": "summary"})
+        )
+        assert paper_health_before["ok"] is False
 
         campaign_result = _unwrap_tool_result(
             await server.call_tool(
@@ -652,6 +676,221 @@ def test_artifact_mcp_server_tools_cover_core_flows(temp_home: Path) -> None:
         )
         assert completion_result["ok"] is True
         assert completion_result["snapshot"]["status"] == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_artifact_mcp_submit_idea_supports_candidate_submission_mode(temp_home: Path) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create("mcp candidate idea quest")
+        quest_root = Path(quest["quest_root"])
+        server = build_artifact_server(
+            McpContext(
+                home=temp_home,
+                quest_id=quest["quest_id"],
+                quest_root=quest_root,
+                run_id="run-mcp-candidate",
+                active_anchor="baseline",
+                conversation_id="quest:test",
+                agent_role="baseline",
+                worker_id="worker-main",
+                worktree_root=None,
+                team_mode="single",
+            )
+        )
+        artifact = ArtifactService(temp_home)
+        baseline_root = quest_root / "baselines" / "local" / "mcp-candidate-baseline"
+        baseline_root.mkdir(parents=True, exist_ok=True)
+        write_json(
+            baseline_root / "RESULT.json",
+            {
+                "metrics_summary": {"accuracy": 0.81},
+                "metric_contract": _detailed_metric_contract(["accuracy"]),
+                "primary_metric": {"metric_id": "accuracy", "value": 0.81, "direction": "maximize"},
+            },
+        )
+        artifact.confirm_baseline(
+            quest_root,
+            baseline_path="baselines/local/mcp-candidate-baseline",
+            baseline_id="mcp-candidate-baseline",
+            summary="Candidate-mode baseline",
+        )
+
+        candidate = _unwrap_tool_result(
+            await server.call_tool(
+                "submit_idea",
+                {
+                    "mode": "create",
+                    "submission_mode": "candidate",
+                    "title": "Candidate route",
+                    "problem": "Need a lightweight candidate before promotion.",
+                    "hypothesis": "A candidate adapter may improve the tail.",
+                    "mechanism": "Try a narrow adapter before the head.",
+                    "method_brief": "Keep the route branchless until ranking is done.",
+                    "selection_scores": {"utility": 0.8, "distinctness": 0.64},
+                    "mechanism_family": "adapter",
+                    "change_layer": "Tier2",
+                    "source_lens": "baseline_refinement",
+                    "decision_reason": "Record the candidate first.",
+                    "next_target": "optimize",
+                },
+            )
+        )
+        assert candidate["ok"] is True
+        assert candidate["submission_mode"] == "candidate"
+        assert candidate["method_brief"] == "Keep the route branchless until ranking is done."
+        assert candidate["selection_scores"] == {"utility": 0.8, "distinctness": 0.64}
+        assert candidate["mechanism_family"] == "adapter"
+        assert candidate["change_layer"] == "Tier2"
+        assert candidate["source_lens"] == "baseline_refinement"
+        assert "branch" not in candidate
+        assert Path(candidate["candidate_root"]).exists()
+
+        promoted = _unwrap_tool_result(
+            await server.call_tool(
+                "submit_idea",
+                {
+                    "mode": "create",
+                    "submission_mode": "line",
+                    "source_candidate_id": candidate["idea_id"],
+                    "title": "Promoted route",
+                    "problem": "Promote the candidate into a durable line.",
+                    "hypothesis": "The candidate is strong enough for a real branch.",
+                    "mechanism": "Carry the candidate plan into a branch-backed line.",
+                    "method_brief": "Promote the branchless route into a durable optimization line.",
+                    "selection_scores": {"utility": 0.88, "distinctness": 0.59},
+                    "mechanism_family": "adapter",
+                    "change_layer": "Tier2",
+                    "source_lens": "baseline_refinement",
+                    "decision_reason": "Promote the candidate into the active optimization line.",
+                    "next_target": "optimize",
+                },
+            )
+        )
+        assert promoted["ok"] is True
+        assert promoted["submission_mode"] == "line"
+        assert promoted["source_candidate_id"] == candidate["idea_id"]
+        assert promoted["method_brief"] == "Promote the branchless route into a durable optimization line."
+        assert promoted["selection_scores"] == {"utility": 0.88, "distinctness": 0.59}
+        assert promoted["mechanism_family"] == "adapter"
+        assert promoted["change_layer"] == "Tier2"
+        assert promoted["source_lens"] == "baseline_refinement"
+        assert Path(promoted["worktree_root"]).exists()
+
+    asyncio.run(scenario())
+
+
+def test_artifact_mcp_get_optimization_frontier_returns_candidate_and_line_state(temp_home: Path) -> None:
+    async def scenario() -> None:
+        ensure_home_layout(temp_home)
+        ConfigManager(temp_home).ensure_files()
+        quest = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home)).create(
+            "mcp frontier quest",
+            startup_contract={"need_research_paper": False},
+        )
+        quest_root = Path(quest["quest_root"])
+        artifact = ArtifactService(temp_home)
+        baseline_root = quest_root / "baselines" / "local" / "mcp-frontier-baseline"
+        baseline_root.mkdir(parents=True, exist_ok=True)
+        write_json(
+            baseline_root / "RESULT.json",
+            {
+                "metrics_summary": {"accuracy": 0.81},
+                "metric_contract": _detailed_metric_contract(["accuracy"]),
+                "primary_metric": {"metric_id": "accuracy", "value": 0.81, "direction": "maximize"},
+            },
+        )
+        artifact.confirm_baseline(
+            quest_root,
+            baseline_path="baselines/local/mcp-frontier-baseline",
+            baseline_id="mcp-frontier-baseline",
+            summary="Frontier baseline",
+        )
+
+        candidate = artifact.submit_idea(
+            quest_root,
+            mode="create",
+            submission_mode="candidate",
+            title="Frontier candidate",
+            problem="Keep a branchless candidate in the pool.",
+            hypothesis="A branchless brief may still be worth later promotion.",
+            mechanism="Delay branch creation until ranking is finished.",
+            method_brief="Preserve the direction as a method brief before promotion.",
+            selection_scores={"utility": 0.71, "distinctness": 0.66},
+            mechanism_family="ranking_gate",
+            change_layer="Tier1",
+            source_lens="search_widening",
+            decision_reason="Record the candidate first.",
+            next_target="optimize",
+        )
+        line = artifact.submit_idea(
+            quest_root,
+            mode="create",
+            submission_mode="line",
+            title="Frontier line",
+            problem="Promote the strongest current line.",
+            hypothesis="A durable line should now be optimized.",
+            mechanism="Use a residual adapter.",
+            decision_reason="Open the current incumbent line.",
+            next_target="optimize",
+        )
+        artifact.record_main_experiment(
+            quest_root,
+            run_id="main-mcp-frontier-001",
+            title="Frontier main run",
+            hypothesis="The frontier line helps.",
+            setup="Use baseline recipe.",
+            execution="Ran validation.",
+            results="Accuracy improved.",
+            conclusion="Use this line as the current incumbent.",
+            metric_rows=[{"metric_id": "accuracy", "value": 0.9}],
+        )
+        artifact.record(
+            quest_root,
+            {
+                "kind": "report",
+                "status": "proposed",
+                "report_type": "optimization_candidate",
+                "candidate_id": "cand-mcp-frontier-001",
+                "idea_id": line["idea_id"],
+                "branch": line["branch"],
+                "strategy": "exploit",
+                "summary": "Queued candidate for smoke.",
+                "details": {"candidate_id": "cand-mcp-frontier-001"},
+            },
+            workspace_root=Path(line["worktree_root"]),
+        )
+
+        server = build_artifact_server(
+            McpContext(
+                home=temp_home,
+                quest_id=quest["quest_id"],
+                quest_root=quest_root,
+                run_id="run-mcp-frontier",
+                active_anchor="optimize",
+                conversation_id="quest:test",
+                agent_role="optimize",
+                worker_id="worker-main",
+                worktree_root=None,
+                team_mode="single",
+            )
+        )
+
+        frontier = _unwrap_tool_result(await server.call_tool("get_optimization_frontier", {}))
+        assert frontier["ok"] is True
+        payload = frontier["optimization_frontier"]
+        assert payload["mode"] == "exploit"
+        assert payload["candidate_backlog"]["candidate_brief_count"] == 1
+        assert payload["candidate_briefs"][0]["idea_id"] == candidate["idea_id"]
+        assert payload["candidate_briefs"][0]["method_brief"] == "Preserve the direction as a method brief before promotion."
+        assert payload["candidate_briefs"][0]["selection_scores"] == {"utility": 0.71, "distinctness": 0.66}
+        assert payload["candidate_briefs"][0]["mechanism_family"] == "ranking_gate"
+        assert payload["candidate_briefs"][0]["change_layer"] == "Tier1"
+        assert payload["candidate_briefs"][0]["source_lens"] == "search_widening"
+        assert payload["best_run"]["run_id"] == "main-mcp-frontier-001"
+        assert payload["implementation_candidates"][0]["candidate_id"] == "cand-mcp-frontier-001"
 
     asyncio.run(scenario())
 
@@ -937,11 +1176,18 @@ def test_artifact_mcp_server_analysis_campaign_infers_parent_main_run_from_runti
                     "experimental_designs": ["Ablation-parent"],
                     "todo_items": [
                         {
+                            "exp_id": "EXP-PARENT-001",
                             "todo_id": "todo-parent-001",
                             "slice_id": "ablation",
                             "title": "Parent ablation",
                             "research_question": "RQ-parent",
                             "experimental_design": "Ablation-parent",
+                            "tier": "main_required",
+                            "paper_placement": "main_text",
+                            "paper_role": "main_text",
+                            "section_id": "parent-analysis",
+                            "item_id": "AN-PARENT-001",
+                            "claim_links": ["C-parent"],
                             "completion_condition": "Complete one comparable ablation.",
                         }
                     ],
@@ -952,6 +1198,10 @@ def test_artifact_mcp_server_analysis_campaign_infers_parent_main_run_from_runti
                             "goal": "Disable the main component and compare.",
                             "required_changes": "Disable the main component only.",
                             "metric_contract": "Keep the same evaluation protocol.",
+                            "section_id": "parent-analysis",
+                            "item_id": "AN-PARENT-001",
+                            "paper_role": "main_text",
+                            "claim_links": ["C-parent"],
                         }
                     ],
                 },
@@ -1485,6 +1735,8 @@ def test_bash_exec_watchdog_warns_after_many_calls_without_artifact_interact(tem
 
         assert result is not None
         assert result["interaction_watchdog"]["tool_calls_since_last_artifact_interact"] >= 25
+        assert result["interaction_watchdog"]["inspection_due"] is True
+        assert result["interaction_watchdog"]["user_update_due"] is False
         assert "progress_watchdog_note" in result
         assert "artifact.interact" in str(result["progress_watchdog_note"])
         assert "watchdog_notes" in result
@@ -1527,6 +1779,7 @@ def test_bash_exec_watchdog_warns_after_visibility_gap_without_mutating_log_fiel
         result = _unwrap_tool_result(await bash_server.call_tool("bash_exec", {"mode": "list"}))
 
         assert result["interaction_watchdog"]["tool_calls_since_last_artifact_interact"] == 1
+        assert result["interaction_watchdog"]["inspection_due"] is True
         assert "visibility_watchdog_note" in result
         assert "artifact.interact" in str(result["visibility_watchdog_note"])
         assert any(item["kind"] == "visibility" for item in result["watchdog_notes"])

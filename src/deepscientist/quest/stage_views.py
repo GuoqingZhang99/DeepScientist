@@ -62,6 +62,26 @@ def _field(label: str, value: object, *, tone: str = "default") -> dict[str, Any
     }
 
 
+def _selection_score_summary(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    parts: list[str] = []
+    for key, raw in value.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        if isinstance(raw, float):
+            rendered = f"{raw:.4f}".rstrip("0").rstrip(".")
+        else:
+            rendered = str(raw).strip()
+        if not rendered:
+            continue
+        parts.append(f"{name}={rendered}")
+        if len(parts) >= 4:
+            break
+    return " · ".join(parts) or None
+
+
 def _evaluation_summary(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -215,6 +235,8 @@ class QuestStageViewBuilder:
     def build(self) -> dict[str, Any]:
         selection_type = str(self.selection.get("selection_type") or "").strip()
         self.stage_key = self._resolve_effective_stage_key()
+        if selection_type == "idea_candidate":
+            return self._build_idea_candidate()
         if selection_type == "branch_node" and self.stage_key not in {"experiment", "analysis", "paper"}:
             return self._build_branch()
         if self.stage_key == "baseline":
@@ -280,6 +302,8 @@ class QuestStageViewBuilder:
             normalized = [str(item).strip() for item in raw if str(item).strip()]
             if normalized:
                 return normalized
+        if str(self.selection.get("selection_type") or "").strip() == "idea_candidate":
+            return self._idea_candidate_scope_paths()
         if str(self.selection.get("selection_type") or "").strip() == "branch_node":
             return self._branch_scope_paths()
         defaults = {
@@ -693,6 +717,13 @@ class QuestStageViewBuilder:
             "artifacts/reports",
         ]
 
+    def _idea_candidate_scope_paths(self) -> list[str]:
+        candidate_id = str(self.selection.get("selection_ref") or self.selection.get("idea_id") or "").strip()
+        return [
+            *( [f"memory/ideas/_candidates/{candidate_id}"] if candidate_id else []),
+            "artifacts/reports",
+        ]
+
     def _experiment_scope_paths(self, run_id: str | None) -> list[str]:
         return [
             *( [f"experiments/main/{run_id}"] if run_id else []),
@@ -917,6 +948,25 @@ class QuestStageViewBuilder:
                     items.append(item)
         return items
 
+    def _idea_candidate_stage_items(self) -> list[dict[str, Any]]:
+        candidate_id = str(self.selection.get("selection_ref") or self.selection.get("idea_id") or "").strip()
+        if not candidate_id:
+            return []
+        items: list[dict[str, Any]] = []
+        for item in self.artifacts:
+            payload = self._payload(item)
+            if str(payload.get("kind") or "").strip() != "idea":
+                continue
+            if str(payload.get("idea_id") or "").strip() != candidate_id:
+                continue
+            flow_type = str(payload.get("flow_type") or "").strip()
+            protocol_step = str(payload.get("protocol_step") or "").strip()
+            details = dict(payload.get("details") or {}) if isinstance(payload.get("details"), dict) else {}
+            submission_mode = str(details.get("submission_mode") or payload.get("submission_mode") or "").strip().lower()
+            if flow_type == "idea_submission" and (protocol_step == "candidate" or submission_mode == "candidate"):
+                items.append(item)
+        return items
+
     def _build_idea(self) -> dict[str, Any]:
         idea_items = self._idea_stage_items()
         latest = idea_items[-1] if idea_items else None
@@ -944,6 +994,8 @@ class QuestStageViewBuilder:
         draft_md_rel_path = self._relative_path_or_raw(draft_md_path)
         draft_markdown = self._markdown_body_for_path(draft_md_path)
         lineage_intent = str(payload.get("lineage_intent") or details.get("lineage_intent") or "").strip() or None
+        selection_scores = details.get("selection_scores")
+        selection_score_summary = _selection_score_summary(selection_scores)
         note = (
             str(payload.get("summary") or payload.get("reason") or "").strip()
             or "No durable idea submission has been recorded yet."
@@ -987,6 +1039,11 @@ class QuestStageViewBuilder:
                 _field("Problem", details.get("problem") or "Not recorded"),
                 _field("Hypothesis", details.get("hypothesis") or "Not recorded"),
                 _field("Mechanism", details.get("mechanism") or "Not recorded"),
+                _field("Method Brief", details.get("method_brief") or "Not recorded"),
+                _field("Selection Scores", selection_score_summary or "Not recorded"),
+                _field("Mechanism Family", details.get("mechanism_family") or "Not recorded"),
+                _field("Change Layer", details.get("change_layer") or "Not recorded"),
+                _field("Source Lens", details.get("source_lens") or "Not recorded"),
                 _field("Expected Gain", details.get("expected_gain") or "Not recorded"),
                 _field("Risks", details.get("risks") or "Not recorded"),
                 _field("Evidence Paths", details.get("evidence_paths") or "Not recorded"),
@@ -1009,6 +1066,11 @@ class QuestStageViewBuilder:
                     "problem": details.get("problem"),
                     "hypothesis": details.get("hypothesis"),
                     "mechanism": details.get("mechanism"),
+                    "method_brief": details.get("method_brief"),
+                    "selection_scores": selection_scores or None,
+                    "mechanism_family": details.get("mechanism_family"),
+                    "change_layer": details.get("change_layer"),
+                    "source_lens": details.get("source_lens"),
                     "expected_gain": details.get("expected_gain"),
                     "risks": details.get("risks") or [],
                     "evidence_paths": details.get("evidence_paths") or [],
@@ -1018,6 +1080,101 @@ class QuestStageViewBuilder:
                     "draft_path": draft_md_rel_path,
                     "draft_markdown": draft_markdown,
                     "literature_files": literature_files,
+                    "decision_reason": payload.get("reason"),
+                },
+                "latest_artifact": self._artifact_detail(latest, payload),
+            },
+            lineage_intent=lineage_intent,
+            idea_draft_path=draft_md_rel_path,
+            draft_available=bool(draft_markdown),
+            subviews=["overview", "details", "draft"] if draft_markdown else ["overview", "details"],
+        )
+
+    def _build_idea_candidate(self) -> dict[str, Any]:
+        candidate_items = self._idea_candidate_stage_items()
+        latest = candidate_items[-1] if candidate_items else None
+        payload = self._payload(latest or {})
+        details = dict(payload.get("details") or {}) if isinstance(payload.get("details"), dict) else {}
+        candidate_id = str(self.selection.get("selection_ref") or payload.get("idea_id") or "candidate").strip() or "candidate"
+        title_text = (
+            str(details.get("title") or self.selection.get("label") or candidate_id).strip() or candidate_id
+        )
+        paths = dict(payload.get("paths") or {}) if isinstance(payload.get("paths"), dict) else {}
+        candidate_root = paths.get("candidate_root") or str(self.quest_root / "memory" / "ideas" / "_candidates" / candidate_id)
+        idea_md_path = paths.get("idea_md") or str(Path(candidate_root) / "idea.md")
+        draft_md_path = paths.get("idea_draft_md") or details.get("idea_draft_path") or str(Path(candidate_root) / "draft.md")
+        idea_markdown = self._markdown_body_for_path(idea_md_path)
+        draft_markdown = self._markdown_body_for_path(draft_md_path)
+        idea_md_rel_path = self._relative_path_or_raw(idea_md_path)
+        draft_md_rel_path = self._relative_path_or_raw(draft_md_path)
+        candidate_root_rel_path = self._relative_path_or_raw(candidate_root)
+        selection_scores = details.get("selection_scores")
+        selection_score_summary = _selection_score_summary(selection_scores)
+        note = (
+            str(payload.get("summary") or payload.get("reason") or self.selection.get("summary") or "").strip()
+            or "No durable candidate brief summary has been recorded yet."
+        )
+        lineage_intent = str(payload.get("lineage_intent") or details.get("lineage_intent") or "").strip() or None
+        parent_branch = str(payload.get("parent_branch") or details.get("parent_branch") or self.selection.get("branch_name") or "").strip() or None
+        foundation_reason = str(payload.get("foundation_reason") or details.get("foundation_reason") or "").strip() or None
+        return self._base_payload(
+            title=f"Candidate Brief · {title_text}",
+            note=note,
+            status=str(payload.get("status") or "candidate").strip() or "candidate",
+            tags=[
+                "candidate-brief",
+                details.get("mechanism_family") or "",
+                details.get("change_layer") or "",
+                details.get("source_lens") or "",
+                lineage_intent or "",
+            ],
+            overview=[
+                _field("Candidate ID", candidate_id),
+                _field("Parent Branch", parent_branch or "Not recorded"),
+                _field("Next Target", details.get("next_target") or "optimize"),
+                _field("Candidate Root", candidate_root_rel_path or candidate_root),
+            ],
+            key_facts=[
+                _field("Problem", details.get("problem") or "Not recorded"),
+                _field("Hypothesis", details.get("hypothesis") or "Not recorded"),
+                _field("Mechanism", details.get("mechanism") or "Not recorded"),
+                _field("Method Brief", details.get("method_brief") or "Not recorded"),
+                _field("Selection Scores", selection_score_summary or "Not recorded"),
+                _field("Mechanism Family", details.get("mechanism_family") or "Not recorded"),
+                _field("Change Layer", details.get("change_layer") or "Not recorded"),
+                _field("Source Lens", details.get("source_lens") or "Not recorded"),
+                _field("Expected Gain", details.get("expected_gain") or "Not recorded"),
+                _field("Foundation Reason", foundation_reason or "Not recorded"),
+            ],
+            key_files=self._dedupe_files(
+                [
+                    self._file_entry(candidate_root, label="Candidate Root", description="Branchless candidate brief workspace.", expected_kind="directory"),
+                    self._file_entry(idea_md_path, label="Candidate Markdown", description="Durable candidate brief document."),
+                    self._file_entry(draft_md_path, label="Candidate Draft", description="Long-form candidate brief draft."),
+                ]
+            ),
+            history=self._artifact_history(candidate_items),
+            details={
+                "idea": {
+                    "idea_id": candidate_id,
+                    "title": title_text,
+                    "problem": details.get("problem"),
+                    "hypothesis": details.get("hypothesis"),
+                    "mechanism": details.get("mechanism"),
+                    "method_brief": details.get("method_brief"),
+                    "selection_scores": selection_scores or None,
+                    "mechanism_family": details.get("mechanism_family"),
+                    "change_layer": details.get("change_layer"),
+                    "source_lens": details.get("source_lens"),
+                    "expected_gain": details.get("expected_gain"),
+                    "next_target": details.get("next_target") or "optimize",
+                    "lineage_intent": lineage_intent,
+                    "parent_branch": parent_branch,
+                    "candidate_root": candidate_root_rel_path or candidate_root,
+                    "idea_path": idea_md_rel_path,
+                    "idea_markdown": idea_markdown,
+                    "draft_path": draft_md_rel_path,
+                    "draft_markdown": draft_markdown,
                     "decision_reason": payload.get("reason"),
                 },
                 "latest_artifact": self._artifact_detail(latest, payload),
@@ -1050,6 +1207,8 @@ class QuestStageViewBuilder:
         idea_title = str(latest_idea_details.get("title") or "").strip() or None
         idea_problem = str(latest_idea_details.get("problem") or "").strip() or None
         next_target = str(latest_idea_details.get("next_target") or "").strip() or None
+        selection_scores = latest_idea_details.get("selection_scores")
+        selection_score_summary = _selection_score_summary(selection_scores)
         lineage_intent = str(
             latest_idea_payload.get("lineage_intent")
             or latest_idea_details.get("lineage_intent")
@@ -1169,6 +1328,11 @@ class QuestStageViewBuilder:
             key_facts=[
                 _field("Idea Title", idea_title or "Not recorded"),
                 _field("Idea Problem", idea_problem or "Not recorded"),
+                _field("Method Brief", latest_idea_details.get("method_brief") or "Not recorded"),
+                _field("Selection Scores", selection_score_summary or "Not recorded"),
+                _field("Mechanism Family", latest_idea_details.get("mechanism_family") or "Not recorded"),
+                _field("Change Layer", latest_idea_details.get("change_layer") or "Not recorded"),
+                _field("Source Lens", latest_idea_details.get("source_lens") or "Not recorded"),
                 _field("Foundation", foundation_label or "Current head"),
                 _field("Foundation Reason", foundation_reason or "Not recorded"),
                 _field("Next Target", next_target or "Not recorded"),
@@ -1224,6 +1388,11 @@ class QuestStageViewBuilder:
                     "lineage_intent": lineage_intent,
                     "idea_title": idea_title,
                     "idea_problem": idea_problem,
+                    "method_brief": latest_idea_details.get("method_brief"),
+                    "selection_scores": selection_scores or None,
+                    "mechanism_family": latest_idea_details.get("mechanism_family"),
+                    "change_layer": latest_idea_details.get("change_layer"),
+                    "source_lens": latest_idea_details.get("source_lens"),
                     "next_target": next_target,
                     "idea_draft_path": idea_draft_rel_path,
                     "idea_draft_markdown": idea_draft_markdown,
@@ -1579,11 +1748,13 @@ class QuestStageViewBuilder:
                 for path in candidates
             ],
             self._file_entry(paper_root / "selected_outline.json", label="Selected Outline", description="Chosen paper outline."),
+            self._file_entry(paper_root / "outline" / "manifest.json", label="Outline Manifest", description="Author-facing paper outline manifest."),
             self._file_entry(paper_root / "outline_selection.md", label="Outline Selection Note", description="Outline selection rationale."),
             self._file_entry(paper_root / "draft.md", label="Draft Markdown", description="Current paper draft."),
             self._file_entry(paper_root / "writing_plan.md", label="Writing Plan", description="Paper writing plan."),
             self._file_entry(paper_root / "references.bib", label="References", description="Bibliography file."),
             self._file_entry(paper_root / "claim_evidence_map.json", label="Claim-Evidence Map", description="Claim to evidence mapping."),
+            self._file_entry(paper_root / "paper_line_state.json", label="Paper Line State", description="Derived summary state for the active paper line."),
             self._file_entry(paper_root / "baseline_inventory.json", label="Baseline Inventory", description="Canonical and supplementary baseline inventory for writing."),
             self._file_entry(paper_root / "build" / "compile_report.json", label="Compile Report", description="Paper build/compile report."),
             self._file_entry(paper_root / "paper_bundle_manifest.json", label="Bundle Manifest", description="Final paper bundle manifest."),

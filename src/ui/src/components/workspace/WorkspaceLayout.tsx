@@ -1799,12 +1799,9 @@ function LeftPanel({
 
   React.useEffect(() => {
     const effectiveSelection =
-      liveScopedExplorerSelection ||
-      ((activeExplorer === 'scope' || explorerModePreference === 'auto') &&
-      explorerModePreference !== 'files' &&
-      explorerModePreference !== 'arxiv'
-        ? stickyScopedSelection
-        : null)
+      activeExplorer === 'scope'
+        ? liveScopedExplorerSelection || stickyScopedSelection
+        : null
 
     if (!localQuestMode || !effectiveSelection) {
       setScopedExplorerLabel(null)
@@ -1913,15 +1910,6 @@ function LeftPanel({
         setDiffFiles(nextDiffFiles)
         setDiffCompareBase(compareBase)
         setDiffCompareHead(compareHead)
-        if (nextScopeNodes.length || nextDiffFiles.length) {
-          setActiveExplorer((current) => {
-            if (current === 'scope') return current
-            if (explorerModePreference === 'files' || explorerModePreference === 'arxiv') {
-              return current
-            }
-            return liveScopedExplorerSelection ? 'scope' : current
-          })
-        }
       } catch (error) {
         console.error('[WorkspaceLayout] Failed to build scoped explorer:', error)
       } finally {
@@ -1936,7 +1924,6 @@ function LeftPanel({
     }
   }, [
     activeExplorer,
-    explorerModePreference,
     liveScopedExplorerSelection,
     localQuestMode,
     projectId,

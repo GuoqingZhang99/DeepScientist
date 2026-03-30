@@ -20,6 +20,7 @@
 - 在 QQ 中使用 `/new`、`/use latest`、`/status` 等命令
 - 在 `Settings` 页面看到自动检测到的 `openid`
 - 从 `Settings` 页面执行非破坏性的连接测试
+- 当 QQ 绑定到 quest 时，在每次主实验完成后自动收到按指标生成的时间线图片
 
 ### 部署前检查清单
 
@@ -220,6 +221,24 @@ QQ readiness is healthy, but no OpenID has been learned yet. Save credentials, t
 - `Snapshot` 里出现已经发现的目标会话，且绑定目标不是空
 - 再次点击“发送测试消息”时，不再提示 target 为空
 - 如果当前已经有最新项目，普通文本会自动进入该项目；如果还没有项目，则优先返回帮助信息
+
+## 5.3 主实验指标图自动推送
+
+当 QQ 是当前 quest 的绑定连接器时，DeepScientist 现在会在每次主实验完成后自动发送指标时间线图片。
+
+当前行为：
+
+- 每个指标生成一张图
+- 如果 baseline 存在该指标，会画一条横向虚线作为 baseline 参考线
+- 系统会自动判断该指标是“越高越好”还是“越低越好”
+- 超过 baseline 的点会额外标星
+- 最新点使用莫兰迪深红色填充
+- 较早的点使用莫兰迪深蓝色填充
+- 如果指标有多个，DeepScientist 会按顺序发送，并在相邻两张图之间间隔约 2 秒
+
+这些图来自 quest 本地生成的文件，并会作为 QQ 原生图片自动发送。
+
+如果你想关闭这项自动推送，可以在 QQ 连接器配置中关闭 `auto_send_main_experiment_png`。
 
 ### 5.2 报错提示速查
 

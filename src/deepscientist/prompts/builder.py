@@ -16,6 +16,7 @@ STANDARD_SKILLS = (
     "scout",
     "baseline",
     "idea",
+    "optimize",
     "experiment",
     "analysis-campaign",
     "write",
@@ -43,6 +44,10 @@ STAGE_MEMORY_PLAN = {
         "quest": ("papers", "ideas", "decisions", "knowledge"),
         "global": ("papers", "knowledge", "templates"),
     },
+    "optimize": {
+        "quest": ("episodes", "decisions", "ideas", "knowledge"),
+        "global": ("knowledge", "templates"),
+    },
     "experiment": {
         "quest": ("ideas", "decisions", "episodes", "knowledge"),
         "global": ("knowledge", "templates"),
@@ -66,6 +71,20 @@ STAGE_MEMORY_PLAN = {
 }
 
 
+def classify_turn_intent(user_message: str) -> str:
+    text = str(user_message or "").strip()
+    if not text:
+        return "continue_stage"
+    normalized = " ".join(text.split()).lower()
+    question_markers = ["?", "？", "现在进展", "全局", "多久", "什么情况", "在哪", "在哪里", "how long", "what", "where"]
+    if any(marker in normalized for marker in question_markers):
+        return "answer_user_question_first"
+    command_markers = ["继续", "发给我", "发送", "运行", "启动", "resume", "send", "run", "launch"]
+    if any(marker in normalized for marker in command_markers):
+        return "execute_user_command_first"
+    return "continue_stage"
+
+
 class PromptBuilder:
     def __init__(self, repo_root: Path, home: Path) -> None:
         self.repo_root = repo_root
@@ -83,6 +102,8 @@ class PromptBuilder:
         user_message: str,
         model: str,
         turn_reason: str = "user_message",
+        turn_intent: str | None = None,
+        turn_mode: str | None = None,
         retry_context: dict | None = None,
     ) -> str:
         snapshot = self.quest_service.snapshot(quest_id)
@@ -151,7 +172,12 @@ class PromptBuilder:
             [
                 "",
                 "## Turn Driver",
-                self._turn_driver_block(turn_reason=turn_reason, user_message=user_message),
+                self._turn_driver_block(
+                    turn_reason=turn_reason,
+                    user_message=user_message,
+                    turn_intent=turn_intent,
+                    turn_mode=turn_mode,
+                ),
                 "",
                 "## Continuation Guard",
                 self._continuation_guard_block(
@@ -173,11 +199,17 @@ class PromptBuilder:
                 "## Research Delivery Policy",
                 self._research_delivery_policy_block(snapshot),
                 "",
+                "## Optimization Frontier Snapshot",
+                self._optimization_frontier_block(snapshot, quest_root),
+                "",
                 "## Paper And Evidence Snapshot",
                 self._paper_and_evidence_block(snapshot, quest_root),
                 "",
                 "## Retry Recovery Packet",
                 self._retry_recovery_block(retry_context),
+                "",
+                "## Recovery Resume Packet",
+                self._recovery_resume_block(snapshot=snapshot, turn_reason=turn_reason),
                 "",
                 "## Interaction Style",
                 self._interaction_style_block(default_locale=default_locale, user_message=user_message, snapshot=snapshot),
@@ -206,7 +238,14 @@ class PromptBuilder:
         )
         return "\n\n".join(sections).strip() + "\n"
 
-    def _turn_driver_block(self, *, turn_reason: str, user_message: str) -> str:
+    def _turn_driver_block(
+        self,
+        *,
+        turn_reason: str,
+        user_message: str,
+        turn_intent: str | None = None,
+        turn_mode: str | None = None,
+    ) -> str:
         normalized_reason = str(turn_reason or "user_message").strip() or "user_message"
         lines = [f"- turn_reason: {normalized_reason}"]
         if normalized_reason == "auto_continue":
@@ -228,8 +267,27 @@ class PromptBuilder:
             preview = " ".join(str(user_message or "").split())
             if len(preview) > 220:
                 preview = preview[:217].rstrip() + "..."
+            resolved_turn_intent = str(turn_intent or self._turn_intent(user_message)).strip() or "continue_stage"
+            resolved_turn_mode = str(turn_mode or "stage_execution").strip() or "stage_execution"
+            lines.append(f"- turn_intent: {resolved_turn_intent}")
+            lines.append(f"- turn_mode: {resolved_turn_mode}")
+            if resolved_turn_intent == "answer_user_question_first":
+                lines.append(
+                    "- answer_first_rule: the user primarily asked a direct question. Answer it in plain language before resuming any background stage work or generating new route artifacts."
+                )
+                lines.append(
+                    "- direct_answer_tool_rule: if the question is about overall progress, paper readiness, current best result, or next step, call artifact.get_global_status(detail='brief'|'full', locale='zh'|'en') before answering from memory or local stage context."
+                )
+            elif resolved_turn_intent == "execute_user_command_first":
+                lines.append(
+                    "- command_first_rule: the user primarily gave a concrete instruction. Execute or acknowledge that instruction first before resuming background stage narration."
+                )
             lines.append(f"- direct_user_message_preview: {preview or 'none'}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _turn_intent(user_message: str) -> str:
+        return classify_turn_intent(user_message)
 
     def _active_communication_surface_block(
         self,
@@ -245,8 +303,6 @@ class PromptBuilder:
         connector = surface_context["active_connector"]
         chat_type = surface_context["active_chat_type"]
         chat_id = surface_context["active_chat_id"]
-        qq_config = connectors_config.get("qq") if isinstance(connectors_config.get("qq"), dict) else {}
-
         lines = [
             f"- latest_user_source: {source}",
             f"- active_surface: {surface}",
@@ -264,38 +320,16 @@ class PromptBuilder:
             lines.extend(
                 [
                     "- qq_surface_rule: QQ is a milestone-report surface, not a full artifact browser.",
-                    "- qq_default_mode: keep outbound replies concise, respectful, text-first, and progress-aware.",
-                    "- qq_detail_rule: do not proactively dump file inventories, path lists, or low-level file details unless the user explicitly asked for them.",
-                    "- qq_length_rule: for ordinary QQ progress replies, normally use only 2 to 4 short sentences, or 3 very short bullets at most.",
-                    "- qq_summary_first_rule: start with the user-facing conclusion, then the immediate meaning, then the next action; do not make the user reverse-engineer the status from telemetry.",
-                    "- qq_internal_signal_rule: omit worker names, heartbeat timestamps, retry counters, pending/running/completed counts, file names, and monitor-window narration unless that detail is necessary for a user decision or to explain a real risk.",
-                    "- qq_translation_rule: translate internal actions into user value, for example say that you organized the baseline record for easier comparison later instead of listing the files you touched.",
-                    "- qq_eta_rule: for baseline reproduction, main experiments, analysis experiments, and other important long-running research phases, include a rough ETA for the next meaningful result, next step, or next update; if the runtime is uncertain, say that directly and still give the next check-in window.",
-                    f"- qq_auto_send_main_experiment_png: {bool(qq_config.get('auto_send_main_experiment_png', True))}",
-                    f"- qq_auto_send_analysis_summary_png: {bool(qq_config.get('auto_send_analysis_summary_png', True))}",
-                    f"- qq_auto_send_slice_png: {bool(qq_config.get('auto_send_slice_png', False))}",
-                    f"- qq_auto_send_paper_pdf: {bool(qq_config.get('auto_send_paper_pdf', True))}",
-                    f"- qq_enable_markdown_send: {bool(qq_config.get('enable_markdown_send', False))}",
-                    f"- qq_enable_file_upload_experimental: {bool(qq_config.get('enable_file_upload_experimental', False))}",
-                    "- qq_visual_rule: follow the fixed Morandi palette guide defined in the system prompt and active stage skill; do not assume per-install palette config exists.",
-                    "- qq_media_rule: auto-send only high-value milestone media such as a main-experiment summary PNG, an aggregated analysis summary PNG, or the final paper PDF when available and configured.",
-                    "- qq_media_rule_2: do not auto-send every slice image, every debug plot, or draft paper figures unless the user explicitly asked for them.",
-                    "- qq_structured_delivery_rule: when you want native QQ markdown or native QQ image/file delivery, request it through artifact.interact(connector_hints=..., attachments=[...]) instead of inventing connector-specific inline tag syntax.",
+                    "- qq_reply_rule: keep outbound replies concise, respectful, text-first, and progress-aware.",
+                    "- qq_detail_rule: rely on the QQ connector contract for detailed surface formatting instead of expanding it here.",
                 ]
             )
         elif connector == "weixin":
             lines.extend(
                 [
                     "- weixin_surface_rule: Weixin is a concise operator surface, not a full artifact browser.",
-                    "- weixin_default_mode: keep outbound replies concise, respectful, text-first, and progress-aware.",
-                    "- weixin_length_rule: for ordinary Weixin progress replies, normally use only 2 to 4 short sentences, or 3 very short bullets at most.",
-                    "- weixin_summary_first_rule: start with the user-facing conclusion, then the immediate meaning, then the next action.",
-                    "- weixin_progress_shape_rule: make the current task, the main difficulty or latest real progress, and the next concrete next step explicit whenever possible.",
-                    "- weixin_eta_rule: for important long-running phases, include a rough ETA or next check-in window when it is helpful and defensible.",
-                    "- weixin_internal_detail_rule: do not proactively dump file inventories, path lists, retry counters, or monitor-log style telemetry unless the user asked for them or they explain a real risk.",
-                    "- weixin_context_token_rule: reply continuity is managed by the runtime through `context_token`; do not invent your own reply token scheme.",
-                    "- weixin_media_rule: when you want native Weixin image, video, or file delivery, request it through artifact.interact(..., attachments=[...]) with `connector_delivery={'weixin': {'media_kind': ...}}` instead of inventing connector-specific inline tag syntax.",
-                    "- weixin_inbound_media_rule: inbound Weixin image, video, and file messages can arrive as quest-local attachments under `userfiles/weixin/...`; read those files when the user sent media.",
+                    "- weixin_reply_rule: keep outbound replies concise, respectful, text-first, and progress-aware.",
+                    "- weixin_detail_rule: rely on the Weixin connector contract for detailed transport formatting instead of expanding it here.",
                 ]
             )
         else:
@@ -472,7 +506,20 @@ class PromptBuilder:
         pending_user_count = int(snapshot.get("pending_user_message_count") or 0)
         if pending_user_count > 0:
             return f"Poll artifact.interact(...) and handle the {pending_user_count} queued user message(s) first."
+        continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip().lower() or "auto"
+        continuation_anchor = str(snapshot.get("continuation_anchor") or "").strip()
+        if continuation_policy == "wait_for_user_or_resume":
+            if continuation_anchor:
+                return (
+                    f"The quest is intentionally parked after the latest durable checkpoint. Wait for a new user message or "
+                    f"`/resume`, then continue from `{continuation_anchor}` instead of auto-continuing the previous stage."
+                )
+            return "The quest is intentionally parked after the latest durable checkpoint. Wait for a new user message or `/resume`."
+        if continuation_policy == "none":
+            return "Do not auto-continue this quest. Wait for an explicit new user instruction before doing more work."
         active_anchor = str(snapshot.get("active_anchor") or "decision").strip() or "decision"
+        if continuation_anchor:
+            active_anchor = continuation_anchor
         active_idea_id = str(snapshot.get("active_idea_id") or "").strip()
         next_slice_id = str(snapshot.get("next_pending_slice_id") or "").strip()
         active_campaign_id = str(snapshot.get("active_analysis_campaign_id") or "").strip()
@@ -489,6 +536,8 @@ class PromptBuilder:
                 "Continue idea analysis and route selection until the next durable idea branch is submitted "
                 "with `lineage_intent='continue_line'` or `lineage_intent='branch_alternative'`."
             )
+        if active_anchor == "optimize":
+            return "Continue the optimization loop from the current frontier, candidate pool, durable runs, and branch state."
         if active_anchor == "experiment":
             return "Continue the main experiment workflow from the current workspace, logs, and recorded evidence."
         if active_anchor == "analysis-campaign":
@@ -632,6 +681,24 @@ class PromptBuilder:
                 if isinstance(item, str) and item.strip():
                     lines.append(f"- {item.strip()}")
 
+        return "\n".join(lines)
+
+    @staticmethod
+    def _recovery_resume_block(*, snapshot: dict, turn_reason: str) -> str:
+        if str(turn_reason or "").strip() != "auto_continue":
+            return "- none"
+        source = str(snapshot.get("last_resume_source") or "").strip()
+        if not source.startswith("auto:daemon-recovery"):
+            return "- none"
+        lines = [
+            f"- resume_source: {source}",
+            f"- resumed_at: {snapshot.get('last_resume_at') or 'unknown'}",
+            f"- abandoned_run_id: {snapshot.get('last_recovery_abandoned_run_id') or 'none'}",
+            f"- recovery_summary: {snapshot.get('last_recovery_summary') or 'none'}",
+            "- recovery_rule: this turn exists because the daemon/runtime previously died or stale running state was reconciled; first re-establish the current truth before continuing any old stage loop.",
+            "- recovery_rule_2: if there is any new user message, handle that before blindly resuming the older subtask.",
+            "- recovery_rule_3: do not assume the previous branch-local route is still the right immediate action until branch/workspace, run state, and user intent are checked together.",
+        ]
         return "\n".join(lines)
 
     def _prompt_fragment(self, relative_path: str | Path, *, quest_root: Path | None = None) -> str:
@@ -847,12 +914,78 @@ class PromptBuilder:
             lines.extend(
                 [
                     "- delivery_goal: the quest should pursue the strongest justified algorithmic result rather than paper packaging.",
+                    "- optimization_object_rule: distinguish candidate briefs, durable optimization lines, and implementation-level optimization candidates; do not treat them as one object type.",
+                    "- optimization_frontier_rule: before major route selection in algorithm-first work, read `artifact.get_optimization_frontier(...)` and treat the current frontier as the primary optimize-state summary.",
+                    "- optimization_promotion_rule: `submission_mode='candidate'` is branchless pre-promotion state, while `submission_mode='line'` is a committed durable line with a branch/worktree.",
                     "- main_result_rule: use each measured main-experiment result to decide whether to create a `continue_line` child branch, create a `branch_alternative` sibling-like branch, run more analysis, or stop.",
                     "- no_paper_rule: do not default into `artifact.submit_paper_outline(...)`, `artifact.submit_paper_bundle(...)`, or `finalize` while this mode remains active.",
                     "- autonomy_rule: choose the next optimization foundation from durable evidence such as baseline state, the current research head, and recent main-experiment results; do not routinely ask the user to choose that.",
                     "- persistence_rule: even without paper writing, keep all major decisions, runs, evidence, failures, and conclusions durable so the next round can build on them cleanly.",
                 ]
             )
+        return "\n".join(lines)
+
+    def _optimization_frontier_block(self, snapshot: dict, quest_root: Path) -> str:
+        active_anchor = str(snapshot.get("active_anchor") or "").strip().lower()
+        if self._need_research_paper(snapshot) and active_anchor != "optimize":
+            return "- not primary in the current delivery mode"
+
+        try:
+            from ..artifact import ArtifactService
+
+            payload = ArtifactService(self.home).get_optimization_frontier(quest_root)
+        except Exception:
+            payload = {"ok": False}
+
+        frontier = (
+            dict(payload.get("optimization_frontier") or {})
+            if isinstance(payload, dict) and isinstance(payload.get("optimization_frontier"), dict)
+            else {}
+        )
+        if not frontier:
+            return "- unavailable"
+
+        best_branch = dict(frontier.get("best_branch") or {}) if isinstance(frontier.get("best_branch"), dict) else {}
+        best_run = dict(frontier.get("best_run") or {}) if isinstance(frontier.get("best_run"), dict) else {}
+        backlog = dict(frontier.get("candidate_backlog") or {}) if isinstance(frontier.get("candidate_backlog"), dict) else {}
+        next_actions = [str(item).strip() for item in (frontier.get("recommended_next_actions") or []) if str(item).strip()]
+        stagnant = frontier.get("stagnant_branches") or []
+        fusion = frontier.get("fusion_candidates") or []
+        local_attempts = [
+            dict(item)
+            for item in (frontier.get("best_branch_recent_candidates") or [])
+            if isinstance(item, dict)
+        ]
+
+        lines = [
+            f"- frontier_mode: {str(frontier.get('mode') or 'unknown')}",
+            f"- frontier_reason: {str(frontier.get('frontier_reason') or 'none')}",
+            f"- frontier_best_branch: {str(best_branch.get('branch_name') or best_branch.get('branch_no') or 'none')}",
+            f"- frontier_best_run: {str(best_run.get('run_id') or 'none')}",
+            f"- frontier_candidate_briefs: {int(backlog.get('candidate_brief_count') or 0)}",
+            f"- frontier_active_implementation_candidates: {int(backlog.get('active_implementation_candidate_count') or 0)}",
+            f"- frontier_failed_implementation_candidates: {int(backlog.get('failed_implementation_candidate_count') or 0)}",
+            f"- frontier_stagnant_branch_count: {len([item for item in stagnant if isinstance(item, dict)])}",
+            f"- frontier_fusion_candidate_count: {len([item for item in fusion if isinstance(item, dict)])}",
+            "- optimization_frontier_rule: in algorithm-first work, treat this block as the primary route-selection surface before relying on paper-facing state.",
+        ]
+        if local_attempts:
+            parts: list[str] = []
+            for item in local_attempts[-3:]:
+                summary_bits = [
+                    str(item.get("candidate_id") or "").strip() or "candidate",
+                    str(item.get("status") or "").strip() or "unknown",
+                    str(item.get("strategy") or "").strip() or None,
+                    str(item.get("mechanism_family") or "").strip() or None,
+                    str(item.get("failure_kind") or "").strip() or None,
+                ]
+                parts.append(" / ".join(bit for bit in summary_bits if bit))
+            lines.append(f"- frontier_same_line_local_attempt_memory: {' | '.join(parts)}")
+            lines.append(
+                "- optimization_local_memory_rule: before seed, loop, or debug work on the leading line, inspect this same-line local attempt memory so you do not repeat a near-duplicate change blindly."
+            )
+        if next_actions:
+            lines.append(f"- frontier_next_actions: {' | '.join(next_actions[:3])}")
         return "\n".join(lines)
 
     def _interaction_style_block(self, *, default_locale: str, user_message: str, snapshot: dict) -> str:
@@ -890,7 +1023,7 @@ class PromptBuilder:
             "- respect_protocol: write user-facing updates as natural, respectful, easy-to-follow chat; do not sound like a formal status report or internal tool log",
             "- omission_protocol: for ordinary user-facing updates, omit file paths, artifact ids, branch/worktree ids, session ids, raw commands, raw logs, and internal tool names unless the user asked for them or needs them to act",
             "- compaction_protocol: ordinary artifact.interact progress updates should usually fit in 2 to 4 short sentences and should not read like a monitoring transcript or execution diary",
-            "- watchdog_payload_protocol: if a tool result includes `watchdog_notes`, `progress_watchdog_note`, `visibility_watchdog_note`, or `state_change_watchdog_note`, treat that as an action item and send the required artifact.interact(...) update before doing more background work",
+            "- watchdog_payload_protocol: if a tool result includes `watchdog_notes`, `progress_watchdog_note`, `visibility_watchdog_note`, or `state_change_watchdog_note`, treat that as an action item to inspect state and decide whether a fresh user-visible update is actually needed; do not emit duplicate progress by reflex",
             "- human_progress_shape_protocol: ordinary progress updates should usually make three things explicit in human language: the current task, the main difficulty or latest real progress, and the concrete next measure you will take",
             "- stage_contract_protocol: stage-specific plan/checklist rules, milestone rules, literature rules, and writing rules belong in the requested skill; do not expect this runtime block to restate them",
             "- teammate_voice_protocol: write like a calm capable teammate using natural first-person phrasing when helpful, for example 'I'm working on ...', 'The main issue right now is ...', 'Next I'll ...'; do not sound like a dashboard or incident log",
@@ -942,141 +1075,40 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _quest_context_block(self, quest_root: Path) -> str:
-        parts = []
-        for title, filename in (
-            ("Brief", "brief.md"),
-            ("Plan", "plan.md"),
-            ("Status", "status.md"),
-            ("Summary", "SUMMARY.md"),
-        ):
-            text = read_text(quest_root / filename).strip() or "(empty)"
-            parts.extend([f"{title} ({filename}):", text, ""])
-        return "\n".join(parts).strip()
+        return "\n".join(
+            [
+                "- quest_context_rule: quest documents are durable but not pre-expanded here.",
+                "- quest_documents_tool: call artifact.read_quest_documents(names=['brief','plan','status','summary'], mode='excerpt'|'full') when document detail is needed.",
+                "- active_user_requirements_tool: call artifact.read_quest_documents(names=['active_user_requirements'], mode='full') when exact current durable user requirements matter.",
+            ]
+        )
 
     def _durable_state_block(self, snapshot: dict, quest_root: Path) -> str:
-        requested_baseline_ref = (
-            dict(snapshot.get("requested_baseline_ref") or {})
-            if isinstance(snapshot.get("requested_baseline_ref"), dict)
-            else None
-        )
-        startup_contract = (
-            dict(snapshot.get("startup_contract") or {})
-            if isinstance(snapshot.get("startup_contract"), dict)
-            else None
-        )
         confirmed_baseline_ref = (
             dict(snapshot.get("confirmed_baseline_ref") or {})
             if isinstance(snapshot.get("confirmed_baseline_ref"), dict)
-            else None
+            else {}
         )
-        requested_baseline_id = str((requested_baseline_ref or {}).get("baseline_id") or "").strip()
-        confirmed_baseline_id = str((confirmed_baseline_ref or {}).get("baseline_id") or "").strip()
-        confirmed_baseline_rel_path = str(
-            (confirmed_baseline_ref or {}).get("baseline_root_rel_path") or ""
-        ).strip()
         confirmed_metric_contract_json_rel_path = str(
-            (confirmed_baseline_ref or {}).get("metric_contract_json_rel_path") or ""
+            confirmed_baseline_ref.get("metric_contract_json_rel_path") or ""
         ).strip()
-        prebound_baseline_ready = bool(
-            requested_baseline_id
-            and confirmed_baseline_id
-            and requested_baseline_id == confirmed_baseline_id
-            and str(snapshot.get("baseline_gate") or "").strip().lower() == "confirmed"
-        )
         lines = [
             f"- baseline_gate: {snapshot.get('baseline_gate') or 'pending'}",
             f"- active_baseline_id: {snapshot.get('active_baseline_id') or 'none'}",
-            f"- active_baseline_variant_id: {snapshot.get('active_baseline_variant_id') or 'none'}",
-            f"- requested_baseline_ref: {json.dumps(requested_baseline_ref, ensure_ascii=False, sort_keys=True) if requested_baseline_ref else 'none'}",
-            f"- startup_contract: {json.dumps(startup_contract, ensure_ascii=False, sort_keys=True) if startup_contract else 'none'}",
-            f"- startup_decision_policy: {self._decision_policy(snapshot)}",
-            f"- confirmed_baseline_ref: {json.dumps(confirmed_baseline_ref, ensure_ascii=False, sort_keys=True) if confirmed_baseline_ref else 'none'}",
-            f"- confirmed_baseline_import_root: {confirmed_baseline_rel_path or 'none'}",
-            f"- prebound_baseline_ready: {prebound_baseline_ready}",
             f"- active_run_id: {snapshot.get('active_run_id') or 'none'}",
-            f"- research_head_branch: {snapshot.get('research_head_branch') or 'none'}",
-            f"- research_head_worktree_root: {snapshot.get('research_head_worktree_root') or 'none'}",
+            f"- active_idea_id: {snapshot.get('active_idea_id') or 'none'}",
+            f"- active_analysis_campaign_id: {snapshot.get('active_analysis_campaign_id') or 'none'}",
+            f"- active_paper_line_ref: {snapshot.get('active_paper_line_ref') or 'none'}",
             f"- current_workspace_branch: {snapshot.get('current_workspace_branch') or 'none'}",
             f"- current_workspace_root: {snapshot.get('current_workspace_root') or 'none'}",
-            f"- active_idea_id: {snapshot.get('active_idea_id') or 'none'}",
-            f"- active_idea_md_path: {snapshot.get('active_idea_md_path') or 'none'}",
-            f"- active_analysis_campaign_id: {snapshot.get('active_analysis_campaign_id') or 'none'}",
-            f"- next_pending_slice_id: {snapshot.get('next_pending_slice_id') or 'none'}",
             f"- workspace_mode: {snapshot.get('workspace_mode') or 'quest'}",
             f"- runtime_status: {snapshot.get('runtime_status') or snapshot.get('status') or 'unknown'}",
-            f"- stop_reason: {snapshot.get('stop_reason') or 'none'}",
-            f"- pending_decisions: {', '.join(snapshot.get('pending_decisions') or []) or 'none'}",
-            f"- pending_user_message_count: {snapshot.get('pending_user_message_count') or 0}",
-            f"- active_interaction_count: {len(snapshot.get('active_interactions') or [])}",
             f"- waiting_interaction_id: {snapshot.get('waiting_interaction_id') or 'none'}",
-            f"- latest_thread_interaction_id: {snapshot.get('latest_thread_interaction_id') or 'none'}",
-            f"- default_reply_interaction_id: {snapshot.get('default_reply_interaction_id') or 'none'}",
-            f"- last_artifact_interact_at: {snapshot.get('last_artifact_interact_at') or 'none'}",
-            f"- seconds_since_last_artifact_interact: {snapshot.get('seconds_since_last_artifact_interact') if snapshot.get('seconds_since_last_artifact_interact') is not None else 'none'}",
-            f"- tool_calls_since_last_artifact_interact: {snapshot.get('tool_calls_since_last_artifact_interact') or 0}",
-            f"- last_tool_activity_at: {snapshot.get('last_tool_activity_at') or 'none'}",
-            f"- last_tool_activity_name: {snapshot.get('last_tool_activity_name') or 'none'}",
-            f"- last_delivered_batch_id: {snapshot.get('last_delivered_batch_id') or 'none'}",
-            f"- bound_conversations: {', '.join(snapshot.get('bound_conversations') or []) or 'none'}",
-            f"- cloud_linked: {snapshot.get('cloud', {}).get('linked', False)}",
+            f"- pending_user_message_count: {snapshot.get('pending_user_message_count') or 0}",
+            f"- continuation_policy: {snapshot.get('continuation_policy') or 'auto'}",
+            f"- continuation_anchor: {snapshot.get('continuation_anchor') or 'none'}",
+            "- quest_state_tool: call artifact.get_quest_state(detail='summary'|'full') for current runtime refs, interactions, recent artifacts, and recent runs.",
         ]
-        if prebound_baseline_ready and confirmed_baseline_rel_path:
-            lines.extend(
-                [
-                    "- prebound_baseline_execution_policy: runtime already attached and confirmed the requested baseline before this turn.",
-                    f"- prebound_baseline_runtime_path: {confirmed_baseline_rel_path}",
-                    "- prebound_baseline_agent_rule: do not redo baseline discovery or reproduction unless you find a concrete incompatibility, corruption, or missing evidence problem.",
-                ]
-            )
-        active_workspace_root = Path(str(snapshot.get("current_workspace_root") or quest_root))
-        attachment_root = active_workspace_root / "baselines" / "imported"
-        if attachment_root.exists():
-            attachments = [read_yaml(path, {}) for path in sorted(attachment_root.glob("*/attachment.yaml"))]
-            attachments = [
-                item
-                for item in attachments
-                if isinstance(item, dict)
-                and item
-                and (
-                    not str(item.get("source_baseline_id") or "").strip()
-                    or not self.baseline_registry.is_deleted(str(item.get("source_baseline_id") or "").strip())
-                )
-            ]
-            if attachments:
-                attachment = max(
-                    attachments,
-                    key=lambda item: (
-                        str(item.get("attached_at") or ""),
-                        str(item.get("source_baseline_id") or ""),
-                    ),
-                )
-                entry = attachment.get("entry") if isinstance(attachment.get("entry"), dict) else {}
-                confirmation = attachment.get("confirmation") if isinstance(attachment.get("confirmation"), dict) else {}
-                if not confirmed_metric_contract_json_rel_path:
-                    confirmed_metric_contract_json_rel_path = str(
-                        confirmation.get("metric_contract_json_rel_path") or ""
-                    ).strip()
-                contract = entry.get("metric_contract") if isinstance(entry.get("metric_contract"), dict) else {}
-                primary_metric_id = str(contract.get("primary_metric_id") or "").strip() or "none"
-                metric_ids = [
-                    str(item.get("metric_id") or "").strip()
-                    for item in contract.get("metrics", [])
-                    if isinstance(item, dict) and str(item.get("metric_id") or "").strip()
-                ]
-                lines.extend(
-                    [
-                        f"- active_baseline_primary_metric_id: {primary_metric_id}",
-                        f"- active_baseline_metric_ids: {', '.join(metric_ids) or 'none'}",
-                    ]
-                )
-        if (
-            not confirmed_metric_contract_json_rel_path
-            and confirmed_baseline_rel_path
-            and (quest_root / confirmed_baseline_rel_path / "json" / "metric_contract.json").exists()
-        ):
-            confirmed_metric_contract_json_rel_path = str(
-                Path(confirmed_baseline_rel_path, "json", "metric_contract.json").as_posix()
-            )
         if confirmed_metric_contract_json_rel_path:
             lines.extend(
                 [
@@ -1084,256 +1116,42 @@ class PromptBuilder:
                     "- active_baseline_metric_contract_rule: before planning or running `experiment` or `analysis-campaign`, read this JSON file and treat it as the canonical baseline comparison contract unless a newer confirmed baseline explicitly replaces it.",
                 ]
             )
-        analysis_baseline_inventory = read_json(quest_root / "artifacts" / "baselines" / "analysis_inventory.json", {})
-        analysis_baseline_inventory = analysis_baseline_inventory if isinstance(analysis_baseline_inventory, dict) else {}
-        analysis_inventory_entries = (
-            analysis_baseline_inventory.get("entries") if isinstance(analysis_baseline_inventory.get("entries"), list) else []
-        )
-        registered_count = sum(
-            1
-            for item in analysis_inventory_entries
-            if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "registered"
-        )
-        if analysis_inventory_entries:
-            lines.extend(
-                [
-                    f"- supplementary_baseline_inventory_status: artifacts/baselines/analysis_inventory.json [exists]",
-                    f"- supplementary_baseline_count: {len(analysis_inventory_entries)}",
-                    f"- supplementary_baseline_registered_count: {registered_count}",
-                ]
-            )
-        else:
-            lines.append("- supplementary_baseline_inventory_status: artifacts/baselines/analysis_inventory.json [missing]")
-        lines.extend(["", "Active interactions:"])
-        active_interactions = snapshot.get("active_interactions") or []
-        if active_interactions:
-            for item in active_interactions[-3:]:
-                interaction_id = item.get("interaction_id") or item.get("artifact_id") or "interaction"
-                status = item.get("status") or "unknown"
-                message = str(item.get("message") or "").strip().replace("\n", " ")
-                if len(message) > 180:
-                    message = message[:177].rstrip() + "..."
-                lines.append(f"- {interaction_id} [{status}] {message or '(no message)'}")
-        else:
-            lines.append("- none")
-        if int(snapshot.get("pending_user_message_count") or 0) > 0:
-            lines.extend(
-                [
-                    "",
-                    "Queued user-message notice:",
-                    "- There are queued user messages waiting to be picked up via artifact.interact(include_recent_inbound_messages=True).",
-                    "- Before continuing a resumed or follow-up turn, retrieve that mailbox payload first.",
-                    "- After the mailbox returns user text, immediately send a follow-up artifact.interact acknowledgement or direct answer before resuming background work.",
-                ]
-            )
-
-        lines.extend(
-            [
-                "",
-                "Recent artifacts:",
-            ]
-        )
-        recent_artifacts = snapshot.get("recent_artifacts") or []
-        if recent_artifacts:
-            for item in recent_artifacts[-5:]:
-                payload = item.get("payload") or {}
-                label = payload.get("artifact_id") or Path(item.get("path", "")).stem or "artifact"
-                summary = payload.get("summary") or payload.get("reason") or "No summary provided."
-                lines.append(f"- {item.get('kind')}: {label} -> {summary}")
-        else:
-            lines.append("- none")
-
-        lines.extend(["", "Recent runs:"])
-        recent_runs = snapshot.get("recent_runs") or []
-        if recent_runs:
-            for item in recent_runs[-5:]:
-                run_id = item.get("run_id") or "unknown-run"
-                summary = item.get("summary") or "No summary provided."
-                lines.append(f"- {run_id}: {summary}")
-        else:
-            lines.append("- none")
-
-        lines.extend(["", "Recent quest memory cards:"])
-        quest_cards = self.memory_service.list_recent(scope="quest", quest_root=quest_root, limit=5)
-        if quest_cards:
-            for card in quest_cards:
-                lines.append(f"- {card.get('type')}: {card.get('title')} ({card.get('path')})")
-        else:
-            lines.append("- none")
-
-        lines.extend(["", "Recent global memory cards:"])
-        global_cards = self.memory_service.list_recent(scope="global", limit=3)
-        if global_cards:
-            for card in global_cards:
-                lines.append(f"- {card.get('type')}: {card.get('title')} ({card.get('path')})")
-        else:
-            lines.append("- none")
-
-        lines.extend(["", "Reusable baselines:"])
-        baseline_entries = self.baseline_registry.list_entries()[-5:]
-        if baseline_entries:
-            for entry in baseline_entries:
-                baseline_id = entry.get("baseline_id") or entry.get("entry_id") or "unknown-baseline"
-                summary = entry.get("summary") or entry.get("task") or "No summary provided."
-                status = str(entry.get("status") or "unknown").strip() or "unknown"
-                lines.append(f"- {baseline_id} [{status}]: {summary}")
-        else:
-            lines.append("- none")
         return "\n".join(lines)
 
     def _paper_and_evidence_block(self, snapshot: dict, quest_root: Path) -> str:
-        workspace_root = Path(str(snapshot.get("active_workspace_root") or quest_root))
-        paper_root = workspace_root / "paper"
-        if not paper_root.exists():
-            paper_root = quest_root / "paper"
-        open_source_root = workspace_root / "release" / "open_source"
-        if not open_source_root.exists():
-            open_source_root = quest_root / "release" / "open_source"
-        selected_outline = read_json(paper_root / "selected_outline.json", {})
-        selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
-        detailed_outline = (
-            dict(selected_outline.get("detailed_outline") or {})
-            if isinstance(selected_outline.get("detailed_outline"), dict)
+        paper_contract = (
+            dict(snapshot.get("paper_contract") or {})
+            if isinstance(snapshot.get("paper_contract"), dict)
             else {}
         )
-        bundle_manifest = read_json(paper_root / "paper_bundle_manifest.json", {})
-        bundle_manifest = bundle_manifest if isinstance(bundle_manifest, dict) else {}
-        paper_baseline_inventory = read_json(paper_root / "baseline_inventory.json", {})
-        paper_baseline_inventory = paper_baseline_inventory if isinstance(paper_baseline_inventory, dict) else {}
-        claim_evidence_map = read_json(paper_root / "claim_evidence_map.json", {})
-        claim_evidence_map = claim_evidence_map if isinstance(claim_evidence_map, dict) else {}
-        compile_report = read_json(paper_root / "build" / "compile_report.json", {})
-        compile_report = compile_report if isinstance(compile_report, dict) else {}
-        open_source_manifest = read_json(open_source_root / "manifest.json", {})
-        open_source_manifest = open_source_manifest if isinstance(open_source_manifest, dict) else {}
-        default_paper_prefix = (
-            paper_root.relative_to(quest_root).as_posix()
-            if paper_root.is_relative_to(quest_root)
-            else "paper"
-        )
-        default_release_prefix = (
-            open_source_root.relative_to(quest_root).as_posix()
-            if open_source_root.is_relative_to(quest_root)
-            else "release/open_source"
-        )
-
-        selected_outline_ref = str(
-            selected_outline.get("outline_id") or bundle_manifest.get("selected_outline_ref") or ""
-        ).strip()
-        selected_outline_title = str(
-            detailed_outline.get("title") or selected_outline.get("title") or bundle_manifest.get("title") or ""
-        ).strip()
-        research_questions_raw = detailed_outline.get("research_questions")
-        research_questions: list[str] = []
-        if isinstance(research_questions_raw, list):
-            for item in research_questions_raw:
-                if isinstance(item, dict):
-                    question = str(item.get("question_text") or item.get("title") or item.get("id") or "").strip()
-                else:
-                    question = str(item or "").strip()
-                if question:
-                    research_questions.append(question)
-
         lines = [
-            f"- selected_outline_ref: {selected_outline_ref or 'none'}",
-            f"- selected_outline_title: {selected_outline_title or 'none'}",
-            f"- selected_outline_story_present: {bool(selected_outline.get('story'))}",
-            f"- selected_outline_ten_questions_present: {bool(selected_outline.get('ten_questions'))}",
-            f"- active_research_question_count: {len(research_questions)}",
+            f"- selected_outline_ref: {str(paper_contract.get('selected_outline_ref') or 'none')}",
+            f"- selected_outline_title: {str(paper_contract.get('title') or 'none')}",
         ]
-        if research_questions:
-            for index, question in enumerate(research_questions[:3], start=1):
-                lines.append(f"- active_research_question_{index}: {question}")
-
-        def _path_status(path_str: str | None, *, fallback: str) -> str:
-            resolved = str(path_str or fallback).strip() or fallback
-            exists = (quest_root / resolved).exists()
-            return f"{resolved} [{'exists' if exists else 'missing'}]"
-
-        lines.extend(
-            [
-                f"- writing_plan_status: {_path_status(bundle_manifest.get('writing_plan_path'), fallback=f'{default_paper_prefix}/writing_plan.md')}",
-                f"- draft_status: {_path_status(bundle_manifest.get('draft_path'), fallback=f'{default_paper_prefix}/draft.md')}",
-                f"- references_status: {_path_status(bundle_manifest.get('references_path'), fallback=f'{default_paper_prefix}/references.bib')}",
-                f"- claim_evidence_map_status: {_path_status(bundle_manifest.get('claim_evidence_map_path'), fallback=f'{default_paper_prefix}/claim_evidence_map.json')}",
-                f"- baseline_inventory_status: {_path_status(bundle_manifest.get('baseline_inventory_path'), fallback=f'{default_paper_prefix}/baseline_inventory.json')}",
-                f"- review_status: {f'{default_paper_prefix}/review/review.md [exists]' if (paper_root / 'review' / 'review.md').exists() else f'{default_paper_prefix}/review/review.md [missing]'}",
-                f"- proofing_report_status: {f'{default_paper_prefix}/proofing/proofing_report.md [exists]' if (paper_root / 'proofing' / 'proofing_report.md').exists() else f'{default_paper_prefix}/proofing/proofing_report.md [missing]'}",
-                f"- page_images_manifest_status: {f'{default_paper_prefix}/proofing/page_images_manifest.json [exists]' if (paper_root / 'proofing' / 'page_images_manifest.json').exists() else f'{default_paper_prefix}/proofing/page_images_manifest.json [missing]'}",
-            ]
+        paper_contract_health = (
+            dict(snapshot.get("paper_contract_health") or {})
+            if isinstance(snapshot.get("paper_contract_health"), dict)
+            else {}
         )
-
-        if bundle_manifest:
-            pdf_rel_path = str(bundle_manifest.get("pdf_path") or "").strip()
-            compile_rel_path = str(bundle_manifest.get("compile_report_path") or "").strip()
-            latex_root_path = str(bundle_manifest.get("latex_root_path") or "").strip()
+        if paper_contract_health:
+            primary_blocker = str(
+                ((paper_contract_health.get("blocking_reasons") or [None])[0]) or "none"
+            ).strip() or "none"
             lines.extend(
                 [
-                    "- paper_bundle_manifest_present: True",
-                    f"- bundle_pdf_status: {_path_status(pdf_rel_path, fallback=f'{default_paper_prefix}/paper.pdf')}",
-                    f"- bundle_compile_report_status: {_path_status(compile_rel_path, fallback=f'{default_paper_prefix}/build/compile_report.json')}",
-                    f"- bundle_latex_root: {latex_root_path or 'none'}",
-                    f"- open_source_manifest_status: {_path_status(bundle_manifest.get('open_source_manifest_path'), fallback=f'{default_release_prefix}/manifest.json')}",
-                    f"- open_source_cleanup_plan_status: {_path_status(bundle_manifest.get('open_source_cleanup_plan_path'), fallback=f'{default_release_prefix}/cleanup_plan.md')}",
+                    f"- paper_contract_health: {'ready' if bool(paper_contract_health.get('writing_ready')) else 'blocked'}",
+                    f"- paper_health_counts: unresolved_required={int(paper_contract_health.get('unresolved_required_count') or 0)}, unmapped_completed={int(paper_contract_health.get('unmapped_completed_count') or 0)}, blocking_pending={int(paper_contract_health.get('blocking_open_supplementary_count') or 0)}",
+                    f"- paper_recommended_next_stage: {str(paper_contract_health.get('recommended_next_stage') or 'none')}",
+                    f"- paper_recommended_action: {str(paper_contract_health.get('recommended_action') or 'none')}",
+                    f"- paper_primary_blocker: {primary_blocker}",
+                    "- paper_health_tool: call artifact.get_paper_contract_health(detail='full') before paper-facing write/finalize work when the exact blocking items matter.",
+                    "- paper_outline_tool: call artifact.list_paper_outlines(...) when outline inventory or a valid outline_id is needed.",
+                    "- paper_campaign_tool: call artifact.get_analysis_campaign(campaign_id='active') when exact supplementary slice status matters.",
                 ]
             )
-        else:
-            lines.append("- paper_bundle_manifest_present: False")
-
-        claims = claim_evidence_map.get("claims") if isinstance(claim_evidence_map.get("claims"), list) else []
-        counts = {"supported": 0, "partial": 0, "unsupported": 0, "deferred": 0}
-        unresolved: list[str] = []
-        for item in claims:
-            if not isinstance(item, dict):
-                continue
-            status = str(item.get("support_status") or "").strip().lower()
-            if status in counts:
-                counts[status] += 1
-            if status in {"partial", "unsupported", "deferred"}:
-                claim_id = str(item.get("claim_id") or item.get("claim_text") or "claim").strip()
-                unresolved.append(f"{claim_id} [{status}]")
-        lines.append(
-            "- claim_status_counts: "
-            + ", ".join(f"{key}={value}" for key, value in counts.items())
-        )
-        if unresolved:
-            lines.append(f"- downgrade_watchlist: {'; '.join(unresolved[:5])}")
-        else:
-            lines.append("- downgrade_watchlist: none")
-
-        if compile_report:
-            lines.append(f"- compile_report_ok: {compile_report.get('ok') if 'ok' in compile_report else 'unknown'}")
-        supplementary_baselines = (
-            paper_baseline_inventory.get("supplementary_baselines")
-            if isinstance(paper_baseline_inventory.get("supplementary_baselines"), list)
-            else []
-        )
-        if paper_baseline_inventory:
-            lines.append(f"- paper_supplementary_baseline_count: {len(supplementary_baselines)}")
-        if open_source_manifest:
             lines.append(
-                f"- open_source_release_branch: {str(open_source_manifest.get('release_branch') or '').strip() or 'none'}"
+                "- paper_contract_rule: if the paper state is blocked, do not stabilize draft prose as if the paper were settled; follow the recommended paper action first."
             )
-
-        lines.extend(["", "Recent supporting runs:"])
-        recent_runs = snapshot.get("recent_runs") or []
-        supporting_runs = [
-            item
-            for item in recent_runs
-            if isinstance(item, dict) and str(item.get("run_id") or "").strip()
-        ]
-        if supporting_runs:
-            for item in supporting_runs[-3:]:
-                run_id = str(item.get("run_id") or "run").strip()
-                summary = str(item.get("summary") or "").strip() or "No summary provided."
-                lines.append(f"- {run_id}: {summary}")
-        else:
-            lines.append("- none")
-
-        lines.append("")
-        lines.append(
-            "- paper_state_rule: when drafting, reviewing, bundling, or finalizing, treat the selected outline, claim-evidence map, bundle manifest, proofing outputs, and downgrade watchlist as the active writing truth surface."
-        )
         return "\n".join(lines)
 
     def _priority_memory_block(
@@ -1346,46 +1164,15 @@ class PromptBuilder:
     ) -> str:
         stage = active_anchor if active_anchor in STAGE_MEMORY_PLAN else skill_id
         plan = STAGE_MEMORY_PLAN.get(stage, STAGE_MEMORY_PLAN["decision"])
-        selected: list[dict] = []
-        seen_paths: set[str] = set()
-
-        for scope in ("quest", "global"):
-            for kind in plan.get(scope, ()):
-                cards = self.memory_service.list_recent(
-                    scope=scope,
-                    quest_root=quest_root if scope == "quest" else None,
-                    kind=kind,
-                    limit=2,
-                )
-                if not cards:
-                    continue
-                self._append_priority_memory(
-                    selected,
-                    seen_paths,
-                    card=cards[-1],
-                    scope=scope,
-                    quest_root=quest_root,
-                    reason=f"recent {stage} {kind} memory",
-                )
-                if len(selected) >= 6:
-                    return self._format_priority_memory(selected)
-
-        for query in self._memory_queries(user_message):
-            matches = self.memory_service.search(query, scope="both", quest_root=quest_root, limit=6)
-            for card in matches:
-                scope = str(card.get("scope") or "quest")
-                self._append_priority_memory(
-                    selected,
-                    seen_paths,
-                    card=card,
-                    scope=scope,
-                    quest_root=quest_root,
-                    reason=f"matches current user message: `{query}`",
-                )
-                if len(selected) >= 8:
-                    return self._format_priority_memory(selected)
-
-        return self._format_priority_memory(selected)
+        quest_kinds = ", ".join(plan.get("quest", ())) or "none"
+        global_kinds = ", ".join(plan.get("global", ())) or "none"
+        return "\n".join(
+            [
+                f"- stage_memory_rule: for `{stage}`, prefer quest memory kinds [{quest_kinds}] and global memory kinds [{global_kinds}] when memory lookup is needed.",
+                "- memory_lookup_tool: call memory.list_recent(...) to recover context after pause/restart and memory.search(...) before repeating prior work.",
+                "- memory_injection_rule: memory is intentionally not pre-expanded here; pull only the cards that matter now.",
+            ]
+        )
 
     def _append_priority_memory(
         self,
@@ -1447,20 +1234,12 @@ class PromptBuilder:
         return tokens
 
     def _conversation_block(self, quest_id: str, limit: int = 12) -> str:
-        records = self.quest_service.history(quest_id, limit=limit)
-        if not records:
-            return "- none"
-        lines = []
-        for item in records[-limit:]:
-            role = str(item.get("role") or "unknown")
-            source = str(item.get("source") or "unknown")
-            content = str(item.get("content") or "").strip().replace("\n", " ")
-            if len(content) > 400:
-                content = content[:397].rstrip() + "..."
-            reply_to = str(item.get("reply_to_interaction_id") or "").strip()
-            suffix = f" -> reply_to:{reply_to}" if reply_to else ""
-            lines.append(f"- [{role}|{source}]{suffix} {content}")
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                "- conversation_context_rule: recent conversation is not pre-expanded here.",
+                f"- conversation_tool: call artifact.get_conversation_context(limit={limit}, include_attachments=False) when earlier turn continuity matters.",
+            ]
+        )
 
     def _markdown_body(self, path: Path) -> str:
         text = path.read_text(encoding="utf-8")

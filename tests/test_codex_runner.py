@@ -282,6 +282,44 @@ def test_codex_runner_prepares_project_home_from_runner_config_dir(temp_home) ->
     assert (Path(target) / "auth.json").read_text(encoding="utf-8") == '{"provider":"custom"}'
 
 
+def test_codex_runner_prepares_project_home_overwrites_existing_provider_files(temp_home) -> None:  # type: ignore[no-untyped-def]
+    source_home = temp_home / "provider-codex-home"
+    source_home.mkdir(parents=True, exist_ok=True)
+    (source_home / "config.toml").write_text("[profiles.m27]\nmodel = \"new-profile\"\n", encoding="utf-8")
+    (source_home / "auth.json").write_text('{"provider":"new-auth"}', encoding="utf-8")
+
+    quest_root = temp_home / "quest"
+    quest_root.mkdir(parents=True, exist_ok=True)
+    workspace_root = quest_root / "workspace"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    target_home = workspace_root / ".codex"
+    target_home.mkdir(parents=True, exist_ok=True)
+    (target_home / "config.toml").write_text("[profiles.old]\nmodel = \"old-profile\"\n", encoding="utf-8")
+    (target_home / "auth.json").write_text('{"provider":"old-auth"}', encoding="utf-8")
+
+    runner = CodexRunner(
+        home=temp_home,
+        repo_root=temp_home,
+        binary="codex",
+        logger=object(),  # type: ignore[arg-type]
+        prompt_builder=object(),  # type: ignore[arg-type]
+        artifact_service=object(),  # type: ignore[arg-type]
+    )
+
+    target = runner._prepare_project_codex_home(
+        workspace_root,
+        quest_root=quest_root,
+        quest_id="q-001",
+        run_id="run-001",
+        runner_config={"config_dir": str(source_home)},
+    )
+
+    config_text = (Path(target) / "config.toml").read_text(encoding="utf-8")
+    assert 'model = "new-profile"' in config_text
+    assert 'old-profile' not in config_text
+    assert (Path(target) / "auth.json").read_text(encoding="utf-8") == '{"provider":"new-auth"}'
+
+
 def test_codex_runner_prepares_project_home_adapting_profile_only_provider_config(temp_home) -> None:  # type: ignore[no-untyped-def]
     source_home = temp_home / "provider-codex-home"
     source_home.mkdir(parents=True, exist_ok=True)

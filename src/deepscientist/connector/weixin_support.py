@@ -13,7 +13,7 @@ from urllib.request import Request
 
 from .. import __version__ as DEEPSCIENTIST_VERSION
 from ..network import urlopen_with_proxy as urlopen
-from ..shared import ensure_dir, read_json, write_json
+from ..shared import ensure_dir, read_json, utc_now, write_json
 
 DEFAULT_WEIXIN_BASE_URL = "https://ilinkai.weixin.qq.com"
 DEFAULT_WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
@@ -611,6 +611,22 @@ def save_weixin_context_tokens(root: Path, items: dict[str, dict[str, Any]]) -> 
     write_json(weixin_context_tokens_path(root), {"tokens": items})
 
 
+def _weixin_replay_cursor(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_weixin_context_entry(root: Path, user_id: str) -> dict[str, Any]:
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return {}
+    items = load_weixin_context_tokens(root)
+    current = items.get(normalized_user_id)
+    return dict(current) if isinstance(current, dict) else {}
+
+
 def remember_weixin_context_token(
     root: Path,
     *,
@@ -635,6 +651,16 @@ def remember_weixin_context_token(
         "conversation_id": str(conversation_id or current.get("conversation_id") or "").strip() or None,
         "message_id": str(message_id or current.get("message_id") or "").strip() or None,
         "updated_at": str(updated_at or current.get("updated_at") or "").strip() or None,
+        "stale_context": False,
+        "stale_since": None,
+        "last_ret_minus_2_at": None,
+        "last_outbound_error": None,
+        "last_outbound_kind": None,
+        "queued_replay_cursor": _weixin_replay_cursor(current.get("queued_replay_cursor")),
+        "last_replay_at": str(current.get("last_replay_at") or "").strip() or None,
+        "last_replay_trigger_message_id": str(current.get("last_replay_trigger_message_id") or "").strip() or None,
+        "last_replayed_count": _weixin_replay_cursor(current.get("last_replayed_count")) or None,
+        "last_replay_dropped_count": _weixin_replay_cursor(current.get("last_replay_dropped_count")) or None,
     }
     save_weixin_context_tokens(root, items)
 
@@ -646,6 +672,101 @@ def get_weixin_context_token(root: Path, user_id: str) -> str | None:
     items = load_weixin_context_tokens(root)
     token = str((items.get(normalized_user_id) or {}).get("context_token") or "").strip()
     return token or None
+
+
+def get_weixin_replay_cursor(root: Path, user_id: str) -> int:
+    entry = get_weixin_context_entry(root, user_id)
+    return _weixin_replay_cursor(entry.get("queued_replay_cursor"))
+
+
+def update_weixin_replay_cursor(
+    root: Path,
+    *,
+    user_id: str,
+    queued_replay_cursor: int,
+    last_replay_at: str | None = None,
+    last_replay_trigger_message_id: str | None = None,
+    last_replayed_count: int | None = None,
+    last_replay_dropped_count: int | None = None,
+) -> dict[str, Any]:
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return {}
+    items = load_weixin_context_tokens(root)
+    current = dict(items.get(normalized_user_id) or {})
+    current.update(
+        {
+            "user_id": normalized_user_id,
+            "queued_replay_cursor": _weixin_replay_cursor(queued_replay_cursor),
+            "last_replay_at": str(last_replay_at or utc_now()).strip() or utc_now(),
+            "last_replay_trigger_message_id": str(last_replay_trigger_message_id or "").strip() or None,
+            "last_replayed_count": _weixin_replay_cursor(last_replayed_count) if last_replayed_count is not None else None,
+            "last_replay_dropped_count": _weixin_replay_cursor(last_replay_dropped_count)
+            if last_replay_dropped_count is not None
+            else None,
+        }
+    )
+    items[normalized_user_id] = current
+    save_weixin_context_tokens(root, items)
+    return current
+
+
+def mark_weixin_context_stale(
+    root: Path,
+    *,
+    user_id: str,
+    error: str,
+    kind: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, Any]:
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return {}
+    timestamp = str(updated_at or utc_now()).strip() or utc_now()
+    items = load_weixin_context_tokens(root)
+    current = dict(items.get(normalized_user_id) or {})
+    current.update(
+        {
+            "user_id": normalized_user_id,
+            "stale_context": True,
+            "stale_since": str(current.get("stale_since") or "").strip() or timestamp,
+            "last_ret_minus_2_at": timestamp,
+            "last_outbound_error": str(error or "").strip() or None,
+            "last_outbound_kind": str(kind or "").strip() or None,
+        }
+    )
+    items[normalized_user_id] = current
+    save_weixin_context_tokens(root, items)
+    return current
+
+
+def clear_weixin_context_send_state(
+    root: Path,
+    *,
+    user_id: str,
+    kind: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, Any]:
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return {}
+    timestamp = str(updated_at or utc_now()).strip() or utc_now()
+    items = load_weixin_context_tokens(root)
+    current = dict(items.get(normalized_user_id) or {})
+    current.update(
+        {
+            "user_id": normalized_user_id,
+            "stale_context": False,
+            "stale_since": None,
+            "last_ret_minus_2_at": None,
+            "last_outbound_error": None,
+            "last_outbound_kind": str(kind or "").strip() or None,
+            "last_success_at": timestamp,
+        }
+    )
+    items[normalized_user_id] = current
+    save_weixin_context_tokens(root, items)
+    return current
 
 
 def weixin_sync_state_path(root: Path) -> Path:

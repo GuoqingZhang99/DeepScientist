@@ -39,9 +39,11 @@ test.describe('git diff viewer', () => {
     const tree = page.getByRole('tabpanel').getByRole('tree')
     const docsFolder = tree.locator('[data-node-id]', { hasText: 'docs' }).first()
     await expect(docsFolder).toBeVisible({ timeout: 15_000 })
-    await docsFolder.getByRole('button').first().click()
-
-    await expect(tree.getByRole('treeitem', { name: /new-name\.md/i })).toBeVisible()
+    const renamedFile = tree.getByRole('treeitem', { name: /new-name\.md/i })
+    if ((await renamedFile.count()) === 0) {
+      await docsFolder.getByRole('button').first().click()
+    }
+    await expect(renamedFile).toBeVisible()
 
     const fileNode = tree.locator('[data-node-id]', { hasText: 'notes.md' }).first()
     await expect(fileNode).toBeVisible()

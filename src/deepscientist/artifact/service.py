@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import copy
+import json
 import re
 import shutil
+import threading
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -31,6 +35,7 @@ from ..shared import (
     read_yaml,
     resolve_within,
     run_command,
+    sha256_text,
     slugify,
     utc_now,
     write_json,
@@ -40,6 +45,7 @@ from ..shared import (
 from ..quest import QuestService
 from ..memory.frontmatter import dump_markdown_document, load_markdown_document
 from .arxiv import fetch_arxiv_metadata, read_arxiv_content
+from .charts import render_main_experiment_metric_timeline_chart
 from .guidance import build_guidance_for_record, guidance_summary
 from .metrics import (
     baseline_metric_lines,
@@ -98,6 +104,8 @@ class ArtifactService:
         self.baselines = BaselineRegistry(home)
         self.quest_service = QuestService(home)
         self.arxiv_library = ArxivLibraryService()
+        self._optimization_frontier_cache_lock = threading.Lock()
+        self._optimization_frontier_cache: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _notification_text(value: object) -> str | None:
@@ -225,38 +233,120 @@ class ArtifactService:
             return branch
         return fallback or "current head"
 
+    @staticmethod
+    def _short_text(value: object, *, limit: int = 120) -> str | None:
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            return None
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 1)].rstrip() + "…"
+
     def _build_idea_interaction_message(
         self,
         *,
+        quest_root: Path,
         action: str,
         idea_id: str,
         title: str | None,
-        problem: str | None,
-        hypothesis: str | None,
         mechanism: str | None,
+        method_brief: str | None,
         foundation_label: str | None,
         branch_name: str,
+        change_layer: str | None,
+        source_lens: str | None,
+        expected_gain: str | None,
         next_target: str | None,
-        idea_md_rel_path: str | None,
-        draft_md_rel_path: str | None,
     ) -> str:
-        lead = "is now active" if action == "create" else "was revised"
-        lines = [f"Idea `{idea_id}` {lead} on branch `{branch_name}`."]
-        self._append_notification_section(lines, "Title", title)
-        self._append_notification_section(lines, "Problem", problem)
-        self._append_notification_section(lines, "Hypothesis", hypothesis)
-        self._append_notification_section(lines, "Mechanism", mechanism)
-        if foundation_label:
-            self._append_notification_section(lines, "Foundation", foundation_label)
-        if next_target:
-            self._append_notification_section(lines, "Next route", self._format_route_label(next_target) or next_target)
-        self._append_notification_file_section(
-            lines,
-            [
-                ("Idea doc", idea_md_rel_path),
-                ("Draft", draft_md_rel_path),
-            ],
+        normalized_title = self._short_text(title or idea_id, limit=80) or idea_id
+        design_text = self._short_text(method_brief or mechanism, limit=140) or self.quest_service.localized_copy(
+            quest_root=quest_root,
+            zh="核心设计还未写清楚",
+            en="the core design is not written clearly yet",
         )
+        compared_target = self._short_text(
+            foundation_label,
+            limit=48,
+        ) or self.quest_service.localized_copy(
+            quest_root=quest_root,
+            zh="当前方案",
+            en="the current approach",
+        )
+        delta_parts: list[str] = []
+        if change_layer:
+            delta_parts.append(
+                self.quest_service.localized_copy(
+                    quest_root=quest_root,
+                    zh=f"重点改 `{self._short_text(change_layer, limit=36) or change_layer}`",
+                    en=f"changes `{self._short_text(change_layer, limit=36) or change_layer}` first",
+                )
+            )
+        if source_lens:
+            delta_parts.append(
+                self.quest_service.localized_copy(
+                    quest_root=quest_root,
+                    zh=f"引入 `{self._short_text(source_lens, limit=36) or source_lens}` 的设计视角",
+                    en=f"adds a `{self._short_text(source_lens, limit=36) or source_lens}` design angle",
+                )
+            )
+        if not delta_parts:
+            delta_parts.append(
+                self.quest_service.localized_copy(
+                    quest_root=quest_root,
+                    zh=f"把 `{design_text}` 直接加到主设计里",
+                    en=f"directly adds `{design_text}` into the main design",
+                )
+            )
+        delta_text = self._short_text("；".join(delta_parts), limit=160) or delta_parts[0]
+        expected_text = self._short_text(expected_gain, limit=96)
+        next_target_text = self._format_route_label(next_target) if next_target else None
+        if action == "candidate":
+            headline = self.quest_service.localized_copy(
+                quest_root=quest_root,
+                zh=f"收到 idea 候选：{normalized_title}",
+                en=f"Idea candidate recorded: {normalized_title}",
+            )
+        elif action == "revise":
+            headline = self.quest_service.localized_copy(
+                quest_root=quest_root,
+                zh=f"已更新 idea：{normalized_title}（{branch_name}）",
+                en=f"Idea updated: {normalized_title} ({branch_name})",
+            )
+        else:
+            headline = self.quest_service.localized_copy(
+                quest_root=quest_root,
+                zh=f"新 idea：{normalized_title}（{branch_name}）",
+                en=f"New idea: {normalized_title} ({branch_name})",
+            )
+        lines = [
+            headline,
+            self.quest_service.localized_copy(
+                quest_root=quest_root,
+                zh=f"创新点：{design_text}",
+                en=f"Innovation: {design_text}",
+            ),
+            self.quest_service.localized_copy(
+                quest_root=quest_root,
+                zh=f"相对 {compared_target}：{delta_text}",
+                en=f"Compared with {compared_target}: {delta_text}",
+            ),
+        ]
+        if expected_text:
+            lines.append(
+                self.quest_service.localized_copy(
+                    quest_root=quest_root,
+                    zh=f"预期收益：{expected_text}",
+                    en=f"Expected gain: {expected_text}",
+                )
+            )
+        elif next_target_text:
+            lines.append(
+                self.quest_service.localized_copy(
+                    quest_root=quest_root,
+                    zh=f"下一步：{next_target_text}",
+                    en=f"Next step: {next_target_text}",
+                )
+            )
         return "\n".join(lines)
 
     def _build_main_experiment_interaction_message(
@@ -312,6 +402,139 @@ class ArtifactService:
             ],
         )
         return "\n".join(lines)
+
+    def _main_experiment_chart_dir(self, workspace_root: Path, *, run_id: str) -> Path:
+        return ensure_dir(workspace_root / "experiments" / "main" / run_id / "connector-charts")
+
+    def _generate_main_experiment_metric_charts(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path,
+        run_id: str,
+    ) -> list[dict[str, Any]]:
+        timeline = self.quest_service.metrics_timeline(self._quest_id(quest_root))
+        chart_dir = self._main_experiment_chart_dir(workspace_root, run_id=run_id)
+        charts: list[dict[str, Any]] = []
+        for series in timeline.get("series") or []:
+            if not isinstance(series, dict):
+                continue
+            points = [dict(item) for item in (series.get("points") or []) if isinstance(item, dict)]
+            if not points:
+                continue
+            latest_point = points[-1]
+            if str(latest_point.get("run_id") or "").strip() != run_id:
+                continue
+            metric_id = str(series.get("metric_id") or "").strip()
+            if not metric_id:
+                continue
+            output_path = chart_dir / f"{slugify(metric_id, 'metric')}-timeline.png"
+            chart_payload = render_main_experiment_metric_timeline_chart(
+                series=series,
+                output_path=output_path,
+            )
+            charts.append(chart_payload)
+        return charts
+
+    def _auto_metric_chart_targets(
+        self,
+        quest_root: Path,
+        *,
+        connectors: dict[str, Any],
+    ) -> list[tuple[str, str]]:
+        targets: list[tuple[str, str]] = []
+        for target in self._bound_conversations(quest_root):
+            channel_name = self._normalize_channel_name(target)
+            if channel_name not in {"qq", "weixin"}:
+                continue
+            channel_config = connectors.get(channel_name) if isinstance(connectors.get(channel_name), dict) else {}
+            if not bool(channel_config.get("enabled", False)):
+                continue
+            if not bool(channel_config.get("auto_send_main_experiment_png", True)):
+                continue
+            targets.append((target, channel_name))
+        return targets
+
+    def _send_main_experiment_metric_charts(
+        self,
+        quest_root: Path,
+        *,
+        run_id: str,
+        title: str,
+        charts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        connectors = self._connectors_config()
+        targets = self._auto_metric_chart_targets(quest_root, connectors=connectors)
+        if not charts or not targets:
+            return {
+                "enabled": False,
+                "chart_count": len(charts),
+                "target_count": len(targets),
+                "targets": [target for target, _ in targets],
+                "deliveries": [],
+            }
+
+        deliveries: list[dict[str, Any]] = []
+        for chart_index, chart in enumerate(charts):
+            label = str(chart.get("label") or chart.get("metric_id") or "metric").strip() or "metric"
+            path = str(chart.get("path") or "").strip()
+            if not path:
+                continue
+            message = f"Main experiment metric chart · {label}"
+            attachments = [
+                {
+                    "kind": "path",
+                    "path": path,
+                    "label": label,
+                    "content_type": "image/png",
+                    "connector_delivery": {
+                        "qq": {
+                            "media_kind": "image",
+                            "allow_internal_auto_media": True,
+                        },
+                        "weixin": {
+                            "media_kind": "image",
+                        },
+                    },
+                }
+            ]
+            for target, channel_name in targets:
+                payload = {
+                    "quest_root": str(quest_root),
+                    "quest_id": self._quest_id(quest_root),
+                    "conversation_id": target,
+                    "kind": "main_experiment_metric_chart",
+                    "message": message,
+                    "response_phase": "push",
+                    "importance": "info",
+                    "attachments": attachments,
+                }
+                delivery_result = self._deliver_to_channel(
+                    channel_name,
+                    payload,
+                    connectors=connectors,
+                )
+                deliveries.append(
+                    {
+                        "target": target,
+                        "channel": channel_name,
+                        "metric_id": chart.get("metric_id"),
+                        "label": label,
+                        "path": path,
+                        "delivery": delivery_result,
+                    }
+                )
+            if chart_index < len(charts) - 1:
+                time.sleep(2.0)
+        return {
+            "enabled": True,
+            "run_id": run_id,
+            "title": title,
+            "chart_count": len(charts),
+            "target_count": len(targets),
+            "targets": [target for target, _ in targets],
+            "deliveries": deliveries,
+        }
 
     def _build_outline_interaction_message(
         self,
@@ -460,6 +683,7 @@ class ArtifactService:
         writing_plan_rel_path: str | None,
         references_rel_path: str | None,
         claim_evidence_map_rel_path: str | None,
+        evidence_ledger_rel_path: str | None,
         compile_report_rel_path: str | None,
         pdf_rel_path: str | None,
         latex_root_rel_path: str | None,
@@ -486,6 +710,7 @@ class ArtifactService:
                 ("Writing plan", writing_plan_rel_path),
                 ("References", references_rel_path),
                 ("Claim-evidence map", claim_evidence_map_rel_path),
+                ("Evidence ledger", evidence_ledger_rel_path),
                 ("Compile report", compile_report_rel_path),
                 ("PDF", pdf_rel_path),
                 ("LaTeX root", latex_root_rel_path),
@@ -847,6 +1072,11 @@ class ArtifactService:
         next_target: str,
         branch: str,
         worktree_root: Path,
+        method_brief: str = "",
+        selection_scores: dict[str, Any] | None = None,
+        mechanism_family: str = "",
+        change_layer: str = "",
+        source_lens: str = "",
         foundation_ref: dict[str, Any] | None = None,
         foundation_reason: str = "",
         lineage_intent: str | None = None,
@@ -854,9 +1084,16 @@ class ArtifactService:
     ) -> str:
         normalized_foundation = dict(foundation_ref or {})
         normalized_lineage_intent = str(lineage_intent or "").strip().lower() or None
+        normalized_method_brief = str(method_brief or "").strip()
+        normalized_selection_scores = self._normalize_selection_scores(selection_scores)
+        normalized_mechanism_family = str(mechanism_family or "").strip() or None
+        normalized_change_layer = str(change_layer or "").strip() or None
+        normalized_source_lens = str(source_lens or "").strip() or None
         tags = [f"branch:{branch}", f"next:{next_target}"]
         if normalized_lineage_intent:
             tags.append(f"lineage:{normalized_lineage_intent}")
+        if normalized_mechanism_family:
+            tags.append(f"family:{slugify(normalized_mechanism_family, 'family')}")
         metadata = {
             "id": idea_id,
             "type": "ideas",
@@ -867,6 +1104,11 @@ class ArtifactService:
             "branch": branch,
             "worktree_root": str(worktree_root),
             "next_target": next_target,
+            "method_brief": normalized_method_brief or None,
+            "selection_scores": normalized_selection_scores or None,
+            "mechanism_family": normalized_mechanism_family,
+            "change_layer": normalized_change_layer,
+            "source_lens": normalized_source_lens,
             "foundation_ref": normalized_foundation or None,
             "foundation_reason": foundation_reason.strip() or None,
             "lineage_intent": normalized_lineage_intent,
@@ -889,9 +1131,23 @@ class ArtifactService:
             "",
             mechanism.strip() or "TBD",
             "",
+            "## Method Brief",
+            "",
+            normalized_method_brief or "Not recorded",
+            "",
             "## Expected Gain",
             "",
             expected_gain.strip() or "TBD",
+            "",
+            "## Selection Scores",
+            "",
+            *self._selection_score_lines(normalized_selection_scores),
+            "",
+            "## Diversity Tags",
+            "",
+            f"- Mechanism family: {normalized_mechanism_family or 'Not recorded'}",
+            f"- Change layer: {normalized_change_layer or 'Not recorded'}",
+            f"- Source lens: {normalized_source_lens or 'Not recorded'}",
             "",
             "## Decision Reason",
             "",
@@ -956,6 +1212,11 @@ class ArtifactService:
         next_target: str,
         branch: str,
         worktree_root: Path,
+        method_brief: str = "",
+        selection_scores: dict[str, Any] | None = None,
+        mechanism_family: str = "",
+        change_layer: str = "",
+        source_lens: str = "",
         foundation_ref: dict[str, Any] | None = None,
         foundation_reason: str = "",
         lineage_intent: str | None = None,
@@ -964,6 +1225,11 @@ class ArtifactService:
     ) -> str:
         normalized_foundation = dict(foundation_ref or {})
         normalized_lineage_intent = str(lineage_intent or "").strip().lower() or None
+        normalized_method_brief = str(method_brief or "").strip()
+        normalized_selection_scores = self._normalize_selection_scores(selection_scores)
+        normalized_mechanism_family = str(mechanism_family or "").strip() or None
+        normalized_change_layer = str(change_layer or "").strip() or None
+        normalized_source_lens = str(source_lens or "").strip() or None
         metadata = {
             "id": f"{idea_id}-draft",
             "type": "ideas",
@@ -975,6 +1241,11 @@ class ArtifactService:
             "branch": branch,
             "worktree_root": str(worktree_root),
             "next_target": next_target,
+            "method_brief": normalized_method_brief or None,
+            "selection_scores": normalized_selection_scores or None,
+            "mechanism_family": normalized_mechanism_family,
+            "change_layer": normalized_change_layer,
+            "source_lens": normalized_source_lens,
             "foundation_ref": normalized_foundation or None,
             "foundation_reason": foundation_reason.strip() or None,
             "lineage_intent": normalized_lineage_intent,
@@ -1000,6 +1271,11 @@ class ArtifactService:
                 if evidence_paths
                 else "- None recorded yet."
             )
+            selection_score_lines = (
+                "\n".join(self._selection_score_lines(normalized_selection_scores))
+                if normalized_selection_scores
+                else "- Not recorded"
+            )
             body = "\n".join(
                 [
                     f"# {title}",
@@ -1019,6 +1295,291 @@ class ArtifactService:
                     "## Theory and Method",
                     "",
                     mechanism.strip() or "TBD",
+                    "",
+                    "## Method Brief",
+                    "",
+                    normalized_method_brief or "Not recorded",
+                    "",
+                    "## Selection Scores",
+                    "",
+                    selection_score_lines,
+                    "",
+                    "## Diversity Tags",
+                    "",
+                    f"- Mechanism family: {normalized_mechanism_family or 'Not recorded'}",
+                    f"- Change layer: {normalized_change_layer or 'Not recorded'}",
+                    f"- Source lens: {normalized_source_lens or 'Not recorded'}",
+                    "",
+                    "## Code-Level Change Plan",
+                    "",
+                    mechanism.strip() or "TBD",
+                    "",
+                    "## Evaluation / Falsification Plan",
+                    "",
+                    expected_gain.strip() or "TBD",
+                    "",
+                    "## Risks / Caveats / Implementation Notes",
+                    "",
+                    risk_lines,
+                    "",
+                    "## Evidence / References",
+                    "",
+                    evidence_lines,
+                    "",
+                    "## Foundation Choice",
+                    "",
+                    f"- Lineage intent: `{normalized_lineage_intent or 'manual'}`",
+                    f"- Foundation: `{foundation_label}`",
+                    f"- Reason: {foundation_reason.strip() or 'Use the current active foundation.'}",
+                    "",
+                    "## Next Target",
+                    "",
+                    next_target.strip() or "experiment",
+                    "",
+                ]
+        )
+        return dump_markdown_document(metadata, body.rstrip() + "\n")
+
+    def _idea_candidate_root(self, quest_root: Path, idea_id: str) -> Path:
+        return ensure_dir(quest_root / "memory" / "ideas" / "_candidates" / idea_id)
+
+    def _build_candidate_idea_markdown(
+        self,
+        *,
+        idea_id: str,
+        quest_id: str,
+        title: str,
+        problem: str,
+        hypothesis: str,
+        mechanism: str,
+        expected_gain: str,
+        risks: list[str],
+        evidence_paths: list[str],
+        decision_reason: str,
+        next_target: str,
+        candidate_root: Path,
+        method_brief: str = "",
+        selection_scores: dict[str, Any] | None = None,
+        mechanism_family: str = "",
+        change_layer: str = "",
+        source_lens: str = "",
+        foundation_ref: dict[str, Any] | None = None,
+        foundation_reason: str = "",
+        lineage_intent: str | None = None,
+    ) -> str:
+        normalized_foundation = dict(foundation_ref or {})
+        normalized_lineage_intent = str(lineage_intent or "").strip().lower() or None
+        normalized_method_brief = str(method_brief or "").strip()
+        normalized_selection_scores = self._normalize_selection_scores(selection_scores)
+        normalized_mechanism_family = str(mechanism_family or "").strip() or None
+        normalized_change_layer = str(change_layer or "").strip() or None
+        normalized_source_lens = str(source_lens or "").strip() or None
+        metadata = {
+            "id": idea_id,
+            "type": "ideas",
+            "kind": "idea_candidate",
+            "title": title,
+            "quest_id": quest_id,
+            "scope": "quest",
+            "submission_mode": "candidate",
+            "candidate_root": str(candidate_root),
+            "next_target": next_target,
+            "method_brief": normalized_method_brief or None,
+            "selection_scores": normalized_selection_scores or None,
+            "mechanism_family": normalized_mechanism_family,
+            "change_layer": normalized_change_layer,
+            "source_lens": normalized_source_lens,
+            "foundation_ref": normalized_foundation or None,
+            "foundation_reason": foundation_reason.strip() or None,
+            "lineage_intent": normalized_lineage_intent,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "tags": [
+                "idea-candidate",
+                f"next:{next_target}",
+                *( [f"lineage:{normalized_lineage_intent}"] if normalized_lineage_intent else []),
+            ],
+        }
+        body_lines = [
+            f"# {title}",
+            "",
+            "## Candidate Summary",
+            "",
+            decision_reason.strip() or "This candidate is recorded for later ranking or promotion.",
+            "",
+            "## Problem",
+            "",
+            problem.strip() or "TBD",
+            "",
+            "## Hypothesis",
+            "",
+            hypothesis.strip() or "TBD",
+            "",
+            "## Mechanism",
+            "",
+            mechanism.strip() or "TBD",
+            "",
+            "## Method Brief",
+            "",
+            normalized_method_brief or "Not recorded",
+            "",
+            "## Expected Gain",
+            "",
+            expected_gain.strip() or "TBD",
+            "",
+            "## Selection Scores",
+            "",
+            *self._selection_score_lines(normalized_selection_scores),
+            "",
+            "## Diversity Tags",
+            "",
+            f"- Mechanism family: {normalized_mechanism_family or 'Not recorded'}",
+            f"- Change layer: {normalized_change_layer or 'Not recorded'}",
+            f"- Source lens: {normalized_source_lens or 'Not recorded'}",
+            "",
+            "## Risks",
+            "",
+        ]
+        if risks:
+            body_lines.extend([f"- {item}" for item in risks])
+        else:
+            body_lines.append("- None recorded yet.")
+        body_lines.extend(["", "## Evidence Paths", ""])
+        if evidence_paths:
+            body_lines.extend([f"- `{item}`" for item in evidence_paths])
+        else:
+            body_lines.append("- None recorded yet.")
+        body_lines.extend(["", "## Foundation", ""])
+        if normalized_foundation:
+            body_lines.extend(
+                [
+                    f"- Lineage intent: `{normalized_lineage_intent or 'manual'}`",
+                    f"- Kind: `{normalized_foundation.get('kind') or 'unknown'}`",
+                    f"- Ref: `{normalized_foundation.get('ref') or 'none'}`",
+                    f"- Branch: `{normalized_foundation.get('branch') or 'none'}`",
+                    f"- Reason: {foundation_reason.strip() or 'No explicit reason recorded.'}",
+                ]
+            )
+        else:
+            body_lines.append("- Default current head foundation.")
+        body_lines.extend(
+            [
+                "",
+                "## Next Target",
+                "",
+                next_target.strip() or "experiment",
+                "",
+            ]
+        )
+        return dump_markdown_document(metadata, "\n".join(body_lines).rstrip() + "\n")
+
+    def _build_candidate_idea_draft_markdown(
+        self,
+        *,
+        idea_id: str,
+        quest_id: str,
+        title: str,
+        problem: str,
+        hypothesis: str,
+        mechanism: str,
+        expected_gain: str,
+        risks: list[str],
+        evidence_paths: list[str],
+        decision_reason: str,
+        next_target: str,
+        candidate_root: Path,
+        method_brief: str = "",
+        selection_scores: dict[str, Any] | None = None,
+        mechanism_family: str = "",
+        change_layer: str = "",
+        source_lens: str = "",
+        foundation_ref: dict[str, Any] | None = None,
+        foundation_reason: str = "",
+        lineage_intent: str | None = None,
+        draft_markdown: str = "",
+    ) -> str:
+        normalized_foundation = dict(foundation_ref or {})
+        normalized_lineage_intent = str(lineage_intent or "").strip().lower() or None
+        normalized_method_brief = str(method_brief or "").strip()
+        normalized_selection_scores = self._normalize_selection_scores(selection_scores)
+        normalized_mechanism_family = str(mechanism_family or "").strip() or None
+        normalized_change_layer = str(change_layer or "").strip() or None
+        normalized_source_lens = str(source_lens or "").strip() or None
+        metadata = {
+            "id": f"{idea_id}-candidate-draft",
+            "type": "ideas",
+            "kind": "idea_candidate_draft",
+            "title": f"{title} Candidate Draft",
+            "idea_id": idea_id,
+            "quest_id": quest_id,
+            "scope": "quest",
+            "submission_mode": "candidate",
+            "candidate_root": str(candidate_root),
+            "next_target": next_target,
+            "method_brief": normalized_method_brief or None,
+            "selection_scores": normalized_selection_scores or None,
+            "mechanism_family": normalized_mechanism_family,
+            "change_layer": normalized_change_layer,
+            "source_lens": normalized_source_lens,
+            "foundation_ref": normalized_foundation or None,
+            "foundation_reason": foundation_reason.strip() or None,
+            "lineage_intent": normalized_lineage_intent,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "tags": [
+                "idea-candidate-draft",
+                f"next:{next_target}",
+                *( [f"lineage:{normalized_lineage_intent}"] if normalized_lineage_intent else []),
+            ],
+        }
+        body = str(draft_markdown or "").strip()
+        if not body:
+            risk_lines = "\n".join(f"- {item}" for item in risks) if risks else "- None recorded yet."
+            evidence_lines = "\n".join(f"- `{item}`" for item in evidence_paths) if evidence_paths else "- None recorded yet."
+            selection_score_lines = (
+                "\n".join(self._selection_score_lines(normalized_selection_scores))
+                if normalized_selection_scores
+                else "- Not recorded"
+            )
+            foundation_label = (
+                normalized_foundation.get("label")
+                or normalized_foundation.get("branch")
+                or normalized_foundation.get("ref")
+                or "current head"
+            )
+            body = "\n".join(
+                [
+                    f"# {title}",
+                    "",
+                    "## Executive Summary",
+                    "",
+                    decision_reason.strip() or "This candidate draft records a possible optimization line before promotion.",
+                    "",
+                    "## Limitation / Bottleneck",
+                    "",
+                    problem.strip() or "TBD",
+                    "",
+                    "## Selected Claim",
+                    "",
+                    hypothesis.strip() or "TBD",
+                    "",
+                    "## Theory and Method",
+                    "",
+                    mechanism.strip() or "TBD",
+                    "",
+                    "## Method Brief",
+                    "",
+                    normalized_method_brief or "Not recorded",
+                    "",
+                    "## Selection Scores",
+                    "",
+                    selection_score_lines,
+                    "",
+                    "## Diversity Tags",
+                    "",
+                    f"- Mechanism family: {normalized_mechanism_family or 'Not recorded'}",
+                    f"- Change layer: {normalized_change_layer or 'Not recorded'}",
+                    f"- Source lens: {normalized_source_lens or 'Not recorded'}",
                     "",
                     "## Code-Level Change Plan",
                     "",
@@ -1049,6 +1610,40 @@ class ArtifactService:
                 ]
             )
         return dump_markdown_document(metadata, body.rstrip() + "\n")
+
+    @staticmethod
+    def _normalize_selection_scores(value: object) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        normalized: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            if isinstance(raw_value, bool):
+                normalized[key] = raw_value
+                continue
+            numeric = to_number(raw_value)
+            if numeric is not None:
+                normalized[key] = int(numeric) if float(numeric).is_integer() else float(numeric)
+                continue
+            text = str(raw_value or "").strip()
+            if text:
+                normalized[key] = text
+        return normalized or None
+
+    @staticmethod
+    def _selection_score_lines(selection_scores: dict[str, Any] | None) -> list[str]:
+        if not selection_scores:
+            return ["- Not recorded"]
+        lines: list[str] = []
+        for key, value in selection_scores.items():
+            if isinstance(value, float):
+                rendered = f"{value:.4f}".rstrip("0").rstrip(".")
+            else:
+                rendered = str(value)
+            lines.append(f"- {key}: {rendered}")
+        return lines
 
     def _analysis_manifest_path(self, quest_root: Path, campaign_id: str) -> Path:
         return ensure_dir(quest_root / ".ds" / "analysis_campaigns") / f"{campaign_id}.json"
@@ -1309,6 +1904,180 @@ class ArtifactService:
     def _paper_bundle_manifest_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
         return self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "paper_bundle_manifest.json"
 
+    def _paper_evidence_ledger_path(self, quest_root: Path) -> Path:
+        return ensure_dir(quest_root / "paper") / "evidence_ledger.json"
+
+    def _paper_evidence_ledger_markdown_path(self, quest_root: Path) -> Path:
+        return ensure_dir(quest_root / "paper") / "evidence_ledger.md"
+
+    def _paper_experiment_matrix_json_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "paper_experiment_matrix.json"
+
+    def _paper_line_state_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "paper_line_state.json"
+
+    def _paper_outline_root(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+        create: bool = False,
+    ) -> Path:
+        root = self._paper_root(quest_root, workspace_root=workspace_root, create=create) / "outline"
+        return ensure_dir(root) if create else root
+
+    def _paper_outline_manifest_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return self._paper_outline_root(quest_root, workspace_root=workspace_root, create=True) / "manifest.json"
+
+    def _paper_outline_sections_root(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
+        return ensure_dir(self._paper_outline_root(quest_root, workspace_root=workspace_root, create=True) / "sections")
+
+    def _paper_outline_section_dir(
+        self,
+        quest_root: Path,
+        section_id: str,
+        *,
+        workspace_root: Path | None = None,
+    ) -> Path:
+        return ensure_dir(self._paper_outline_sections_root(quest_root, workspace_root=workspace_root) / section_id)
+
+    def _paper_active_sync_roots(self, quest_root: Path, *, workspace_root: Path | None = None) -> list[Path]:
+        roots: list[Path] = []
+        seen: set[str] = set()
+        base_roots = [quest_root] if workspace_root is None else [workspace_root, quest_root]
+        for root in base_roots:
+            paper_root = root / "paper"
+            key = str(paper_root.resolve(strict=False))
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(ensure_dir(paper_root))
+        return roots
+
+    def _paper_sync_roots(self, quest_root: Path) -> list[Path]:
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for workspace_root in self.quest_service.workspace_roots(quest_root):
+            paper_root = workspace_root / "paper"
+            if not paper_root.exists() or not paper_root.is_dir():
+                continue
+            key = str(paper_root.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(paper_root)
+        canonical = ensure_dir(quest_root / "paper")
+        canonical_key = str(canonical.resolve())
+        if canonical_key not in seen:
+            roots.append(canonical)
+        return roots
+
+    def _paper_line_id(
+        self,
+        *,
+        paper_branch: str | None,
+        outline_id: str | None,
+        source_run_id: str | None,
+    ) -> str:
+        seed = "::".join(
+            [
+                str(paper_branch or "").strip() or "paper",
+                str(outline_id or "").strip() or "outline",
+                str(source_run_id or "").strip() or "run",
+            ]
+        )
+        return slugify(seed, "paper-line")
+
+    @staticmethod
+    def _paper_ready_status(status: object) -> bool:
+        normalized = str(status or "").strip().lower()
+        return normalized in {"ready", "completed", "analyzed", "written", "recorded", "supported"}
+
+    def _normalize_outline_evidence_contract(self, payload: object) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "main_text_items_must_be_ready": bool(payload.get("main_text_items_must_be_ready", True)),
+            "appendix_items_may_be_ready_or_reference_only": bool(
+                payload.get("appendix_items_may_be_ready_or_reference_only", True)
+            ),
+            "record_results_back_into_outline": bool(payload.get("record_results_back_into_outline", True)),
+            "result_table_required": bool(payload.get("result_table_required", True)),
+        }
+
+    def _normalize_outline_result_table(self, values: object) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for raw in values or [] if isinstance(values, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            row = {
+                "item_id": str(raw.get("item_id") or "").strip() or None,
+                "title": str(raw.get("title") or "").strip() or None,
+                "kind": str(raw.get("kind") or "").strip() or None,
+                "paper_role": str(raw.get("paper_role") or raw.get("paper_placement") or "").strip() or None,
+                "status": str(raw.get("status") or "").strip() or None,
+                "claim_links": self._normalize_string_list(raw.get("claim_links")),
+                "setup_note": str(raw.get("setup_note") or raw.get("setup") or "").strip() or None,
+                "metric_summary": str(raw.get("metric_summary") or "").strip() or None,
+                "result_summary": str(raw.get("result_summary") or "").strip() or None,
+                "impact_summary": str(raw.get("impact_summary") or raw.get("claim_impact") or "").strip() or None,
+                "source_paths": self._normalize_string_list(raw.get("source_paths")),
+                "updated_at": str(raw.get("updated_at") or "").strip() or None,
+            }
+            if row["item_id"] or row["title"] or row["result_summary"]:
+                rows.append(row)
+        return rows
+
+    def _normalize_outline_sections(
+        self,
+        values: object,
+        *,
+        experimental_designs: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        sections: list[dict[str, Any]] = []
+        if isinstance(values, list):
+            for index, raw in enumerate(values, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                title = str(raw.get("title") or raw.get("name") or raw.get("section_id") or "").strip()
+                section_id = str(raw.get("section_id") or "").strip() or slugify(title or f"section-{index}", f"section-{index}")
+                if not title:
+                    title = section_id
+                sections.append(
+                    {
+                        "section_id": section_id,
+                        "title": title,
+                        "paper_role": str(raw.get("paper_role") or raw.get("paper_placement") or "main_text").strip() or "main_text",
+                        "claims": self._normalize_string_list(raw.get("claims")),
+                        "required_items": self._normalize_string_list(raw.get("required_items")),
+                        "optional_items": self._normalize_string_list(raw.get("optional_items")),
+                        "status": str(raw.get("status") or "planned").strip() or "planned",
+                        "note": str(raw.get("note") or "").strip() or None,
+                        "result_table": self._normalize_outline_result_table(raw.get("result_table")),
+                    }
+                )
+        if sections:
+            return sections
+        generated: list[dict[str, Any]] = []
+        for index, item in enumerate(experimental_designs or [], start=1):
+            title = str(item or "").strip()
+            if not title:
+                continue
+            generated.append(
+                {
+                    "section_id": slugify(title, f"section-{index}"),
+                    "title": title,
+                    "paper_role": "main_text",
+                    "claims": [],
+                    "required_items": [],
+                    "optional_items": [],
+                    "status": "planned",
+                    "note": None,
+                    "result_table": [],
+                }
+            )
+        return generated
+
     def _paper_baseline_inventory_path(self, quest_root: Path, *, workspace_root: Path | None = None) -> Path:
         return self._paper_root(quest_root, workspace_root=workspace_root, create=True) / "baseline_inventory.json"
 
@@ -1549,7 +2318,7 @@ class ArtifactService:
                 suffix = path.stem.removeprefix("outline-")
                 if suffix.isdigit():
                     max_index = max(max_index, int(suffix))
-        selected_outline = read_json(self._paper_selected_outline_path(quest_root), {})
+        _, selected_outline = self._read_selected_outline_record(quest_root)
         selected_id = str((selected_outline or {}).get("outline_id") or "").strip()
         if selected_id.startswith("outline-") and selected_id.removeprefix("outline-").isdigit():
             max_index = max(max_index, int(selected_id.removeprefix("outline-")))
@@ -1582,12 +2351,19 @@ class ArtifactService:
                 continue
             normalized_items.append(
                 {
+                    "exp_id": str(raw.get("exp_id") or "").strip() or None,
                     "todo_id": str(raw.get("todo_id") or raw.get("slice_id") or "").strip() or None,
                     "slice_id": str(raw.get("slice_id") or "").strip() or None,
                     "title": str(raw.get("title") or "").strip() or None,
                     "status": str(raw.get("status") or "pending").strip() or "pending",
                     "research_question": str(raw.get("research_question") or "").strip() or None,
                     "experimental_design": str(raw.get("experimental_design") or "").strip() or None,
+                    "tier": str(raw.get("tier") or "").strip() or None,
+                    "paper_placement": str(raw.get("paper_placement") or "").strip() or None,
+                    "paper_role": str(raw.get("paper_role") or raw.get("paper_placement") or "").strip() or None,
+                    "section_id": str(raw.get("section_id") or "").strip() or None,
+                    "item_id": str(raw.get("item_id") or raw.get("exp_id") or raw.get("slice_id") or "").strip() or None,
+                    "claim_links": self._normalize_string_list(raw.get("claim_links")),
                     "completion_condition": str(raw.get("completion_condition") or "").strip() or None,
                     "why_now": str(raw.get("why_now") or "").strip() or None,
                     "success_criteria": str(raw.get("success_criteria") or "").strip() or None,
@@ -1612,6 +2388,11 @@ class ArtifactService:
         created_at: str | None = None,
     ) -> dict[str, Any]:
         normalized_detailed = dict(detailed_outline or {})
+        experimental_designs = self._normalize_string_list(normalized_detailed.get("experimental_designs"))
+        sections = self._normalize_outline_sections(
+            normalized_detailed.get("sections"),
+            experimental_designs=experimental_designs,
+        )
         resolved_title = (
             str(title or normalized_detailed.get("title") or outline_id).strip()
             or outline_id
@@ -1629,14 +2410,987 @@ class ArtifactService:
                 "abstract": str(normalized_detailed.get("abstract") or "").strip() or None,
                 "research_questions": self._normalize_string_list(normalized_detailed.get("research_questions")),
                 "methodology": str(normalized_detailed.get("methodology") or "").strip() or None,
-                "experimental_designs": self._normalize_string_list(normalized_detailed.get("experimental_designs")),
+                "experimental_designs": experimental_designs,
                 "contributions": self._normalize_string_list(normalized_detailed.get("contributions")),
             },
+            "sections": sections,
+            "evidence_contract": self._normalize_outline_evidence_contract(
+                normalized_detailed.get("evidence_contract")
+            ),
             "review_result": str(review_result or "").strip() or None,
             "created_at": created_at or utc_now(),
             "updated_at": utc_now(),
         }
         return record
+
+    def _render_outline_section_markdown(self, section: dict[str, Any]) -> str:
+        lines = [
+            f"# {str(section.get('title') or section.get('section_id') or 'Section').strip() or 'Section'}",
+            "",
+            f"- Section id: `{str(section.get('section_id') or 'unknown').strip() or 'unknown'}`",
+            f"- Paper role: `{str(section.get('paper_role') or 'main_text').strip() or 'main_text'}`",
+            f"- Status: `{str(section.get('status') or 'planned').strip() or 'planned'}`",
+            "",
+            "## Claims",
+            "",
+        ]
+        claims = self._normalize_string_list(section.get("claims"))
+        lines.extend([f"- `{item}`" for item in claims] or ["- None recorded."])
+        lines.extend(["", "## Required Items", ""])
+        required_items = self._normalize_string_list(section.get("required_items"))
+        lines.extend([f"- `{item}`" for item in required_items] or ["- None recorded."])
+        lines.extend(["", "## Optional Items", ""])
+        optional_items = self._normalize_string_list(section.get("optional_items"))
+        lines.extend([f"- `{item}`" for item in optional_items] or ["- None recorded."])
+        lines.extend(["", "## Note", "", str(section.get("note") or "Not recorded."), ""])
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _render_outline_section_setup_markdown(self, section: dict[str, Any]) -> str:
+        rows = [dict(item) for item in (section.get("result_table") or []) if isinstance(item, dict)]
+        setup_notes = []
+        for row in rows:
+            setup_text = str(row.get("setup_note") or row.get("setup") or "").strip()
+            if setup_text and setup_text not in setup_notes:
+                setup_notes.append(setup_text)
+        lines = [
+            f"# Setup · {str(section.get('title') or section.get('section_id') or 'Section').strip() or 'Section'}",
+            "",
+            "## Recorded Setup Notes",
+            "",
+        ]
+        lines.extend([f"- {item}" for item in setup_notes] or ["- None recorded yet."])
+        lines.append("")
+        return "\n".join(lines)
+
+    def _render_outline_section_findings_markdown(self, section: dict[str, Any]) -> str:
+        rows = [dict(item) for item in (section.get("result_table") or []) if isinstance(item, dict)]
+        lines = [
+            f"# Findings · {str(section.get('title') or section.get('section_id') or 'Section').strip() or 'Section'}",
+            "",
+            "## Result Highlights",
+            "",
+        ]
+        highlights = []
+        for row in rows:
+            result_summary = str(row.get("result_summary") or "").strip()
+            metric_summary = str(row.get("metric_summary") or "").strip()
+            title = str(row.get("title") or row.get("item_id") or "item").strip() or "item"
+            if result_summary or metric_summary:
+                suffix = f" ({metric_summary})" if metric_summary else ""
+                highlights.append(f"- `{title}`: {result_summary or 'No summary recorded.'}{suffix}")
+        lines.extend(highlights or ["- None recorded yet."])
+        lines.append("")
+        return "\n".join(lines)
+
+    def _render_outline_section_impact_markdown(self, section: dict[str, Any]) -> str:
+        rows = [dict(item) for item in (section.get("result_table") or []) if isinstance(item, dict)]
+        impacts = []
+        for row in rows:
+            impact_text = str(row.get("impact_summary") or row.get("claim_impact") or "").strip()
+            title = str(row.get("title") or row.get("item_id") or "item").strip() or "item"
+            if impact_text:
+                impacts.append(f"- `{title}`: {impact_text}")
+        lines = [
+            f"# Impact · {str(section.get('title') or section.get('section_id') or 'Section').strip() or 'Section'}",
+            "",
+            "## Claim Links",
+            "",
+        ]
+        claim_links = self._normalize_string_list(section.get("claims"))
+        lines.extend([f"- `{item}`" for item in claim_links] or ["- None recorded."])
+        lines.extend(["", "## Impact Notes", ""])
+        lines.extend(impacts or ["- None recorded yet."])
+        lines.append("")
+        return "\n".join(lines)
+
+    def _outline_folder_exists(self, quest_root: Path, *, workspace_root: Path | None = None) -> bool:
+        root = self._paper_outline_root(quest_root, workspace_root=workspace_root, create=False)
+        return (root / "manifest.json").exists()
+
+    def _write_outline_folder_from_record(
+        self,
+        quest_root: Path,
+        record: dict[str, Any],
+        *,
+        workspace_root: Path | None = None,
+    ) -> None:
+        sections = self._normalize_outline_sections(
+            record.get("sections"),
+            experimental_designs=self._normalize_string_list(
+                ((record.get("detailed_outline") or {}) if isinstance(record.get("detailed_outline"), dict) else {}).get(
+                    "experimental_designs"
+                )
+            ),
+        )
+        manifest = {
+            "schema_version": 1,
+            "outline_id": str(record.get("outline_id") or "").strip() or None,
+            "status": str(record.get("status") or "selected").strip() or "selected",
+            "title": str(record.get("title") or "").strip() or None,
+            "note": str(record.get("note") or "").strip() or None,
+            "story": str(record.get("story") or "").strip() or None,
+            "ten_questions": self._normalize_string_list(record.get("ten_questions")),
+            "detailed_outline": (
+                dict(record.get("detailed_outline") or {})
+                if isinstance(record.get("detailed_outline"), dict)
+                else {}
+            ),
+            "evidence_contract": self._normalize_outline_evidence_contract(record.get("evidence_contract")),
+            "section_order": [
+                str(section.get("section_id") or "").strip()
+                for section in sections
+                if str(section.get("section_id") or "").strip()
+            ],
+            "sections": [
+                {
+                    "section_id": str(section.get("section_id") or "").strip() or None,
+                    "title": str(section.get("title") or "").strip() or None,
+                    "paper_role": str(section.get("paper_role") or "main_text").strip() or "main_text",
+                    "claims": self._normalize_string_list(section.get("claims")),
+                    "required_items": self._normalize_string_list(section.get("required_items")),
+                    "optional_items": self._normalize_string_list(section.get("optional_items")),
+                    "status": str(section.get("status") or "planned").strip() or "planned",
+                    "note": str(section.get("note") or "").strip() or None,
+                }
+                for section in sections
+            ],
+            "created_at": str(record.get("created_at") or "").strip() or utc_now(),
+            "updated_at": utc_now(),
+        }
+        for paper_root in self._paper_active_sync_roots(quest_root, workspace_root=workspace_root):
+            outline_root = ensure_dir(paper_root / "outline")
+            write_json(outline_root / "manifest.json", manifest)
+            sections_root = ensure_dir(outline_root / "sections")
+            expected: set[str] = set()
+            for section in sections:
+                section_id = str(section.get("section_id") or "").strip()
+                if not section_id:
+                    continue
+                expected.add(section_id)
+                section_dir = ensure_dir(sections_root / section_id)
+                write_text(section_dir / "section.md", self._render_outline_section_markdown(section))
+                write_json(
+                    section_dir / "result_table.json",
+                    {
+                        "schema_version": 1,
+                        "section_id": section_id,
+                        "title": str(section.get("title") or section_id).strip() or section_id,
+                        "rows": [dict(item) for item in (section.get("result_table") or []) if isinstance(item, dict)],
+                        "updated_at": utc_now(),
+                    },
+                )
+                write_text(section_dir / "experiment_setup.md", self._render_outline_section_setup_markdown(section))
+                write_text(section_dir / "findings.md", self._render_outline_section_findings_markdown(section))
+                write_text(section_dir / "impact.md", self._render_outline_section_impact_markdown(section))
+            for existing in sorted(sections_root.iterdir()):
+                if not existing.is_dir() or existing.name in expected:
+                    continue
+                shutil.rmtree(existing)
+
+    def _read_outline_folder_to_record(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+    ) -> dict[str, Any]:
+        outline_root = self._paper_outline_root(quest_root, workspace_root=workspace_root, create=False)
+        manifest_path = outline_root / "manifest.json"
+        manifest = read_json(manifest_path, {})
+        if not isinstance(manifest, dict) or not manifest:
+            return {}
+        manifest_sections = [dict(item) for item in (manifest.get("sections") or []) if isinstance(item, dict)]
+        section_order = [
+            str(item).strip() for item in (manifest.get("section_order") or []) if str(item).strip()
+        ]
+        by_id = {
+            str(item.get("section_id") or "").strip(): dict(item)
+            for item in manifest_sections
+            if str(item.get("section_id") or "").strip()
+        }
+        for section_id in section_order:
+            by_id.setdefault(
+                section_id,
+                {
+                    "section_id": section_id,
+                    "title": section_id,
+                    "paper_role": "main_text",
+                    "claims": [],
+                    "required_items": [],
+                    "optional_items": [],
+                    "status": "planned",
+                },
+            )
+        sections_root = outline_root / "sections"
+        if sections_root.exists():
+            for section_dir in sorted(sections_root.iterdir()):
+                if not section_dir.is_dir():
+                    continue
+                section_id = section_dir.name
+                section = dict(by_id.get(section_id) or {})
+                section.setdefault("section_id", section_id)
+                section.setdefault("title", section_id)
+                result_table_payload = read_json(section_dir / "result_table.json", {})
+                rows = result_table_payload.get("rows") if isinstance(result_table_payload, dict) else []
+                section["result_table"] = self._normalize_outline_result_table(rows)
+                by_id[section_id] = section
+        ordered_sections: list[dict[str, Any]] = []
+        emitted: set[str] = set()
+        for section_id in section_order:
+            section = by_id.get(section_id)
+            if section is None:
+                continue
+            ordered_sections.append(section)
+            emitted.add(section_id)
+        for section_id, section in by_id.items():
+            if section_id in emitted:
+                continue
+            ordered_sections.append(section)
+        record = {
+            "schema_version": 1,
+            "outline_id": str(manifest.get("outline_id") or "").strip() or None,
+            "status": str(manifest.get("status") or "selected").strip() or "selected",
+            "title": str(manifest.get("title") or "").strip() or None,
+            "note": str(manifest.get("note") or "").strip() or None,
+            "story": str(manifest.get("story") or "").strip() or None,
+            "ten_questions": self._normalize_string_list(manifest.get("ten_questions")),
+            "detailed_outline": (
+                dict(manifest.get("detailed_outline") or {})
+                if isinstance(manifest.get("detailed_outline"), dict)
+                else {}
+            ),
+            "sections": ordered_sections,
+            "evidence_contract": self._normalize_outline_evidence_contract(manifest.get("evidence_contract")),
+            "created_at": str(manifest.get("created_at") or "").strip() or None,
+            "updated_at": str(manifest.get("updated_at") or "").strip() or utc_now(),
+        }
+        return record
+
+    def _read_selected_outline_record(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+    ) -> tuple[Path | None, dict[str, Any]]:
+        candidates: list[tuple[tuple[str, float], Path, dict[str, Any]]] = []
+        for paper_root in self._paper_sync_roots(quest_root):
+            outline_root = paper_root / "outline"
+            manifest_path = outline_root / "manifest.json"
+            if manifest_path.exists():
+                record = self._read_outline_folder_to_record(quest_root, workspace_root=paper_root.parent)
+                if record:
+                    candidates.append(
+                        (
+                            (
+                                str(record.get("updated_at") or record.get("created_at") or ""),
+                                manifest_path.stat().st_mtime if manifest_path.exists() else 0.0,
+                            ),
+                            manifest_path,
+                            record,
+                        )
+                    )
+                    continue
+            selected_outline_path = paper_root / "selected_outline.json"
+            if not selected_outline_path.exists():
+                continue
+            payload = read_json(selected_outline_path, {})
+            if not isinstance(payload, dict) or not payload:
+                continue
+            candidates.append(
+                (
+                    (
+                        str(payload.get("updated_at") or payload.get("created_at") or ""),
+                        selected_outline_path.stat().st_mtime if selected_outline_path.exists() else 0.0,
+                    ),
+                    selected_outline_path,
+                    payload,
+                )
+            )
+        if not candidates:
+            return None, {}
+        candidates.sort(key=lambda item: item[0])
+        _, path, payload = candidates[-1]
+        return path, payload
+
+    def _compile_selected_outline_json(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+    ) -> dict[str, Any]:
+        record = self._read_outline_folder_to_record(quest_root, workspace_root=workspace_root)
+        if not record:
+            return {}
+        for paper_root in self._paper_active_sync_roots(quest_root, workspace_root=workspace_root):
+            write_json(paper_root / "selected_outline.json", record)
+        return record
+
+    def _read_paper_evidence_ledger(self, quest_root: Path) -> dict[str, Any]:
+        candidates: list[tuple[tuple[str, float], dict[str, Any]]] = []
+        for paper_root in self._paper_sync_roots(quest_root):
+            path = paper_root / "evidence_ledger.json"
+            if not path.exists():
+                continue
+            payload = read_json(path, {})
+            if not isinstance(payload, dict) or not payload:
+                continue
+            candidates.append(
+                (
+                    (
+                        str(payload.get("updated_at") or payload.get("created_at") or ""),
+                        path.stat().st_mtime if path.exists() else 0.0,
+                    ),
+                    payload,
+                )
+            )
+        if not candidates:
+            return {
+                "schema_version": 1,
+                "selected_outline_ref": None,
+                "items": [],
+                "updated_at": utc_now(),
+            }
+        candidates.sort(key=lambda item: item[0])
+        payload = candidates[-1][1]
+        items = [dict(item) for item in (payload.get("items") or []) if isinstance(item, dict)]
+        return {
+            "schema_version": 1,
+            "selected_outline_ref": str(payload.get("selected_outline_ref") or "").strip() or None,
+            "items": items,
+            "updated_at": str(payload.get("updated_at") or payload.get("created_at") or "").strip() or utc_now(),
+        }
+
+    def _paper_evidence_key_metrics(
+        self,
+        *,
+        metric_rows: list[dict[str, Any]] | None = None,
+        metrics_summary: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in metric_rows or []:
+            if not isinstance(row, dict):
+                continue
+            metric_id = str(row.get("metric_id") or row.get("name") or "").strip()
+            if not metric_id or metric_id in seen:
+                continue
+            seen.add(metric_id)
+            rows.append(
+                {
+                    "metric_id": metric_id,
+                    "value": row.get("value"),
+                    "direction": str(row.get("direction") or "").strip() or None,
+                    "decimals": row.get("decimals"),
+                }
+            )
+            if len(rows) >= 6:
+                return rows
+        for metric_id, value in (metrics_summary or {}).items():
+            text = str(metric_id or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            rows.append({"metric_id": text, "value": value, "direction": None, "decimals": None})
+            if len(rows) >= 6:
+                break
+        return rows
+
+    def _paper_metric_summary_text(self, key_metrics: list[dict[str, Any]] | None) -> str | None:
+        parts: list[str] = []
+        for item in key_metrics or []:
+            if not isinstance(item, dict):
+                continue
+            metric_id = str(item.get("metric_id") or "").strip()
+            if not metric_id:
+                continue
+            parts.append(
+                f"{metric_id}={self._format_metric_value(item.get('value'), item.get('decimals'))}"
+            )
+        return "; ".join(parts) if parts else None
+
+    def _render_paper_evidence_ledger_markdown(self, payload: dict[str, Any]) -> str:
+        items = [dict(item) for item in (payload.get("items") or []) if isinstance(item, dict)]
+        lines = [
+            "# Paper Evidence Ledger",
+            "",
+            f"- Selected outline: `{str(payload.get('selected_outline_ref') or 'none').strip() or 'none'}`",
+            f"- Item count: `{len(items)}`",
+            f"- Updated at: `{str(payload.get('updated_at') or utc_now()).strip() or utc_now()}`",
+            "",
+            "| Item | Kind | Section | Role | Status | Metrics | Source |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for item in items:
+            metrics_text = self._paper_metric_summary_text(
+                [dict(metric) for metric in (item.get("key_metrics") or []) if isinstance(metric, dict)]
+            ) or "-"
+            source_paths = [str(path).strip() for path in (item.get("source_paths") or []) if str(path).strip()]
+            source_text = ", ".join(f"`{path}`" for path in source_paths[:2]) or "-"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        f"`{str(item.get('item_id') or 'unknown').strip() or 'unknown'}`",
+                        str(item.get("kind") or "-"),
+                        str(item.get("section_id") or "-"),
+                        str(item.get("paper_role") or "-"),
+                        str(item.get("status") or "-"),
+                        metrics_text,
+                        source_text,
+                    ]
+                )
+                + " |"
+            )
+        if not items:
+            lines.extend(["| - | - | - | - | - | - | - |", ""])
+        else:
+            lines.append("")
+        for item in items:
+            lines.extend(
+                [
+                    f"## {str(item.get('item_id') or 'unknown').strip() or 'unknown'}",
+                    "",
+                    f"- Title: {str(item.get('title') or item.get('item_id') or 'Unknown').strip() or 'Unknown'}",
+                    f"- Kind: `{str(item.get('kind') or 'unknown').strip() or 'unknown'}`",
+                    f"- Section: `{str(item.get('section_id') or 'unmapped').strip() or 'unmapped'}`",
+                    f"- Role: `{str(item.get('paper_role') or 'unmapped').strip() or 'unmapped'}`",
+                    f"- Status: `{str(item.get('status') or 'unknown').strip() or 'unknown'}`",
+                    f"- Claims: {', '.join(str(value).strip() for value in (item.get('claim_links') or []) if str(value).strip()) or 'none'}",
+                    "",
+                    "### Setup",
+                    "",
+                    str(item.get("setup") or "Not recorded."),
+                    "",
+                    "### Result Summary",
+                    "",
+                    str(item.get("result_summary") or "Not recorded."),
+                    "",
+                    "### Source Paths",
+                    "",
+                ]
+            )
+            if source_paths := [str(path).strip() for path in (item.get("source_paths") or []) if str(path).strip()]:
+                lines.extend([f"- `{path}`" for path in source_paths])
+            else:
+                lines.append("- None recorded.")
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _write_paper_evidence_ledger(
+        self,
+        quest_root: Path,
+        payload: dict[str, Any],
+        *,
+        workspace_root: Path | None = None,
+    ) -> dict[str, Any]:
+        normalized = {
+            "schema_version": 1,
+            "selected_outline_ref": str(payload.get("selected_outline_ref") or "").strip() or None,
+            "items": [dict(item) for item in (payload.get("items") or []) if isinstance(item, dict)],
+            "updated_at": utc_now(),
+        }
+        markdown = self._render_paper_evidence_ledger_markdown(normalized)
+        for paper_root in self._paper_active_sync_roots(quest_root, workspace_root=workspace_root):
+            write_json(paper_root / "evidence_ledger.json", normalized)
+            write_text(paper_root / "evidence_ledger.md", markdown)
+        return normalized
+
+    def _read_selected_outline_for_sync(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+    ) -> tuple[Path | None, dict[str, Any]]:
+        return self._read_selected_outline_record(quest_root, workspace_root=workspace_root)
+
+    def _write_selected_outline_sync(
+        self,
+        quest_root: Path,
+        payload: dict[str, Any],
+        *,
+        workspace_root: Path | None = None,
+    ) -> None:
+        outline_id = str(payload.get("outline_id") or "").strip()
+        self._write_outline_folder_from_record(quest_root, payload, workspace_root=workspace_root)
+        compiled = self._compile_selected_outline_json(quest_root, workspace_root=workspace_root) or dict(payload)
+        canonical_path = ensure_dir(quest_root / "paper") / "selected_outline.json"
+        write_json(canonical_path, compiled)
+        for paper_root in self._paper_active_sync_roots(quest_root, workspace_root=workspace_root):
+            path = paper_root / "selected_outline.json"
+            if path.resolve() == canonical_path.resolve():
+                continue
+            existing = read_json(path, {}) if path.exists() else {}
+            if path.exists():
+                existing_outline_id = str(existing.get("outline_id") or "").strip() if isinstance(existing, dict) else ""
+                if existing_outline_id and existing_outline_id != outline_id:
+                    continue
+            write_json(path, compiled)
+
+    def _outline_status_from_rows(self, section: dict[str, Any]) -> str:
+        rows = [dict(item) for item in (section.get("result_table") or []) if isinstance(item, dict)]
+        by_item = {
+            str(item.get("item_id") or "").strip(): str(item.get("status") or "").strip() or "pending"
+            for item in rows
+            if str(item.get("item_id") or "").strip()
+        }
+        required_items = self._normalize_string_list(section.get("required_items"))
+        if required_items:
+            ready_count = sum(1 for item_id in required_items if self._paper_ready_status(by_item.get(item_id)))
+            present_count = sum(1 for item_id in required_items if item_id in by_item)
+            if ready_count == len(required_items):
+                return "ready"
+            if ready_count > 0:
+                return "partial"
+            if present_count > 0:
+                return "pending"
+            return "planned"
+        if any(self._paper_ready_status(item.get("status")) for item in rows):
+            return "ready"
+        if rows:
+            return "pending"
+        return str(section.get("status") or "planned").strip() or "planned"
+
+    def _sync_outline_sections(
+        self,
+        quest_root: Path,
+        *,
+        items: list[dict[str, Any]],
+        workspace_root: Path | None = None,
+    ) -> dict[str, Any] | None:
+        outline_path, record = self._read_selected_outline_for_sync(quest_root, workspace_root=workspace_root)
+        if outline_path is None or not record:
+            return None
+        detailed_outline = (
+            dict(record.get("detailed_outline") or {})
+            if isinstance(record.get("detailed_outline"), dict)
+            else {}
+        )
+        sections = self._normalize_outline_sections(
+            record.get("sections"),
+            experimental_designs=self._normalize_string_list(detailed_outline.get("experimental_designs")),
+        )
+        if not sections:
+            sections = self._normalize_outline_sections([], experimental_designs=["Main Results"])
+        by_id = {
+            str(section.get("section_id") or "").strip(): dict(section)
+            for section in sections
+            if str(section.get("section_id") or "").strip()
+        }
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            item_id = str(raw.get("item_id") or "").strip()
+            if not item_id:
+                continue
+            section_id = str(raw.get("section_id") or "").strip() or "main-results"
+            section = dict(by_id.get(section_id) or {})
+            if not section:
+                section = {
+                    "section_id": section_id,
+                    "title": str(raw.get("section_title") or raw.get("title") or section_id).strip() or section_id,
+                    "paper_role": str(raw.get("paper_role") or "main_text").strip() or "main_text",
+                    "claims": [],
+                    "required_items": [],
+                    "optional_items": [],
+                    "status": "planned",
+                    "note": None,
+                    "result_table": [],
+                }
+            claims = self._normalize_string_list(section.get("claims"))
+            for claim in self._normalize_string_list(raw.get("claim_links")):
+                if claim not in claims:
+                    claims.append(claim)
+            section["claims"] = claims
+            paper_role = str(raw.get("paper_role") or section.get("paper_role") or "main_text").strip() or "main_text"
+            section["paper_role"] = paper_role
+            required_items = self._normalize_string_list(section.get("required_items"))
+            optional_items = self._normalize_string_list(section.get("optional_items"))
+            target_list = required_items if paper_role == "main_text" else optional_items
+            if item_id not in target_list:
+                target_list.append(item_id)
+            if paper_role == "main_text":
+                optional_items = [value for value in optional_items if value != item_id]
+            else:
+                required_items = [value for value in required_items if value != item_id]
+            section["required_items"] = required_items
+            section["optional_items"] = optional_items
+            row = {
+                "item_id": item_id,
+                "title": str(raw.get("title") or item_id).strip() or item_id,
+                "kind": str(raw.get("kind") or "").strip() or None,
+                "paper_role": paper_role,
+                "status": str(raw.get("status") or "pending").strip() or "pending",
+                "claim_links": self._normalize_string_list(raw.get("claim_links")),
+                "setup_note": str(raw.get("setup_note") or raw.get("setup") or "").strip() or None,
+                "metric_summary": str(raw.get("metric_summary") or "").strip() or None,
+                "result_summary": str(raw.get("result_summary") or "").strip() or None,
+                "impact_summary": str(raw.get("impact_summary") or raw.get("claim_impact") or "").strip() or None,
+                "source_paths": self._normalize_string_list(raw.get("source_paths")),
+                "updated_at": utc_now(),
+            }
+            existing_rows = [
+                dict(item) for item in (section.get("result_table") or []) if isinstance(item, dict)
+            ]
+            merged_rows: list[dict[str, Any]] = []
+            replaced = False
+            for existing in existing_rows:
+                if str(existing.get("item_id") or "").strip() != item_id:
+                    merged_rows.append(existing)
+                    continue
+                merged = dict(existing)
+                for key, value in row.items():
+                    if value in (None, "", []):
+                        continue
+                    merged[key] = value
+                merged_rows.append(merged)
+                replaced = True
+            if not replaced:
+                merged_rows.append(row)
+            section["result_table"] = merged_rows
+            section["status"] = self._outline_status_from_rows(section)
+            by_id[section_id] = section
+        record["sections"] = list(by_id.values())
+        record["evidence_contract"] = self._normalize_outline_evidence_contract(record.get("evidence_contract"))
+        record["updated_at"] = utc_now()
+        self._write_selected_outline_sync(quest_root, record, workspace_root=workspace_root)
+        return record
+
+    @staticmethod
+    def _paper_evidence_item_key(item: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(item.get("item_id") or "").strip(),
+            str(item.get("campaign_id") or "").strip(),
+            str(item.get("slice_id") or item.get("run_id") or "").strip(),
+        )
+
+    def _upsert_paper_evidence_item(
+        self,
+        quest_root: Path,
+        item: dict[str, Any],
+        *,
+        workspace_root: Path | None = None,
+    ) -> dict[str, Any]:
+        ledger = self._read_paper_evidence_ledger(quest_root)
+        items = [dict(entry) for entry in (ledger.get("items") or []) if isinstance(entry, dict)]
+        key = self._paper_evidence_item_key(item)
+        merged_items: list[dict[str, Any]] = []
+        replaced = False
+        for existing in items:
+            if self._paper_evidence_item_key(existing) != key:
+                merged_items.append(existing)
+                continue
+            merged = dict(existing)
+            for field, value in item.items():
+                if value in (None, "", []):
+                    continue
+                merged[field] = value
+            merged["updated_at"] = utc_now()
+            merged_items.append(merged)
+            replaced = True
+        if not replaced:
+            merged_items.append({**item, "created_at": utc_now(), "updated_at": utc_now()})
+        merged_items.sort(
+            key=lambda payload: (
+                str(payload.get("section_id") or ""),
+                str(payload.get("item_id") or ""),
+                str(payload.get("updated_at") or ""),
+            )
+        )
+        written = self._write_paper_evidence_ledger(
+            quest_root,
+            {
+                "selected_outline_ref": item.get("selected_outline_ref") or ledger.get("selected_outline_ref"),
+                "items": merged_items,
+            },
+            workspace_root=workspace_root,
+        )
+        metric_summary = self._paper_metric_summary_text(
+            [dict(metric) for metric in (item.get("key_metrics") or []) if isinstance(metric, dict)]
+        )
+        self._sync_outline_sections(
+            quest_root,
+            items=[
+                {
+                    "item_id": item.get("item_id"),
+                    "title": item.get("title"),
+                    "kind": item.get("kind"),
+                    "paper_role": item.get("paper_role"),
+                    "status": item.get("status"),
+                    "claim_links": item.get("claim_links"),
+                    "section_id": item.get("section_id"),
+                    "setup": item.get("setup"),
+                    "metric_summary": metric_summary,
+                    "result_summary": item.get("result_summary"),
+                    "claim_impact": item.get("claim_impact"),
+                    "source_paths": item.get("source_paths"),
+                }
+            ],
+            workspace_root=workspace_root,
+        )
+        self._write_paper_line_state(quest_root, workspace_root=workspace_root)
+        return written
+
+    def _paper_bundle_gate_status(self, quest_root: Path, *, workspace_root: Path | None = None) -> dict[str, Any]:
+        outline_path, selected_outline = self._read_selected_outline_for_sync(quest_root, workspace_root=workspace_root)
+        selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
+        detailed_outline = (
+            dict(selected_outline.get("detailed_outline") or {})
+            if isinstance(selected_outline.get("detailed_outline"), dict)
+            else {}
+        )
+        sections = self._normalize_outline_sections(
+            selected_outline.get("sections"),
+            experimental_designs=self._normalize_string_list(detailed_outline.get("experimental_designs")),
+        )
+        ledger = self._read_paper_evidence_ledger(quest_root)
+        ledger_items = [dict(item) for item in (ledger.get("items") or []) if isinstance(item, dict)]
+        ledger_by_item = {
+            str(item.get("item_id") or "").strip(): dict(item)
+            for item in ledger_items
+            if str(item.get("item_id") or "").strip()
+        }
+        unresolved_required_items: list[dict[str, Any]] = []
+        ready_sections = 0
+        for section in sections:
+            required_items = self._normalize_string_list(section.get("required_items"))
+            section_ready = True
+            for item_id in required_items:
+                ledger_item = ledger_by_item.get(item_id)
+                if ledger_item is None or not self._paper_ready_status(ledger_item.get("status")):
+                    unresolved_required_items.append(
+                        {
+                            "section_id": section.get("section_id"),
+                            "section_title": section.get("title"),
+                            "item_id": item_id,
+                            "status": ledger_item.get("status") if isinstance(ledger_item, dict) else None,
+                        }
+                    )
+                    section_ready = False
+            if section_ready and required_items:
+                ready_sections += 1
+        selected_outline_ref = str(selected_outline.get("outline_id") or ledger.get("selected_outline_ref") or "").strip() or None
+        completed_analysis: list[dict[str, Any]] = []
+        campaigns_root = quest_root / ".ds" / "analysis_campaigns"
+        if campaigns_root.exists():
+            for path in sorted(campaigns_root.glob("analysis-*.json")):
+                manifest = read_json(path, {})
+                if not isinstance(manifest, dict) or not manifest:
+                    continue
+                manifest_outline_ref = str(manifest.get("selected_outline_ref") or "").strip() or None
+                if selected_outline_ref and manifest_outline_ref != selected_outline_ref:
+                    continue
+                for slice_item in manifest.get("slices") or []:
+                    if not isinstance(slice_item, dict):
+                        continue
+                    status = str(slice_item.get("status") or "").strip().lower()
+                    if status in {"", "pending"}:
+                        continue
+                    completed_analysis.append(
+                        {
+                            "campaign_id": str(manifest.get("campaign_id") or "").strip() or None,
+                            "slice_id": str(slice_item.get("slice_id") or "").strip() or None,
+                            "item_id": str(slice_item.get("item_id") or "").strip() or None,
+                            "section_id": str(slice_item.get("section_id") or "").strip() or None,
+                            "status": status,
+                            "title": str(slice_item.get("title") or slice_item.get("slice_id") or "").strip() or None,
+                        }
+                    )
+        unmapped_completed_items: list[dict[str, Any]] = []
+        for item in completed_analysis:
+            item_id = str(item.get("item_id") or "").strip()
+            if not item_id:
+                unmapped_completed_items.append(item)
+                continue
+            ledger_item = ledger_by_item.get(item_id)
+            if ledger_item is None or not str(ledger_item.get("section_id") or "").strip():
+                unmapped_completed_items.append(item)
+        return {
+            "ok": not unresolved_required_items and not unmapped_completed_items,
+            "outline_path": str(outline_path) if outline_path else None,
+            "selected_outline_ref": selected_outline_ref,
+            "section_count": len(sections),
+            "ready_section_count": ready_sections,
+            "ledger_item_count": len(ledger_items),
+            "unresolved_required_items": unresolved_required_items,
+            "unmapped_completed_items": unmapped_completed_items,
+        }
+
+    def _paper_contract_health_payload(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+        pending_slices: int | None = None,
+    ) -> dict[str, Any]:
+        gate_status = self._paper_bundle_gate_status(quest_root, workspace_root=workspace_root)
+        paper_root = self._paper_root(quest_root, workspace_root=workspace_root, create=True)
+        bundle_manifest_path = paper_root / "paper_bundle_manifest.json"
+        bundle_manifest = read_json(bundle_manifest_path, {}) if bundle_manifest_path.exists() else {}
+        bundle_manifest = bundle_manifest if isinstance(bundle_manifest, dict) else {}
+        submission_checklist_path = paper_root / "review" / "submission_checklist.json"
+        submission_checklist = read_json(submission_checklist_path, {}) if submission_checklist_path.exists() else {}
+        submission_checklist = submission_checklist if isinstance(submission_checklist, dict) else {}
+        unresolved_required_items = [
+            dict(item) for item in (gate_status.get("unresolved_required_items") or []) if isinstance(item, dict)
+        ]
+        unmapped_completed_items = [
+            dict(item) for item in (gate_status.get("unmapped_completed_items") or []) if isinstance(item, dict)
+        ]
+        normalized_pending_slices = max(0, int(pending_slices or 0))
+        blocking_reasons: list[str] = []
+        if unmapped_completed_items:
+            blocking_reasons.append("completed analysis remains unmapped into the paper contract")
+        if unresolved_required_items:
+            blocking_reasons.append("required outline items are still unresolved")
+        if normalized_pending_slices > 0:
+            blocking_reasons.append("paper-facing supplementary slices are still pending")
+
+        if unmapped_completed_items:
+            recommended_next_stage = "write"
+            recommended_action = "sync_paper_contract"
+        elif unresolved_required_items or normalized_pending_slices > 0:
+            recommended_next_stage = "analysis-campaign"
+            recommended_action = "complete_required_supplementary"
+        else:
+            recommended_next_stage = "write"
+            recommended_action = "continue_writing"
+
+        contract_ok = not unresolved_required_items and not unmapped_completed_items
+        writing_ready = contract_ok and normalized_pending_slices == 0
+        overall_status = str(submission_checklist.get("overall_status") or bundle_manifest.get("status") or "").strip().lower()
+        delivered_at = str(
+            bundle_manifest.get("paper_delivered_to_user_at")
+            or bundle_manifest.get("delivered_at")
+            or submission_checklist.get("paper_delivered_to_user_at")
+            or ""
+        ).strip() or None
+        bundle_present = bundle_manifest_path.exists()
+        delivery_state = "not_ready"
+        closure_state = "bundle_not_ready"
+        keep_bundle_fixed_by_default = False
+        if bundle_present:
+            delivery_state = "bundle_ready"
+            closure_state = "delivery_ready"
+        if delivered_at or "delivered" in overall_status:
+            delivery_state = "delivered"
+            closure_state = "delivered_continue_research" if "continue" in overall_status else "delivered_parked"
+            keep_bundle_fixed_by_default = True
+
+        return {
+            "contract_ok": contract_ok,
+            "writing_ready": writing_ready,
+            "finalize_ready": writing_ready and bundle_present,
+            "bundle_present": bundle_present,
+            "delivery_state": delivery_state,
+            "closure_state": closure_state,
+            "delivered_at": delivered_at,
+            "keep_bundle_fixed_by_default": keep_bundle_fixed_by_default,
+            "selected_outline_ref": gate_status.get("selected_outline_ref"),
+            "section_count": int(gate_status.get("section_count") or 0),
+            "ready_section_count": int(gate_status.get("ready_section_count") or 0),
+            "ledger_item_count": int(gate_status.get("ledger_item_count") or 0),
+            "unresolved_required_count": len(unresolved_required_items),
+            "unmapped_completed_count": len(unmapped_completed_items),
+            "open_supplementary_count": normalized_pending_slices,
+            "blocking_reasons": blocking_reasons,
+            "recommended_next_stage": recommended_next_stage,
+            "recommended_action": recommended_action,
+            "unresolved_required_items": unresolved_required_items[:12],
+            "unmapped_completed_items": unmapped_completed_items[:12],
+        }
+
+    def _write_paper_line_state(
+        self,
+        quest_root: Path,
+        *,
+        workspace_root: Path | None = None,
+        source_branch: str | None = None,
+        source_run_id: str | None = None,
+        source_idea_id: str | None = None,
+    ) -> dict[str, Any]:
+        state = self.quest_service.read_research_state(quest_root)
+        selected_outline_path, selected_outline = self._read_selected_outline_for_sync(
+            quest_root,
+            workspace_root=workspace_root,
+        )
+        selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
+        detailed_outline = (
+            dict(selected_outline.get("detailed_outline") or {})
+            if isinstance(selected_outline.get("detailed_outline"), dict)
+            else {}
+        )
+        sections = self._normalize_outline_sections(
+            selected_outline.get("sections"),
+            experimental_designs=self._normalize_string_list(detailed_outline.get("experimental_designs")),
+        )
+        paper_root = self._paper_root(quest_root, workspace_root=workspace_root, create=True)
+        paper_branch = current_branch(paper_root.parent)
+        ledger = self._read_paper_evidence_ledger(quest_root)
+        draft_path = paper_root / "draft.md"
+        bundle_path = paper_root / "paper_bundle_manifest.json"
+        pending_slices = 0
+        campaigns_root = quest_root / ".ds" / "analysis_campaigns"
+        selected_outline_ref = str(selected_outline.get("outline_id") or ledger.get("selected_outline_ref") or "").strip() or None
+        if campaigns_root.exists():
+            for path in sorted(campaigns_root.glob("analysis-*.json")):
+                manifest = read_json(path, {})
+                if not isinstance(manifest, dict) or not manifest:
+                    continue
+                manifest_outline_ref = str(manifest.get("selected_outline_ref") or "").strip() or None
+                if selected_outline_ref and manifest_outline_ref != selected_outline_ref:
+                    continue
+                pending_slices += sum(
+                    1
+                    for item in (manifest.get("slices") or [])
+                    if isinstance(item, dict) and str(item.get("status") or "pending").strip() == "pending"
+                )
+        health = self._paper_contract_health_payload(
+            quest_root,
+            workspace_root=workspace_root,
+            pending_slices=pending_slices,
+        )
+        required_count = sum(len(self._normalize_string_list(section.get("required_items"))) for section in sections)
+        ready_required_count = required_count - int(health.get("unresolved_required_count") or 0)
+        payload = {
+            "schema_version": 1,
+            "paper_line_id": self._paper_line_id(
+                paper_branch=paper_branch,
+                outline_id=selected_outline_ref,
+                source_run_id=source_run_id or str(state.get("paper_parent_run_id") or "").strip() or None,
+            ),
+            "paper_branch": paper_branch,
+            "paper_root": str(paper_root),
+            "workspace_root": str(paper_root.parent),
+            "source_branch": source_branch or str(state.get("paper_parent_branch") or "").strip() or None,
+            "source_run_id": source_run_id or str(state.get("paper_parent_run_id") or "").strip() or None,
+            "source_idea_id": source_idea_id or str(state.get("active_idea_id") or "").strip() or None,
+            "selected_outline_ref": selected_outline_ref,
+            "selected_outline_path": str(selected_outline_path) if selected_outline_path else None,
+            "title": str(selected_outline.get("title") or "").strip() or None,
+            "required_count": required_count,
+            "ready_required_count": max(0, ready_required_count),
+            "section_count": len(sections),
+            "ready_section_count": int(health.get("ready_section_count") or 0),
+            "unmapped_count": int(health.get("unmapped_completed_count") or 0),
+            "open_supplementary_count": pending_slices,
+            "contract_ok": bool(health.get("contract_ok")),
+            "writing_ready": bool(health.get("writing_ready")),
+            "finalize_ready": bool(health.get("finalize_ready")),
+            "closure_state": str(health.get("closure_state") or "").strip() or None,
+            "delivery_state": str(health.get("delivery_state") or "").strip() or None,
+            "delivered_at": str(health.get("delivered_at") or "").strip() or None,
+            "keep_bundle_fixed_by_default": bool(health.get("keep_bundle_fixed_by_default")),
+            "unresolved_required_count": int(health.get("unresolved_required_count") or 0),
+            "unmapped_completed_count": int(health.get("unmapped_completed_count") or 0),
+            "blocking_reasons": list(health.get("blocking_reasons") or []),
+            "recommended_next_stage": str(health.get("recommended_next_stage") or "").strip() or None,
+            "recommended_action": str(health.get("recommended_action") or "").strip() or None,
+            "draft_status": "present" if draft_path.exists() else "missing",
+            "bundle_status": "present" if bundle_path.exists() else "missing",
+            "updated_at": utc_now(),
+        }
+        for paper_sync_root in self._paper_active_sync_roots(quest_root, workspace_root=workspace_root):
+            write_json(paper_sync_root / "paper_line_state.json", payload)
+        return payload
 
     def _active_baseline_attachment(self, quest_root: Path, workspace_root: Path | None = None) -> dict[str, Any] | None:
         target_root = self._workspace_root_for(quest_root, workspace_root)
@@ -2109,6 +3863,353 @@ class ArtifactService:
             )
         )
         return records
+
+    @staticmethod
+    def _semantic_stage_fingerprint(snapshot: dict[str, Any]) -> str:
+        paper_health = (
+            dict(snapshot.get("paper_contract_health") or {})
+            if isinstance(snapshot.get("paper_contract_health"), dict)
+            else {}
+        )
+        payload = {
+            "active_anchor": str(snapshot.get("active_anchor") or "").strip() or None,
+            "active_run_id": str(snapshot.get("active_run_id") or "").strip() or None,
+            "active_analysis_campaign_id": str(snapshot.get("active_analysis_campaign_id") or "").strip() or None,
+            "next_pending_slice_id": str(snapshot.get("next_pending_slice_id") or "").strip() or None,
+            "current_workspace_branch": str(snapshot.get("current_workspace_branch") or "").strip() or None,
+            "continuation_policy": str(snapshot.get("continuation_policy") or "").strip() or None,
+            "paper": {
+                "closure_state": str(paper_health.get("closure_state") or "").strip() or None,
+                "delivery_state": str(paper_health.get("delivery_state") or "").strip() or None,
+                "blocking_reasons": list(paper_health.get("blocking_reasons") or []),
+                "recommended_next_stage": str(paper_health.get("recommended_next_stage") or "").strip() or None,
+                "recommended_action": str(paper_health.get("recommended_action") or "").strip() or None,
+                "writing_ready": bool(paper_health.get("writing_ready")),
+                "finalize_ready": bool(paper_health.get("finalize_ready")),
+                "keep_bundle_fixed_by_default": bool(paper_health.get("keep_bundle_fixed_by_default")),
+            },
+        }
+        return sha256_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def _semantic_record_key(self, quest_root: Path, payload: dict[str, Any], *, workspace_root: Path | None = None) -> str | None:
+        explicit = str(payload.get("semantic_key") or "").strip()
+        if explicit:
+            return explicit
+        kind = str(payload.get("kind") or "").strip()
+        if kind not in {"decision", "report"}:
+            return None
+        snapshot = self.quest_service.snapshot(self._quest_id(quest_root))
+        fingerprint = self._semantic_stage_fingerprint(snapshot)
+        stage = str(payload.get("stage") or payload.get("anchor") or snapshot.get("active_anchor") or "").strip() or "unknown"
+        if kind == "decision":
+            action = str(payload.get("action") or "").strip() or "none"
+            verdict = str(payload.get("verdict") or "").strip() or "none"
+            return f"decision:{stage}:{action}:{verdict}:{fingerprint}"
+        report_type = str(payload.get("report_type") or payload.get("flow_type") or "").strip() or "report"
+        protocol_step = str(payload.get("protocol_step") or "").strip() or "none"
+        return f"report:{stage}:{report_type}:{protocol_step}:{fingerprint}"
+
+    def _latest_semantically_equivalent_artifact(
+        self,
+        quest_root: Path,
+        *,
+        kind: str,
+        semantic_key: str,
+    ) -> dict[str, Any] | None:
+        candidates: list[dict[str, Any]] = []
+        for item in self.quest_service._collect_artifacts(quest_root):
+            payload = dict(item.get("payload") or {}) if isinstance(item.get("payload"), dict) else {}
+            if not payload or str(payload.get("kind") or "").strip() != kind:
+                continue
+            if str(payload.get("semantic_key") or "").strip() != semantic_key:
+                continue
+            candidates.append(
+                {
+                    "path": str(item.get("path") or "").strip() or None,
+                    "payload": payload,
+                }
+            )
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: (
+                str(((item.get("payload") or {}).get("updated_at") or "")),
+                str(((item.get("payload") or {}).get("created_at") or "")),
+                str(item.get("path") or ""),
+            )
+        )
+        return candidates[-1]
+
+    def _idea_candidate_artifacts(self, quest_root: Path) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for record in self._idea_artifacts(quest_root):
+            details = dict(record.get("details") or {}) if isinstance(record.get("details"), dict) else {}
+            protocol_step = str(record.get("protocol_step") or "").strip().lower()
+            submission_mode = str(
+                details.get("submission_mode") or record.get("submission_mode") or ""
+            ).strip().lower()
+            if protocol_step != "candidate" and submission_mode != "candidate":
+                continue
+            paths = dict(record.get("paths") or {}) if isinstance(record.get("paths"), dict) else {}
+            records.append(
+                {
+                    "idea_id": str(record.get("idea_id") or "").strip() or None,
+                    "title": str(details.get("title") or "").strip() or None,
+                    "problem": str(details.get("problem") or "").strip() or None,
+                    "hypothesis": str(details.get("hypothesis") or "").strip() or None,
+                    "mechanism": str(details.get("mechanism") or "").strip() or None,
+                    "method_brief": str(details.get("method_brief") or "").strip() or None,
+                    "selection_scores": self._normalize_selection_scores(details.get("selection_scores")),
+                    "mechanism_family": str(details.get("mechanism_family") or "").strip() or None,
+                    "change_layer": str(details.get("change_layer") or "").strip() or None,
+                    "source_lens": str(details.get("source_lens") or "").strip() or None,
+                    "expected_gain": str(details.get("expected_gain") or "").strip() or None,
+                    "next_target": str(details.get("next_target") or record.get("next_target") or "").strip() or None,
+                    "lineage_intent": str(record.get("lineage_intent") or details.get("lineage_intent") or "").strip() or None,
+                    "parent_branch": str(record.get("parent_branch") or details.get("parent_branch") or "").strip() or None,
+                    "foundation_ref": record.get("foundation_ref") or details.get("foundation_ref"),
+                    "foundation_reason": str(record.get("foundation_reason") or details.get("foundation_reason") or "").strip() or None,
+                    "candidate_root": str(paths.get("candidate_root") or "").strip() or None,
+                    "idea_md_path": str(paths.get("idea_md") or "").strip() or None,
+                    "idea_draft_path": str(paths.get("idea_draft_md") or "").strip() or None,
+                    "status": str(record.get("status") or "").strip() or None,
+                    "updated_at": str(record.get("updated_at") or record.get("created_at") or "").strip() or None,
+                }
+            )
+        records.sort(key=lambda item: str(item.get("updated_at") or ""))
+        return records
+
+    def _optimization_candidate_reports(self, quest_root: Path) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for item in self.quest_service._collect_artifacts(quest_root):
+            payload = dict(item.get("payload") or {}) if isinstance(item.get("payload"), dict) else {}
+            if not payload:
+                continue
+            if str(payload.get("kind") or "").strip() != "report":
+                continue
+            report_type = str(payload.get("report_type") or "").strip().lower()
+            if report_type != "optimization_candidate":
+                continue
+            details = dict(payload.get("details") or {}) if isinstance(payload.get("details"), dict) else {}
+            artifact_path = str(item.get("path") or "").strip() or None
+            records.append(
+                {
+                    "artifact_id": str(payload.get("artifact_id") or payload.get("id") or "").strip() or None,
+                    "candidate_id": str(payload.get("candidate_id") or details.get("candidate_id") or "").strip() or None,
+                    "parent_candidate_id": str(payload.get("parent_candidate_id") or details.get("parent_candidate_id") or "").strip() or None,
+                    "idea_id": str(payload.get("idea_id") or details.get("idea_id") or "").strip() or None,
+                    "branch": str(payload.get("branch") or details.get("branch") or "").strip() or None,
+                    "strategy": str(payload.get("strategy") or details.get("strategy") or "").strip() or None,
+                    "status": str(payload.get("status") or details.get("status") or "").strip() or None,
+                    "mechanism_family": str(payload.get("mechanism_family") or details.get("mechanism_family") or "").strip() or None,
+                    "change_layer": str(payload.get("change_layer") or details.get("change_layer") or "").strip() or None,
+                    "source_lens": str(payload.get("source_lens") or details.get("source_lens") or "").strip() or None,
+                    "summary": str(payload.get("summary") or "").strip() or None,
+                    "change_plan": str(payload.get("change_plan") or details.get("change_plan") or "").strip() or None,
+                    "expected_gain": str(payload.get("expected_gain") or details.get("expected_gain") or "").strip() or None,
+                    "linked_run_id": str(payload.get("linked_run_id") or details.get("linked_run_id") or "").strip() or None,
+                    "failure_kind": str(payload.get("failure_kind") or details.get("failure_kind") or "").strip() or None,
+                    "metrics_snapshot": payload.get("metrics_snapshot") or details.get("metrics_snapshot"),
+                    "updated_at": str(payload.get("updated_at") or payload.get("created_at") or "").strip() or None,
+                    "artifact_path": artifact_path,
+                }
+            )
+        records.sort(key=lambda item: str(item.get("updated_at") or ""))
+        return records
+
+    @staticmethod
+    def _frontier_branch_rank(branch: dict[str, Any]) -> tuple[int, int, float, str, str]:
+        latest = dict(branch.get("latest_main_experiment") or {}) if isinstance(branch.get("latest_main_experiment"), dict) else {}
+        recommended_route = str(latest.get("recommended_next_route") or "").strip().lower()
+        route_score = {
+            "iterate": 4,
+            "analysis_or_write": 4,
+            "continue": 3,
+            "revise_idea": 1,
+        }.get(recommended_route, 0)
+        breakthrough = 1 if bool(latest.get("breakthrough")) else 0
+        delta = to_number(latest.get("delta_vs_baseline"))
+        delta_score = float(delta) if delta is not None else float("-inf")
+        return (
+            1 if bool(branch.get("has_main_result")) else 0,
+            route_score + breakthrough,
+            delta_score,
+            str(branch.get("updated_at") or ""),
+            str(branch.get("branch_name") or ""),
+        )
+
+    def _optimization_frontier_state(self, quest_root: Path) -> dict[str, Any]:
+        return {
+            "artifact_projection": self.quest_service._json_compatible_state(
+                self.quest_service._path_state(self.quest_service._artifact_projection_path(quest_root))
+            ),
+            "research_state": self.quest_service._json_compatible_state(
+                self.quest_service._path_state(self.quest_service._research_state_path(quest_root))
+            ),
+            "quest_yaml": self.quest_service._json_compatible_state(
+                self.quest_service._path_state(self.quest_service._quest_yaml_path(quest_root))
+            ),
+        }
+
+    def get_optimization_frontier(self, quest_root: Path) -> dict[str, Any]:
+        cache_key = str(quest_root.resolve())
+        state = self._optimization_frontier_state(quest_root)
+        with self._optimization_frontier_cache_lock:
+            cached = self._optimization_frontier_cache.get(cache_key)
+            if cached and cached.get("state") == state:
+                return copy.deepcopy(cached.get("payload") or {"ok": False})
+
+        snapshot = self.quest_service.snapshot(self._quest_id(quest_root))
+        branches_payload = self.list_research_branches(quest_root)
+        branches = [dict(item) for item in (branches_payload.get("branches") or []) if isinstance(item, dict)]
+        candidate_briefs = self._idea_candidate_artifacts(quest_root)
+        implementation_candidates = self._optimization_candidate_reports(quest_root)
+
+        branches.sort(key=self._frontier_branch_rank, reverse=True)
+        top_branches = branches[:3]
+
+        active_candidate_statuses = {"proposed", "smoke_running", "smoke_passed", "promoted", "full_eval_running"}
+        active_implementation_candidates = [
+            item for item in implementation_candidates if str(item.get("status") or "").strip().lower() in active_candidate_statuses
+        ]
+
+        stagnant_branch_names: set[str] = set()
+        branch_candidate_failures: dict[str, int] = {}
+        for item in implementation_candidates:
+            branch_name = str(item.get("branch") or "").strip()
+            if not branch_name:
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            if status in {"failed", "smoke_failed", "archived"}:
+                branch_candidate_failures[branch_name] = branch_candidate_failures.get(branch_name, 0) + 1
+        for branch in branches:
+            branch_name = str(branch.get("branch_name") or "").strip()
+            latest = dict(branch.get("latest_main_experiment") or {}) if isinstance(branch.get("latest_main_experiment"), dict) else {}
+            recommended_route = str(latest.get("recommended_next_route") or "").strip().lower()
+            if branch_candidate_failures.get(branch_name, 0) >= 2:
+                stagnant_branch_names.add(branch_name)
+            elif recommended_route in {"continue", "revise_idea"} and bool(branch.get("has_main_result")):
+                stagnant_branch_names.add(branch_name)
+        stagnant_branches = [branch for branch in branches if str(branch.get("branch_name") or "") in stagnant_branch_names]
+
+        successful_branches = [branch for branch in branches if bool(branch.get("has_main_result"))]
+        fusion_candidates = [
+            {
+                "branch_name": str(branch.get("branch_name") or "").strip() or None,
+                "idea_id": branch.get("idea_id"),
+                "idea_title": branch.get("idea_title"),
+                "latest_main_run_id": str((dict(branch.get("latest_main_experiment") or {}) if isinstance(branch.get("latest_main_experiment"), dict) else {}).get("run_id") or "").strip() or None,
+                "strength_signal": {
+                    "recommended_next_route": str((dict(branch.get("latest_main_experiment") or {}) if isinstance(branch.get("latest_main_experiment"), dict) else {}).get("recommended_next_route") or "").strip() or None,
+                    "delta_vs_baseline": (dict(branch.get("latest_main_experiment") or {}) if isinstance(branch.get("latest_main_experiment"), dict) else {}).get("delta_vs_baseline"),
+                    "breakthrough": (dict(branch.get("latest_main_experiment") or {}) if isinstance(branch.get("latest_main_experiment"), dict) else {}).get("breakthrough"),
+                },
+            }
+            for branch in successful_branches[:3]
+        ]
+
+        if active_implementation_candidates:
+            mode = "exploit"
+            reason = "At least one implementation-level candidate is already active, so the frontier should stay focused on execution and result conversion."
+        elif candidate_briefs and len(top_branches) <= 1:
+            mode = "explore"
+            reason = "Candidate briefs exist but the durable line set is still thin, so widening or ranking the brief pool is the best next move."
+        elif len(fusion_candidates) >= 2 and stagnant_branches:
+            mode = "fusion"
+            reason = "Multiple result-bearing branches exist and at least one line is stagnating, so cross-line fusion is now justified."
+        elif top_branches:
+            mode = "exploit"
+            reason = "A durable line already exists and no broader frontier condition dominates, so focus should stay on the strongest current line."
+        else:
+            mode = "stop"
+            reason = "No durable optimization line or candidate pool is active, so there is no meaningful frontier to continue automatically."
+
+        recommended_next_actions: list[str] = []
+        if mode == "explore":
+            recommended_next_actions.extend(
+                [
+                    "Create or refine candidate briefs before promoting new lines.",
+                    "Rank the candidate brief pool and promote only the strongest 1 to 3 directions.",
+                ]
+            )
+        elif mode == "fusion":
+            recommended_next_actions.extend(
+                [
+                    "Compare the strongest result-bearing lines for complementary mechanisms.",
+                    "Open a fusion candidate only if the line strengths are complementary rather than redundant.",
+                ]
+            )
+        elif mode == "exploit":
+            recommended_next_actions.extend(
+                [
+                    "Keep the active line focused and advance the most promising implementation candidates first.",
+                    "Use smoke checks before promoting more candidates into full evaluation.",
+                ]
+            )
+        else:
+            recommended_next_actions.append("Record a stop or park decision before closing the optimization loop.")
+
+        candidate_backlog = {
+            "candidate_brief_count": len(candidate_briefs),
+            "implementation_candidate_count": len(implementation_candidates),
+            "active_implementation_candidate_count": len(active_implementation_candidates),
+            "failed_implementation_candidate_count": sum(
+                1 for item in implementation_candidates if str(item.get("status") or "").strip().lower() in {"failed", "smoke_failed", "archived"}
+            ),
+        }
+
+        best_branch = top_branches[0] if top_branches else None
+        best_run = (
+            dict(best_branch.get("latest_main_experiment") or {})
+            if isinstance((best_branch or {}).get("latest_main_experiment"), dict)
+            else None
+        )
+        best_branch_name = str((best_branch or {}).get("branch_name") or "").strip() or None
+        best_idea_id = str((best_branch or {}).get("idea_id") or "").strip() or None
+        best_branch_recent_candidates = [
+            {
+                "candidate_id": str(item.get("candidate_id") or "").strip() or None,
+                "strategy": str(item.get("strategy") or "").strip() or None,
+                "status": str(item.get("status") or "").strip() or None,
+                "mechanism_family": str(item.get("mechanism_family") or "").strip() or None,
+                "change_layer": str(item.get("change_layer") or "").strip() or None,
+                "source_lens": str(item.get("source_lens") or "").strip() or None,
+                "change_plan": str(item.get("change_plan") or "").strip() or None,
+                "failure_kind": str(item.get("failure_kind") or "").strip() or None,
+                "linked_run_id": str(item.get("linked_run_id") or "").strip() or None,
+                "updated_at": str(item.get("updated_at") or "").strip() or None,
+            }
+            for item in implementation_candidates
+            if (
+                (best_branch_name and str(item.get("branch") or "").strip() == best_branch_name)
+                or (best_idea_id and str(item.get("idea_id") or "").strip() == best_idea_id)
+            )
+        ][-4:]
+
+        payload = {
+            "ok": True,
+            "optimization_frontier": {
+                "mode": mode,
+                "frontier_reason": reason,
+                "active_anchor": snapshot.get("active_anchor"),
+                "best_branch": best_branch,
+                "best_run": best_run,
+                "top_branches": top_branches,
+                "candidate_briefs": candidate_briefs,
+                "implementation_candidates": implementation_candidates[-8:],
+                "best_branch_recent_candidates": best_branch_recent_candidates,
+                "candidate_backlog": candidate_backlog,
+                "stagnant_branches": stagnant_branches,
+                "fusion_candidates": fusion_candidates,
+                "recommended_next_actions": recommended_next_actions,
+            },
+        }
+        with self._optimization_frontier_cache_lock:
+            self._optimization_frontier_cache[cache_key] = {
+                "state": copy.deepcopy(state),
+                "payload": copy.deepcopy(payload),
+            }
+        return payload
 
     @staticmethod
     def _format_branch_number(index: int) -> str:
@@ -2777,6 +4878,11 @@ class ArtifactService:
                     "idea_id": record.get("idea_id"),
                     "title": details.get("title"),
                     "problem": details.get("problem"),
+                    "method_brief": details.get("method_brief"),
+                    "selection_scores": self._normalize_selection_scores(details.get("selection_scores")),
+                    "mechanism_family": details.get("mechanism_family"),
+                    "change_layer": details.get("change_layer"),
+                    "source_lens": details.get("source_lens"),
                     "next_target": details.get("next_target") or record.get("next_target"),
                     "lineage_intent": record.get("lineage_intent") or details.get("lineage_intent"),
                     "protocol_step": record.get("protocol_step"),
@@ -2885,6 +4991,11 @@ class ArtifactService:
                     "idea_id": latest_idea.get("idea_id") or (latest_experiment.get("idea_id") if isinstance(latest_experiment, dict) else None),
                     "idea_title": latest_idea.get("title"),
                     "idea_problem": latest_idea.get("problem"),
+                    "method_brief": latest_idea.get("method_brief"),
+                    "selection_scores": self._normalize_selection_scores(latest_idea.get("selection_scores")),
+                    "mechanism_family": latest_idea.get("mechanism_family"),
+                    "change_layer": latest_idea.get("change_layer"),
+                    "source_lens": latest_idea.get("source_lens"),
                     "next_target": latest_idea.get("next_target"),
                     "lineage_intent": latest_idea.get("lineage_intent"),
                     "parent_branch": resolved_parent_branch,
@@ -2933,7 +5044,7 @@ class ArtifactService:
         research_head_branch = str(state.get("research_head_branch") or "").strip() or None
         canonical_branch = analysis_parent_branch or paper_parent_branch or current_workspace_branch or research_head_branch
         latest_main_run = self._latest_main_run_for_branch(quest_root, canonical_branch or "")
-        selected_outline = read_json(self._paper_selected_outline_path(quest_root), {})
+        _, selected_outline = self._read_selected_outline_record(quest_root)
         selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
         active_campaign = (
             self._read_analysis_manifest(quest_root, active_campaign_id)
@@ -2966,6 +5077,398 @@ class ArtifactService:
             "default_reply_interaction_id": str(snapshot.get("default_reply_interaction_id") or "").strip() or None,
         }
 
+    def get_paper_contract_health(
+        self,
+        quest_root: Path,
+        *,
+        detail: str = "summary",
+    ) -> dict[str, Any]:
+        normalized_detail = str(detail or "summary").strip().lower() or "summary"
+        if normalized_detail not in {"summary", "full"}:
+            raise ValueError("get_paper_contract_health detail must be `summary` or `full`.")
+        workspace_root = self.quest_service.active_workspace_root(quest_root)
+        paper_contract = self.quest_service._paper_contract_payload(quest_root, workspace_root)
+        paper_evidence = self.quest_service._paper_evidence_payload(quest_root, workspace_root)
+        analysis_inventory = self.quest_service._analysis_inventory_payload(quest_root, workspace_root)
+        paper_lines, active_paper_line_ref = self.quest_service._paper_lines_payload(quest_root, workspace_root)
+        if not paper_contract:
+            return {
+                "ok": False,
+                "message": "No active paper contract is available for the current quest state.",
+                "active_paper_line_ref": active_paper_line_ref,
+                "paper_lines": paper_lines,
+            }
+        selected_outline_ref = str(paper_contract.get("selected_outline_ref") or "").strip() or None
+        if not selected_outline_ref:
+            return {
+                "ok": False,
+                "message": "No selected outline is available for the current quest state.",
+                "active_paper_line_ref": active_paper_line_ref,
+                "paper_lines": paper_lines,
+            }
+        payload = self.quest_service._paper_contract_health_payload(
+            paper_contract=paper_contract,
+            paper_evidence=paper_evidence,
+            analysis_inventory=analysis_inventory,
+            paper_lines=paper_lines,
+            active_paper_line_ref=active_paper_line_ref,
+        )
+        payload = dict(payload or {})
+        if normalized_detail == "summary":
+            payload.pop("unresolved_required_items", None)
+            payload.pop("unmapped_completed_items", None)
+            payload.pop("blocking_pending_slices", None)
+        return {
+            "ok": True,
+            "detail": normalized_detail,
+            "active_paper_line_ref": active_paper_line_ref,
+            "active_workspace_root": str(workspace_root),
+            "paper_contract_health": payload,
+        }
+
+    def get_quest_state(
+        self,
+        quest_root: Path,
+        *,
+        detail: str = "summary",
+    ) -> dict[str, Any]:
+        normalized_detail = str(detail or "summary").strip().lower() or "summary"
+        if normalized_detail not in {"summary", "full"}:
+            raise ValueError("get_quest_state detail must be `summary` or `full`.")
+        snapshot = self.quest_service.snapshot(self._quest_id(quest_root))
+        payload: dict[str, Any] = {
+            "quest_id": snapshot.get("quest_id"),
+            "title": snapshot.get("title"),
+            "active_anchor": snapshot.get("active_anchor"),
+            "continuation_policy": snapshot.get("continuation_policy"),
+            "continuation_anchor": snapshot.get("continuation_anchor"),
+            "continuation_reason": snapshot.get("continuation_reason"),
+            "baseline_gate": snapshot.get("baseline_gate"),
+            "active_baseline_id": snapshot.get("active_baseline_id"),
+            "active_baseline_variant_id": snapshot.get("active_baseline_variant_id"),
+            "active_run_id": snapshot.get("active_run_id"),
+            "active_idea_id": snapshot.get("active_idea_id"),
+            "active_analysis_campaign_id": snapshot.get("active_analysis_campaign_id"),
+            "active_idea_line_ref": snapshot.get("active_idea_line_ref"),
+            "active_paper_line_ref": snapshot.get("active_paper_line_ref"),
+            "current_workspace_branch": snapshot.get("current_workspace_branch"),
+            "current_workspace_root": snapshot.get("current_workspace_root"),
+            "research_head_branch": snapshot.get("research_head_branch"),
+            "research_head_worktree_root": snapshot.get("research_head_worktree_root"),
+            "workspace_mode": snapshot.get("workspace_mode"),
+            "runtime_status": snapshot.get("runtime_status"),
+            "display_status": snapshot.get("display_status"),
+            "waiting_interaction_id": snapshot.get("waiting_interaction_id"),
+            "pending_user_message_count": snapshot.get("pending_user_message_count"),
+            "next_pending_slice_id": snapshot.get("next_pending_slice_id"),
+            "paper_contract_health": snapshot.get("paper_contract_health"),
+        }
+        if normalized_detail == "full":
+            payload.update(
+                {
+                    "startup_contract": snapshot.get("startup_contract"),
+                    "requested_baseline_ref": snapshot.get("requested_baseline_ref"),
+                    "confirmed_baseline_ref": snapshot.get("confirmed_baseline_ref"),
+                    "counts": snapshot.get("counts"),
+                    "paths": snapshot.get("paths"),
+                    "active_interactions": snapshot.get("active_interactions"),
+                    "recent_reply_threads": snapshot.get("recent_reply_threads"),
+                    "recent_artifacts": snapshot.get("recent_artifacts"),
+                    "recent_runs": snapshot.get("recent_runs"),
+                    "idea_lines": snapshot.get("idea_lines"),
+                    "paper_lines": snapshot.get("paper_lines"),
+                }
+            )
+        return {
+            "ok": True,
+            "detail": normalized_detail,
+            "quest_state": payload,
+        }
+
+    def get_global_status(
+        self,
+        quest_root: Path,
+        *,
+        detail: str = "brief",
+        locale: str = "zh",
+    ) -> dict[str, Any]:
+        normalized_detail = str(detail or "brief").strip().lower() or "brief"
+        if normalized_detail not in {"brief", "full"}:
+            raise ValueError("get_global_status detail must be `brief` or `full`.")
+        normalized_locale = str(locale or "zh").strip().lower() or "zh"
+        snapshot = self.quest_service.snapshot(self._quest_id(quest_root))
+        scoreboard = self.refresh_method_scoreboard(quest_root)
+        scoreboard_payload = dict(scoreboard.get("scoreboard") or {}) if isinstance(scoreboard.get("scoreboard"), dict) else {}
+        counts = dict(snapshot.get("counts") or {}) if isinstance(snapshot.get("counts"), dict) else {}
+        paper_health = (
+            dict(snapshot.get("paper_contract_health") or {})
+            if isinstance(snapshot.get("paper_contract_health"), dict)
+            else {}
+        )
+        recent_runs = [dict(item) for item in (snapshot.get("recent_runs") or []) if isinstance(item, dict)]
+        latest_run = recent_runs[-1] if recent_runs else {}
+        latest_run_summary = str(latest_run.get("summary") or "").strip() or None
+        status_line = (
+            str(((snapshot.get("summary") or {}) if isinstance(snapshot.get("summary"), dict) else {}).get("status_line") or "").strip()
+            or None
+        )
+        claim_boundary = {
+            "supported": int(paper_health.get("supported_claim_count") or 0),
+            "partial": int(paper_health.get("partial_claim_count") or 0),
+            "unsupported": int(paper_health.get("unsupported_claim_count") or 0),
+            "deferred": int(paper_health.get("deferred_claim_count") or 0),
+        }
+        paper_ready = bool(paper_health.get("writing_ready"))
+        bundle_ready = bool(paper_health.get("finalize_ready"))
+        closure_state = str(paper_health.get("closure_state") or "").strip() or None
+        delivery_state = str(paper_health.get("delivery_state") or "").strip() or None
+        stage = str(snapshot.get("active_anchor") or "decision").strip() or "decision"
+        continuation_policy = str(snapshot.get("continuation_policy") or "auto").strip() or "auto"
+        next_stage = str(paper_health.get("recommended_next_stage") or stage).strip() or stage
+        next_action = str(paper_health.get("recommended_action") or "continue").strip() or "continue"
+        brief_summary_zh = (
+            f"当前阶段是 `{stage}`。"
+            f"{(' 论文线当前状态是 `' + closure_state + '`。' if closure_state else '')}"
+            f"{(' 论文线已达到 bundle-ready。' if bundle_ready and not closure_state else '')}"
+            f"{(' 当前是停驻等待新消息，不会继续自动空转。' if continuation_policy == 'wait_for_user_or_resume' else '')}"
+            f"{(' 最近主结果：' + latest_run_summary) if latest_run_summary else ''}"
+        ).strip()
+        brief_summary_en = (
+            f"Current stage: `{stage}`."
+            f"{(' Paper closure state: `' + closure_state + '`.' if closure_state else '')}"
+            f"{(' The paper line is bundle-ready.' if bundle_ready and not closure_state else '')}"
+            f"{(' The quest is currently parked and will not auto-spin until a new user message or resume.' if continuation_policy == 'wait_for_user_or_resume' else '')}"
+            f"{(' Latest run: ' + latest_run_summary) if latest_run_summary else ''}"
+        ).strip()
+        payload: dict[str, Any] = {
+            "quest_id": snapshot.get("quest_id"),
+            "title": snapshot.get("title"),
+            "current_stage": stage,
+            "continuation_policy": continuation_policy,
+            "continuation_anchor": snapshot.get("continuation_anchor"),
+            "status_line": status_line,
+            "latest_run_id": latest_run.get("run_id"),
+            "latest_run_summary": latest_run_summary,
+            "method_scoreboard_path": scoreboard.get("json_path"),
+            "incumbent_method": scoreboard_payload.get("incumbent_title"),
+            "paper_contract_health": {
+                "writing_ready": paper_ready,
+                "finalize_ready": bundle_ready,
+                "closure_state": closure_state,
+                "delivery_state": delivery_state,
+                "delivered_at": paper_health.get("delivered_at"),
+                "keep_bundle_fixed_by_default": bool(paper_health.get("keep_bundle_fixed_by_default")),
+                "recommended_next_stage": next_stage,
+                "recommended_action": next_action,
+            },
+            "claim_boundary": claim_boundary,
+            "pending_user_message_count": int(snapshot.get("pending_user_message_count") or 0),
+            "bash_running_count": int(counts.get("bash_running_count") or 0),
+            "summary_text": brief_summary_zh if normalized_locale.startswith("zh") else brief_summary_en,
+        }
+        if normalized_detail == "full":
+            payload.update(
+                {
+                    "runtime_status": snapshot.get("runtime_status"),
+                    "display_status": snapshot.get("display_status"),
+                    "baseline_gate": snapshot.get("baseline_gate"),
+                    "active_baseline_id": snapshot.get("active_baseline_id"),
+                    "active_idea_id": snapshot.get("active_idea_id"),
+                    "active_analysis_campaign_id": snapshot.get("active_analysis_campaign_id"),
+                    "current_workspace_branch": snapshot.get("current_workspace_branch"),
+                    "recent_runs": recent_runs[-5:],
+                    "paper_lines": snapshot.get("paper_lines"),
+                    "idea_lines": snapshot.get("idea_lines"),
+                    "method_scoreboard": scoreboard_payload,
+                }
+            )
+        return {
+            "ok": True,
+            "detail": normalized_detail,
+            "locale": normalized_locale,
+            "global_status": payload,
+        }
+
+    def refresh_method_scoreboard(self, quest_root: Path) -> dict[str, Any]:
+        snapshot = self.quest_service.snapshot(self._quest_id(quest_root))
+        ideas = self._idea_artifacts(quest_root)
+        main_runs = self._main_run_artifacts(quest_root)
+        entries_by_key: dict[str, dict[str, Any]] = {}
+        idea_titles_by_id: dict[str, str] = {}
+
+        for idea in ideas:
+            idea_id = str(idea.get("idea_id") or "").strip()
+            if not idea_id:
+                continue
+            idea_details = dict(idea.get("details") or {}) if isinstance(idea.get("details"), dict) else {}
+            idea_title = str(idea.get("title") or idea_details.get("title") or idea_id).strip() or idea_id
+            idea_titles_by_id[idea_id] = idea_title
+            entries_by_key[idea_id] = {
+                "line_key": idea_id,
+                "idea_id": idea_id,
+                "title": idea_title,
+                "branch": str(idea.get("branch") or "").strip() or None,
+                "status": "candidate",
+                "latest_run_id": None,
+                "latest_run_summary": None,
+                "updated_at": str(idea.get("updated_at") or idea.get("created_at") or "").strip() or None,
+                "incumbent": False,
+            }
+
+        for run in main_runs:
+            idea_id = str(run.get("idea_id") or "").strip()
+            key = idea_id or str(run.get("branch") or run.get("run_id") or "run").strip()
+            entry = dict(entries_by_key.get(key) or {})
+            entry.update(
+                {
+                    "line_key": key,
+                    "idea_id": idea_id or entry.get("idea_id"),
+                    "title": str(
+                        entry.get("title")
+                        or idea_titles_by_id.get(idea_id or "")
+                        or run.get("title")
+                        or run.get("run_id")
+                        or key
+                    ).strip()
+                    or key,
+                    "branch": str(run.get("branch") or entry.get("branch") or "").strip() or None,
+                    "status": "main_verified" if str(run.get("status") or "").strip() == "completed" else "candidate",
+                    "latest_run_id": str(run.get("run_id") or "").strip() or None,
+                    "latest_run_summary": str(run.get("summary") or "").strip() or None,
+                    "updated_at": str(run.get("updated_at") or run.get("created_at") or "").strip() or entry.get("updated_at"),
+                    "incumbent": False,
+                }
+            )
+            entries_by_key[key] = entry
+
+        entries = sorted(
+            entries_by_key.values(),
+            key=lambda item: str(item.get("updated_at") or ""),
+        )
+        if entries:
+            entries[-1]["incumbent"] = True
+        incumbent = next((item for item in entries if item.get("incumbent")), None)
+
+        scoreboard_payload = {
+            "schema_version": 1,
+            "quest_id": snapshot.get("quest_id"),
+            "updated_at": utc_now(),
+            "entry_count": len(entries),
+            "incumbent_line_key": str((incumbent or {}).get("line_key") or "").strip() or None,
+            "incumbent_title": str((incumbent or {}).get("title") or "").strip() or None,
+            "entries": entries,
+        }
+        status_root = ensure_dir(quest_root / "artifacts" / "status")
+        json_path = status_root / "method_scoreboard.json"
+        md_path = status_root / "method_scoreboard.md"
+        write_json(json_path, scoreboard_payload)
+        lines = [
+            "# Method Scoreboard",
+            "",
+            f"- Updated at: {scoreboard_payload['updated_at']}",
+            f"- Incumbent: {scoreboard_payload.get('incumbent_title') or 'none'}",
+            "",
+            "## Entries",
+            "",
+        ]
+        if entries:
+            for item in entries:
+                incumbent_tag = " [incumbent]" if item.get("incumbent") else ""
+                lines.append(
+                    f"- `{item.get('line_key')}`{incumbent_tag}: {item.get('title') or item.get('line_key')} | status={item.get('status') or 'unknown'} | branch={item.get('branch') or 'none'} | latest_run={item.get('latest_run_id') or 'none'}"
+                )
+                if item.get("latest_run_summary"):
+                    lines.append(f"  - summary: {item['latest_run_summary']}")
+        else:
+            lines.append("- none")
+        write_text(md_path, "\n".join(lines).rstrip() + "\n")
+        return {
+            "ok": True,
+            "json_path": str(json_path),
+            "md_path": str(md_path),
+            "scoreboard": scoreboard_payload,
+        }
+
+    def read_quest_documents(
+        self,
+        quest_root: Path,
+        *,
+        names: list[str] | None = None,
+        mode: str = "excerpt",
+        max_lines: int = 12,
+    ) -> dict[str, Any]:
+        normalized_mode = str(mode or "excerpt").strip().lower() or "excerpt"
+        if normalized_mode not in {"excerpt", "full"}:
+            raise ValueError("read_quest_documents mode must be `excerpt` or `full`.")
+        requested = [str(item or "").strip().lower() for item in (names or []) if str(item or "").strip()]
+        if not requested:
+            requested = ["brief", "plan", "status", "summary", "active_user_requirements"]
+        document_paths = {
+            "brief": quest_root / "brief.md",
+            "plan": quest_root / "plan.md",
+            "status": quest_root / "status.md",
+            "summary": quest_root / "SUMMARY.md",
+            "active_user_requirements": self.quest_service._active_user_requirements_path(quest_root),
+        }
+        items: list[dict[str, Any]] = []
+        for name in requested:
+            path = document_paths.get(name)
+            if path is None:
+                continue
+            exists = path.exists()
+            text = read_text(path, "") if exists else ""
+            if normalized_mode == "excerpt":
+                lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+                content = "\n".join(lines[:max_lines]).strip()
+            else:
+                content = text.strip()
+            items.append(
+                {
+                    "name": name,
+                    "path": str(path),
+                    "exists": exists,
+                    "content": content or None,
+                }
+            )
+        return {
+            "ok": True,
+            "mode": normalized_mode,
+            "count": len(items),
+            "items": items,
+        }
+
+    def get_conversation_context(
+        self,
+        quest_root: Path,
+        *,
+        limit: int = 12,
+        include_attachments: bool = False,
+    ) -> dict[str, Any]:
+        quest_id = self._quest_id(quest_root)
+        records = self.quest_service.history(quest_id, limit=max(1, limit))
+        items: list[dict[str, Any]] = []
+        for record in records[-max(1, limit) :]:
+            item = {
+                "id": record.get("id"),
+                "role": record.get("role"),
+                "source": record.get("source"),
+                "content": record.get("content"),
+                "created_at": record.get("created_at"),
+                "reply_to_interaction_id": record.get("reply_to_interaction_id"),
+                "run_id": record.get("run_id"),
+                "skill_id": record.get("skill_id"),
+            }
+            if include_attachments:
+                item["attachments"] = [dict(value) for value in (record.get("attachments") or []) if isinstance(value, dict)]
+            items.append(item)
+        latest_user = next((item for item in reversed(items) if str(item.get("role") or "") == "user"), None)
+        return {
+            "ok": True,
+            "count": len(items),
+            "items": items,
+            "latest_user_message": latest_user,
+        }
+
     def get_analysis_campaign(self, quest_root: Path, campaign_id: str | None = None) -> dict[str, Any]:
         resolved_campaign_id = str(campaign_id or "").strip()
         if not resolved_campaign_id or resolved_campaign_id == "active":
@@ -2987,6 +5490,9 @@ class ArtifactService:
             "parent_run_id": str(manifest.get("parent_run_id") or "").strip() or None,
             "parent_branch": str(manifest.get("parent_branch") or "").strip() or None,
             "parent_worktree_root": str(manifest.get("parent_worktree_root") or "").strip() or None,
+            "paper_line_id": str(manifest.get("paper_line_id") or "").strip() or None,
+            "paper_line_branch": str(manifest.get("paper_line_branch") or "").strip() or None,
+            "paper_line_root": str(manifest.get("paper_line_root") or "").strip() or None,
             "selected_outline_ref": str(manifest.get("selected_outline_ref") or "").strip() or None,
             "campaign_origin": dict(manifest.get("campaign_origin") or {}) if isinstance(manifest.get("campaign_origin"), dict) else None,
             "todo_items": [dict(item) for item in (manifest.get("todo_items") or []) if isinstance(item, dict)],
@@ -2998,15 +5504,8 @@ class ArtifactService:
         }
 
     def list_paper_outlines(self, quest_root: Path) -> dict[str, Any]:
-        selected_outline_path = self._paper_selected_outline_path(quest_root)
-        selected_outline = read_json(selected_outline_path, {})
+        selected_outline_path, selected_outline = self._read_selected_outline_record(quest_root)
         selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
-        if not selected_outline:
-            fallback_selected_outline_path = quest_root / "paper" / "selected_outline.json"
-            fallback_selected_outline = read_json(fallback_selected_outline_path, {})
-            if isinstance(fallback_selected_outline, dict) and fallback_selected_outline:
-                selected_outline = fallback_selected_outline
-                selected_outline_path = fallback_selected_outline_path
 
         selected_outline_id = str(selected_outline.get("outline_id") or "").strip()
         status_rank = {"candidate": 1, "revised": 2, "selected": 3}
@@ -3446,7 +5945,46 @@ class ArtifactService:
             }
 
         write_root = self._workspace_root_for(quest_root, workspace_root)
+        semantic_key = self._semantic_record_key(quest_root, payload, workspace_root=write_root)
+        suppress_equivalent = (
+            bool(payload.get("suppress_if_semantically_equivalent"))
+            if "suppress_if_semantically_equivalent" in payload
+            else str(payload.get("kind") or "").strip() in {"decision", "report"}
+        )
+        if suppress_equivalent and semantic_key:
+            existing = self._latest_semantically_equivalent_artifact(
+                quest_root,
+                kind=str(payload.get("kind") or "").strip(),
+                semantic_key=semantic_key,
+            )
+            if existing is not None:
+                existing_record = dict(existing.get("payload") or {})
+                guidance_vm = dict(existing_record.get("guidance_vm") or {}) if isinstance(existing_record.get("guidance_vm"), dict) else {}
+                guidance_text = guidance_summary(guidance_vm) or guidance_for_kind(str(existing_record.get("kind") or payload.get("kind") or "report"))
+                return {
+                    "ok": True,
+                    "status": "semantically_equivalent",
+                    "artifact_id": existing_record.get("artifact_id"),
+                    "path": str(existing.get("path") or ""),
+                    "guidance": guidance_text,
+                    "guidance_vm": guidance_vm,
+                    "next_anchor": str(guidance_vm.get("recommended_skill") or "").strip() or None,
+                    "recommended_skill_reads": [str(guidance_vm.get("recommended_skill") or "").strip()] if str(guidance_vm.get("recommended_skill") or "").strip() else [],
+                    "suggested_artifact_calls": guidance_vm.get("suggested_artifact_calls") if isinstance(guidance_vm.get("suggested_artifact_calls"), list) else [],
+                    "next_instruction": guidance_text,
+                    "graph": None,
+                    "recorded": existing_record.get("kind"),
+                    "record": existing_record,
+                    "workspace_root": str(existing_record.get("workspace_root") or write_root),
+                    "artifact_path": str(existing.get("path") or ""),
+                    "checkpoint": None,
+                    "baseline_registry_entry": None,
+                    "semantic_key": semantic_key,
+                    "suppressed": True,
+                }
         record = self._build_record(quest_root, payload, workspace_root=write_root)
+        if semantic_key:
+            record["semantic_key"] = semantic_key
         guidance_vm = build_guidance_for_record(record)
         record["guidance_vm"] = guidance_vm
         guidance_text = guidance_summary(guidance_vm) or guidance_for_kind(record["kind"])
@@ -3465,8 +6003,23 @@ class ArtifactService:
         next_instruction = guidance_text
         artifact_id = record["artifact_id"]
         artifact_path = self._artifact_path(write_root, record["kind"], artifact_id)
+        previous_projection_state_kind, previous_projection_state = self.quest_service._artifact_projection_state(quest_root)
         write_json(artifact_path, record)
         append_jsonl(write_root / "artifacts" / "_index.jsonl", self._index_line(record, artifact_path))
+        current_projection_state_kind, current_projection_state = self.quest_service._artifact_projection_state(quest_root)
+        try:
+            self.quest_service.update_artifact_projection(
+                quest_root,
+                record=record,
+                artifact_path=artifact_path,
+                workspace_root=write_root,
+                previous_state_kind=previous_projection_state_kind,
+                previous_state=previous_projection_state,
+                current_state_kind=current_projection_state_kind,
+                current_state=current_projection_state,
+            )
+        except Exception:
+            pass
 
         should_checkpoint = self._should_checkpoint(record["kind"]) if checkpoint is None else checkpoint
         checkpoint_result = None
@@ -4026,12 +6579,18 @@ class ArtifactService:
         quest_root: Path,
         *,
         mode: str = "create",
+        submission_mode: str = "line",
         idea_id: str | None = None,
         lineage_intent: str | None = None,
         title: str,
         problem: str = "",
         hypothesis: str = "",
         mechanism: str = "",
+        method_brief: str = "",
+        selection_scores: dict[str, Any] | None = None,
+        mechanism_family: str = "",
+        change_layer: str = "",
+        source_lens: str = "",
         expected_gain: str = "",
         evidence_paths: list[str] | None = None,
         risks: list[str] | None = None,
@@ -4040,18 +6599,30 @@ class ArtifactService:
         foundation_reason: str = "",
         next_target: str = "experiment",
         draft_markdown: str = "",
+        source_candidate_id: str | None = None,
     ) -> dict[str, Any]:
         normalized_mode = str(mode or "create").strip().lower()
         if normalized_mode not in {"create", "revise"}:
             raise ValueError("submit_idea mode must be `create` or `revise`.")
+        normalized_submission_mode = str(submission_mode or "line").strip().lower() or "line"
+        if normalized_submission_mode not in {"line", "candidate"}:
+            raise ValueError("submit_idea submission_mode must be `line` or `candidate`.")
         self._require_baseline_gate_open(quest_root, action="submit_idea")
 
         quest_id = self._quest_id(quest_root)
         state = self.quest_service.read_research_state(quest_root)
+        normalized_method_brief = str(method_brief or "").strip()
+        normalized_selection_scores = self._normalize_selection_scores(selection_scores)
+        normalized_mechanism_family = str(mechanism_family or "").strip() or None
+        normalized_change_layer = str(change_layer or "").strip() or None
+        normalized_source_lens = str(source_lens or "").strip() or None
         evidence_paths = [str(item).strip() for item in (evidence_paths or []) if str(item).strip()]
         risks = [str(item).strip() for item in (risks or []) if str(item).strip()]
         next_target = str(next_target or "experiment").strip().lower() or "experiment"
         normalized_lineage_intent = self._normalize_lineage_intent(lineage_intent)
+        from ..prompts.builder import STANDARD_SKILLS
+
+        next_anchor = next_target if next_target in STANDARD_SKILLS else "experiment"
 
         if normalized_mode == "create":
             resolved_idea_id = str(idea_id or generate_id("idea")).strip()
@@ -4082,6 +6653,171 @@ class ArtifactService:
                     )
             if not parent_branch:
                 raise ValueError("Unable to resolve a starting branch for the new idea.")
+            if normalized_submission_mode == "candidate":
+                candidate_root = self._idea_candidate_root(quest_root, resolved_idea_id)
+                idea_md_path = candidate_root / "idea.md"
+                idea_draft_path = candidate_root / "draft.md"
+                markdown = self._build_candidate_idea_markdown(
+                    idea_id=resolved_idea_id,
+                    quest_id=quest_id,
+                    title=title,
+                    problem=problem,
+                    hypothesis=hypothesis,
+                    mechanism=mechanism,
+                    expected_gain=expected_gain,
+                    risks=risks,
+                    evidence_paths=evidence_paths,
+                    decision_reason=decision_reason,
+                    next_target=next_target,
+                    candidate_root=candidate_root,
+                    method_brief=normalized_method_brief,
+                    selection_scores=normalized_selection_scores,
+                    mechanism_family=normalized_mechanism_family or "",
+                    change_layer=normalized_change_layer or "",
+                    source_lens=normalized_source_lens or "",
+                    foundation_ref=foundation,
+                    foundation_reason=foundation_reason,
+                    lineage_intent=normalized_lineage_intent,
+                )
+                draft = self._build_candidate_idea_draft_markdown(
+                    idea_id=resolved_idea_id,
+                    quest_id=quest_id,
+                    title=title,
+                    problem=problem,
+                    hypothesis=hypothesis,
+                    mechanism=mechanism,
+                    expected_gain=expected_gain,
+                    risks=risks,
+                    evidence_paths=evidence_paths,
+                    decision_reason=decision_reason,
+                    next_target=next_target,
+                    candidate_root=candidate_root,
+                    method_brief=normalized_method_brief,
+                    selection_scores=normalized_selection_scores,
+                    mechanism_family=normalized_mechanism_family or "",
+                    change_layer=normalized_change_layer or "",
+                    source_lens=normalized_source_lens or "",
+                    foundation_ref=foundation,
+                    foundation_reason=foundation_reason,
+                    lineage_intent=normalized_lineage_intent,
+                    draft_markdown=draft_markdown,
+                )
+                write_text(idea_md_path, markdown)
+                write_text(idea_draft_path, draft)
+                artifact = self.record(
+                    quest_root,
+                    {
+                        "kind": "idea",
+                        "status": "candidate",
+                        "summary": f"Idea candidate `{resolved_idea_id}` recorded for later ranking or promotion.",
+                        "reason": decision_reason or "A candidate optimization direction was recorded before promotion into a durable branch.",
+                        "idea_id": resolved_idea_id,
+                        "lineage_intent": normalized_lineage_intent,
+                        "branch": None,
+                        "parent_branch": parent_branch,
+                        "foundation_ref": foundation,
+                        "foundation_reason": foundation_reason.strip() or None,
+                        "flow_type": "idea_submission",
+                        "protocol_step": "candidate",
+                        "paths": {
+                            "idea_md": str(idea_md_path),
+                            "idea_draft_md": str(idea_draft_path),
+                            "candidate_root": str(candidate_root),
+                        },
+                        "details": {
+                            "title": title,
+                            "problem": problem,
+                            "hypothesis": hypothesis,
+                            "mechanism": mechanism,
+                            "method_brief": normalized_method_brief or None,
+                            "selection_scores": normalized_selection_scores or None,
+                            "mechanism_family": normalized_mechanism_family,
+                            "change_layer": normalized_change_layer,
+                            "source_lens": normalized_source_lens,
+                            "expected_gain": expected_gain,
+                            "next_target": next_target,
+                            "lineage_intent": normalized_lineage_intent,
+                            "parent_branch": parent_branch,
+                            "foundation_ref": foundation,
+                            "foundation_reason": foundation_reason.strip() or None,
+                            "idea_draft_path": str(idea_draft_path),
+                            "evidence_paths": evidence_paths,
+                            "risks": risks,
+                            "submission_mode": normalized_submission_mode,
+                            "source_candidate_id": str(source_candidate_id or "").strip() or None,
+                        },
+                    },
+                    checkpoint=False,
+                    workspace_root=quest_root,
+                )
+                interaction = self.interact(
+                    quest_root,
+                    kind="progress",
+                    message=self._build_idea_interaction_message(
+                        quest_root=quest_root,
+                        action="candidate",
+                        idea_id=resolved_idea_id,
+                        title=title,
+                        mechanism=mechanism,
+                        method_brief=normalized_method_brief,
+                        foundation_label=self._format_foundation_label(
+                            foundation,
+                            fallback=foundation.get("branch") or "current head",
+                        ),
+                        branch_name="candidate",
+                        change_layer=normalized_change_layer,
+                        source_lens=normalized_source_lens,
+                        expected_gain=expected_gain,
+                        next_target=next_target,
+                    ),
+                    deliver_to_bound_conversations=True,
+                    include_recent_inbound_messages=False,
+                    attachments=[
+                        {
+                            "kind": "idea_candidate",
+                            "idea_id": resolved_idea_id,
+                            "candidate_root": str(candidate_root),
+                            "parent_branch": parent_branch,
+                            "foundation_ref": foundation,
+                            "submission_mode": normalized_submission_mode,
+                            "source_candidate_id": str(source_candidate_id or "").strip() or None,
+                            "method_brief": normalized_method_brief or None,
+                            "selection_scores": normalized_selection_scores or None,
+                            "mechanism_family": normalized_mechanism_family,
+                            "change_layer": normalized_change_layer,
+                            "source_lens": normalized_source_lens,
+                            "next_target": next_target,
+                        }
+                    ],
+                )
+                return {
+                    "ok": True,
+                    "mode": normalized_mode,
+                    "submission_mode": normalized_submission_mode,
+                    "guidance": artifact.get("guidance"),
+                    "guidance_vm": artifact.get("guidance_vm"),
+                    "next_anchor": artifact.get("next_anchor"),
+                    "recommended_skill_reads": artifact.get("recommended_skill_reads"),
+                    "suggested_artifact_calls": artifact.get("suggested_artifact_calls"),
+                    "next_instruction": artifact.get("next_instruction"),
+                    "idea_id": resolved_idea_id,
+                    "lineage_intent": normalized_lineage_intent,
+                    "parent_branch": parent_branch,
+                    "foundation_ref": foundation,
+                    "foundation_reason": foundation_reason.strip() or None,
+                    "candidate_root": str(candidate_root),
+                    "idea_md_path": str(idea_md_path),
+                    "idea_draft_path": str(idea_draft_path),
+                    "artifact": artifact,
+                    "interaction": interaction,
+                    "promotable": True,
+                    "source_candidate_id": str(source_candidate_id or "").strip() or None,
+                    "method_brief": normalized_method_brief or None,
+                    "selection_scores": normalized_selection_scores or None,
+                    "mechanism_family": normalized_mechanism_family,
+                    "change_layer": normalized_change_layer,
+                    "source_lens": normalized_source_lens,
+                }
             branch_name = f"idea/{quest_id}-{resolved_idea_id}"
             worktree_root = canonical_worktree_root(quest_root, f"idea-{resolved_idea_id}")
             branch_result = ensure_branch(quest_root, branch_name, start_point=parent_branch, checkout=False)
@@ -4108,6 +6844,11 @@ class ArtifactService:
                 next_target=next_target,
                 branch=branch_name,
                 worktree_root=worktree_root,
+                method_brief=normalized_method_brief,
+                selection_scores=normalized_selection_scores,
+                mechanism_family=normalized_mechanism_family or "",
+                change_layer=normalized_change_layer or "",
+                source_lens=normalized_source_lens or "",
                 foundation_ref=foundation,
                 foundation_reason=foundation_reason,
                 lineage_intent=normalized_lineage_intent,
@@ -4126,6 +6867,11 @@ class ArtifactService:
                 next_target=next_target,
                 branch=branch_name,
                 worktree_root=worktree_root,
+                method_brief=normalized_method_brief,
+                selection_scores=normalized_selection_scores,
+                mechanism_family=normalized_mechanism_family or "",
+                change_layer=normalized_change_layer or "",
+                source_lens=normalized_source_lens or "",
                 foundation_ref=foundation,
                 foundation_reason=foundation_reason,
                 lineage_intent=normalized_lineage_intent,
@@ -4161,6 +6907,11 @@ class ArtifactService:
                         "problem": problem,
                         "hypothesis": hypothesis,
                         "mechanism": mechanism,
+                        "method_brief": normalized_method_brief or None,
+                        "selection_scores": normalized_selection_scores or None,
+                        "mechanism_family": normalized_mechanism_family,
+                        "change_layer": normalized_change_layer,
+                        "source_lens": normalized_source_lens,
                         "expected_gain": expected_gain,
                         "next_target": next_target,
                         "branch_no": branch_no,
@@ -4171,6 +6922,8 @@ class ArtifactService:
                         "idea_draft_path": str(idea_draft_path),
                         "evidence_paths": evidence_paths,
                         "risks": risks,
+                        "submission_mode": normalized_submission_mode,
+                        "source_candidate_id": str(source_candidate_id or "").strip() or None,
                     },
                 },
                 checkpoint=False,
@@ -4192,31 +6945,30 @@ class ArtifactService:
                 workspace_mode="idea",
                 last_flow_type="idea_submission",
             )
-            self.quest_service.update_settings(quest_id, active_anchor="experiment")
+            self.quest_service.update_settings(quest_id, active_anchor=next_anchor)
             checkpoint_result = self._checkpoint_with_optional_push(
                 worktree_root,
                 message=f"idea: create {resolved_idea_id}",
             )
-            idea_md_rel_path = self._workspace_relative(quest_root, idea_md_path)
-            idea_draft_rel_path = self._workspace_relative(quest_root, idea_draft_path)
             interaction = self.interact(
                 quest_root,
                 kind="milestone",
                 message=self._build_idea_interaction_message(
+                    quest_root=quest_root,
                     action="create",
                     idea_id=resolved_idea_id,
                     title=title,
-                    problem=problem,
-                    hypothesis=hypothesis,
                     mechanism=mechanism,
+                    method_brief=normalized_method_brief,
                     foundation_label=self._format_foundation_label(
                         foundation,
                         fallback=foundation.get("branch") or "current head",
                     ),
                     branch_name=branch_name,
+                    change_layer=normalized_change_layer,
+                    source_lens=normalized_source_lens,
+                    expected_gain=expected_gain,
                     next_target=next_target,
-                    idea_md_rel_path=idea_md_rel_path,
-                    draft_md_rel_path=idea_draft_rel_path,
                 ),
                 deliver_to_bound_conversations=True,
                 include_recent_inbound_messages=False,
@@ -4233,6 +6985,13 @@ class ArtifactService:
                         "worktree_root": str(worktree_root),
                         "idea_md_path": str(idea_md_path),
                         "idea_draft_path": str(idea_draft_path),
+                        "submission_mode": normalized_submission_mode,
+                        "source_candidate_id": str(source_candidate_id or "").strip() or None,
+                        "method_brief": normalized_method_brief or None,
+                        "selection_scores": normalized_selection_scores or None,
+                        "mechanism_family": normalized_mechanism_family,
+                        "change_layer": normalized_change_layer,
+                        "source_lens": normalized_source_lens,
                         "next_target": next_target,
                     }
                 ],
@@ -4240,6 +6999,7 @@ class ArtifactService:
             return {
                 "ok": True,
                 "mode": normalized_mode,
+                "submission_mode": normalized_submission_mode,
                 "guidance": artifact.get("guidance"),
                 "guidance_vm": artifact.get("guidance_vm"),
                 "next_anchor": artifact.get("next_anchor"),
@@ -4262,11 +7022,19 @@ class ArtifactService:
                 "checkpoint": checkpoint_result,
                 "interaction": interaction,
                 "research_state": research_state,
+                "source_candidate_id": str(source_candidate_id or "").strip() or None,
+                "method_brief": normalized_method_brief or None,
+                "selection_scores": normalized_selection_scores or None,
+                "mechanism_family": normalized_mechanism_family,
+                "change_layer": normalized_change_layer,
+                "source_lens": normalized_source_lens,
             }
 
         resolved_idea_id = str(idea_id or state.get("active_idea_id") or "").strip()
         if not resolved_idea_id:
             raise ValueError("submit_idea(mode='revise') requires an existing active `idea_id`.")
+        if normalized_submission_mode != "line":
+            raise ValueError("submit_idea(mode='revise') currently only supports submission_mode='line'.")
         if normalized_lineage_intent:
             raise ValueError("submit_idea(mode='revise') does not accept `lineage_intent`; use mode='create' for new branch lineage.")
         branch_name = str(
@@ -4288,6 +7056,11 @@ class ArtifactService:
         draft_created_at = None
         existing_foundation_ref = None
         existing_foundation_reason = None
+        existing_method_brief = None
+        existing_selection_scores = None
+        existing_mechanism_family = None
+        existing_change_layer = None
+        existing_source_lens = None
         if idea_md_path.exists():
             metadata, _body = load_markdown_document(idea_md_path)
             created_at = metadata.get("created_at")
@@ -4297,9 +7070,29 @@ class ArtifactService:
                 else None
             )
             existing_foundation_reason = str(metadata.get("foundation_reason") or "").strip() or None
+            existing_method_brief = str(metadata.get("method_brief") or "").strip() or None
+            existing_selection_scores = self._normalize_selection_scores(metadata.get("selection_scores"))
+            existing_mechanism_family = str(metadata.get("mechanism_family") or "").strip() or None
+            existing_change_layer = str(metadata.get("change_layer") or "").strip() or None
+            existing_source_lens = str(metadata.get("source_lens") or "").strip() or None
         if idea_draft_path.exists():
             draft_metadata, _draft_body = load_markdown_document(idea_draft_path)
             draft_created_at = draft_metadata.get("created_at")
+            if existing_method_brief is None:
+                existing_method_brief = str(draft_metadata.get("method_brief") or "").strip() or None
+            if existing_selection_scores is None:
+                existing_selection_scores = self._normalize_selection_scores(draft_metadata.get("selection_scores"))
+            if existing_mechanism_family is None:
+                existing_mechanism_family = str(draft_metadata.get("mechanism_family") or "").strip() or None
+            if existing_change_layer is None:
+                existing_change_layer = str(draft_metadata.get("change_layer") or "").strip() or None
+            if existing_source_lens is None:
+                existing_source_lens = str(draft_metadata.get("source_lens") or "").strip() or None
+        revised_method_brief = normalized_method_brief or existing_method_brief or ""
+        revised_selection_scores = normalized_selection_scores or existing_selection_scores
+        revised_mechanism_family = normalized_mechanism_family or existing_mechanism_family
+        revised_change_layer = normalized_change_layer or existing_change_layer
+        revised_source_lens = normalized_source_lens or existing_source_lens
         markdown = self._build_idea_markdown(
             idea_id=resolved_idea_id,
             quest_id=quest_id,
@@ -4314,6 +7107,11 @@ class ArtifactService:
             next_target=next_target,
             branch=branch_name,
             worktree_root=worktree_root,
+            method_brief=revised_method_brief,
+            selection_scores=revised_selection_scores,
+            mechanism_family=revised_mechanism_family or "",
+            change_layer=revised_change_layer or "",
+            source_lens=revised_source_lens or "",
             foundation_ref=existing_foundation_ref,
             foundation_reason=foundation_reason.strip() or existing_foundation_reason or "",
             lineage_intent=None,
@@ -4333,6 +7131,11 @@ class ArtifactService:
             next_target=next_target,
             branch=branch_name,
             worktree_root=worktree_root,
+            method_brief=revised_method_brief,
+            selection_scores=revised_selection_scores,
+            mechanism_family=revised_mechanism_family or "",
+            change_layer=revised_change_layer or "",
+            source_lens=revised_source_lens or "",
             foundation_ref=existing_foundation_ref,
             foundation_reason=foundation_reason.strip() or existing_foundation_reason or "",
             lineage_intent=None,
@@ -4368,6 +7171,11 @@ class ArtifactService:
                     "problem": problem,
                     "hypothesis": hypothesis,
                     "mechanism": mechanism,
+                    "method_brief": revised_method_brief or None,
+                    "selection_scores": revised_selection_scores or None,
+                    "mechanism_family": revised_mechanism_family,
+                    "change_layer": revised_change_layer,
+                    "source_lens": revised_source_lens,
                     "expected_gain": expected_gain,
                     "next_target": next_target,
                     "parent_branch": parent_branch,
@@ -4376,6 +7184,7 @@ class ArtifactService:
                     "idea_draft_path": str(idea_draft_path),
                     "evidence_paths": evidence_paths,
                     "risks": risks,
+                    "submission_mode": normalized_submission_mode,
                 },
             },
             checkpoint=False,
@@ -4398,31 +7207,30 @@ class ArtifactService:
             quest_root,
             **research_state_updates,
         )
-        self.quest_service.update_settings(quest_id, active_anchor="experiment")
+        self.quest_service.update_settings(quest_id, active_anchor=next_anchor)
         checkpoint_result = self._checkpoint_with_optional_push(
             worktree_root,
             message=f"idea: revise {resolved_idea_id}",
         )
-        idea_md_rel_path = self._workspace_relative(quest_root, idea_md_path)
-        idea_draft_rel_path = self._workspace_relative(quest_root, idea_draft_path)
         interaction = self.interact(
             quest_root,
             kind="progress",
             message=self._build_idea_interaction_message(
+                quest_root=quest_root,
                 action="revise",
                 idea_id=resolved_idea_id,
                 title=title,
-                problem=problem,
-                hypothesis=hypothesis,
                 mechanism=mechanism,
+                method_brief=revised_method_brief,
                 foundation_label=self._format_foundation_label(
                     existing_foundation_ref,
                     fallback=(existing_foundation_ref or {}).get("branch") or "current head",
                 ),
                 branch_name=branch_name,
+                change_layer=revised_change_layer,
+                source_lens=revised_source_lens,
+                expected_gain=expected_gain,
                 next_target=next_target,
-                idea_md_rel_path=idea_md_rel_path,
-                draft_md_rel_path=idea_draft_rel_path,
             ),
             deliver_to_bound_conversations=True,
             include_recent_inbound_messages=False,
@@ -4436,6 +7244,12 @@ class ArtifactService:
                     "worktree_root": str(worktree_root),
                     "idea_md_path": str(idea_md_path),
                     "idea_draft_path": str(idea_draft_path),
+                    "submission_mode": normalized_submission_mode,
+                    "method_brief": revised_method_brief or None,
+                    "selection_scores": revised_selection_scores or None,
+                    "mechanism_family": revised_mechanism_family,
+                    "change_layer": revised_change_layer,
+                    "source_lens": revised_source_lens,
                     "next_target": next_target,
                 }
             ],
@@ -4443,6 +7257,7 @@ class ArtifactService:
         return {
             "ok": True,
             "mode": normalized_mode,
+            "submission_mode": normalized_submission_mode,
             "guidance": artifact.get("guidance"),
             "guidance_vm": artifact.get("guidance_vm"),
             "next_anchor": artifact.get("next_anchor"),
@@ -4457,6 +7272,11 @@ class ArtifactService:
             "worktree_root": str(worktree_root),
             "idea_md_path": str(idea_md_path),
             "idea_draft_path": str(idea_draft_path),
+            "method_brief": revised_method_brief or None,
+            "selection_scores": revised_selection_scores or None,
+            "mechanism_family": revised_mechanism_family,
+            "change_layer": revised_change_layer,
+            "source_lens": revised_source_lens,
             "artifact": artifact,
             "checkpoint": checkpoint_result,
             "interaction": interaction,
@@ -4531,6 +7351,12 @@ class ArtifactService:
         if isinstance(quest_data.get("startup_contract"), dict):
             return dict(quest_data.get("startup_contract") or {})
         return {}
+
+    def _post_baseline_anchor(self, quest_root: Path) -> str:
+        startup_contract = self._startup_contract(quest_root)
+        raw_need_research_paper = startup_contract.get("need_research_paper")
+        need_research_paper = raw_need_research_paper if isinstance(raw_need_research_paper, bool) else True
+        return "idea" if need_research_paper else "optimize"
 
     def _decision_policy(self, quest_root: Path) -> str:
         value = str(self._startup_contract(quest_root).get("decision_policy") or "").strip().lower()
@@ -4862,6 +7688,7 @@ class ArtifactService:
             "metric_validation": metric_validation,
         }
         write_json(result_json_path, result_payload)
+        metric_charts: list[dict[str, Any]] = []
 
         artifact = self.record(
             quest_root,
@@ -4882,6 +7709,13 @@ class ArtifactService:
                 "paths": {
                     "run_md": str(run_md_path),
                     "result_json": str(result_json_path),
+                    **(
+                        {
+                            "connector_chart_dir": str(self._main_experiment_chart_dir(workspace_root, run_id=run_identifier))
+                        }
+                        if metric_charts
+                        else {}
+                    ),
                 },
                 "details": {
                     "title": title.strip() or run_identifier,
@@ -4897,6 +7731,7 @@ class ArtifactService:
                     "auto_promoted_run_branch": auto_promoted_run_branch,
                     "changed_file_count": len(resolved_changed_files),
                     "evidence_count": len(resolved_evidence_paths),
+                    "connector_chart_count": 0,
                     "evaluation_summary": normalized_evaluation_summary,
                 },
                 "delivery_policy": delivery_policy,
@@ -4922,6 +7757,23 @@ class ArtifactService:
             commit_message=f"experiment: record main {run_identifier}",
             workspace_root=workspace_root,
         )
+        metric_charts = self._generate_main_experiment_metric_charts(
+            quest_root,
+            workspace_root=workspace_root,
+            run_id=run_identifier,
+        )
+        if metric_charts:
+            result_payload["connector_metric_charts"] = metric_charts
+            write_json(result_json_path, result_payload)
+            artifact_record = dict(artifact.get("record") or {}) if isinstance(artifact.get("record"), dict) else {}
+            artifact_record["connector_metric_charts"] = metric_charts
+            details = dict(artifact_record.get("details") or {}) if isinstance(artifact_record.get("details"), dict) else {}
+            details["connector_chart_count"] = len(metric_charts)
+            artifact_record["details"] = details
+            artifact["record"] = artifact_record
+            artifact_path = Path(str(artifact.get("path") or ""))
+            if artifact_path:
+                write_json(artifact_path, artifact_record)
         interaction = self.interact(
             quest_root,
             kind="milestone",
@@ -4959,8 +7811,77 @@ class ArtifactService:
                     "need_research_paper": delivery_policy.get("need_research_paper"),
                     "recommended_next_route": delivery_policy.get("recommended_next_route"),
                     "evaluation_summary": normalized_evaluation_summary,
+                    "connector_metric_charts": metric_charts,
                 }
             ],
+        )
+        chart_delivery = self._send_main_experiment_metric_charts(
+            quest_root,
+            run_id=run_identifier,
+            title=title.strip() or run_identifier,
+            charts=metric_charts,
+        )
+        outline_path, selected_outline = self._read_selected_outline_for_sync(quest_root)
+        selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
+        detailed_outline = (
+            dict(selected_outline.get("detailed_outline") or {})
+            if isinstance(selected_outline.get("detailed_outline"), dict)
+            else {}
+        )
+        outline_sections = self._normalize_outline_sections(
+            selected_outline.get("sections"),
+            experimental_designs=self._normalize_string_list(detailed_outline.get("experimental_designs")),
+        )
+        section_id = next(
+            (
+                str(section.get("section_id") or "").strip()
+                for section in outline_sections
+                if run_identifier in self._normalize_string_list(section.get("required_items"))
+                or run_identifier in self._normalize_string_list(section.get("optional_items"))
+            ),
+            None,
+        )
+        if not section_id:
+            section_id = next(
+                (
+                    str(section.get("section_id") or "").strip()
+                    for section in outline_sections
+                    if str(section.get("paper_role") or "main_text").strip() == "main_text"
+                ),
+                None,
+            )
+        if not section_id:
+            section_id = str((outline_sections[0] or {}).get("section_id") or "").strip() if outline_sections else "main-results"
+        paper_role = "main_text"
+        self._upsert_paper_evidence_item(
+            quest_root,
+            {
+                "item_id": run_identifier,
+                "title": title.strip() or run_identifier,
+                "kind": "main_experiment",
+                "status": status,
+                "paper_role": paper_role,
+                "section_id": section_id,
+                "claim_links": [],
+                "setup": setup.strip() or None,
+                "result_summary": results.strip() or conclusion.strip() or progress_eval.get("reason"),
+                "key_metrics": self._paper_evidence_key_metrics(
+                    metric_rows=normalized_metric_rows,
+                    metrics_summary=normalized_metrics_summary,
+                ),
+                "source_paths": [
+                    value
+                    for value in [
+                        self._workspace_relative(quest_root, run_md_path),
+                        self._workspace_relative(quest_root, result_json_path),
+                        *resolved_evidence_paths,
+                    ]
+                    if value
+                ],
+                "run_id": run_identifier,
+                "selected_outline_ref": str(selected_outline.get("outline_id") or "").strip() or None,
+                "evaluation_summary": normalized_evaluation_summary,
+            },
         )
         self.quest_service.update_settings(self._quest_id(quest_root), active_anchor="decision")
         research_state = self.quest_service.update_research_state(
@@ -4995,6 +7916,8 @@ class ArtifactService:
             "result_json_path": str(result_json_path),
             "artifact": artifact,
             "interaction": interaction,
+            "connector_metric_charts": metric_charts,
+            "connector_metric_chart_delivery": chart_delivery,
             "research_state": research_state,
             "metrics_summary": normalized_metrics_summary,
             "baseline_comparisons": {
@@ -5095,6 +8018,45 @@ class ArtifactService:
                     "Writing-facing analysis campaigns require one todo item per slice. "
                     f"Missing todo items for: {', '.join(missing_slice_ids)}."
                 )
+            missing_contract_fields: list[str] = []
+            for item in normalized_todo_items:
+                title = str(item.get("title") or item.get("slice_id") or item.get("todo_id") or "todo").strip() or "todo"
+                for field in ("section_id", "item_id", "paper_role"):
+                    if str(item.get(field) or "").strip():
+                        continue
+                    missing_contract_fields.append(f"{title}:{field}")
+                if not self._normalize_string_list(item.get("claim_links")):
+                    missing_contract_fields.append(f"{title}:claim_links")
+            if missing_contract_fields:
+                raise ValueError(
+                    "Writing-facing analysis campaigns require outline-bound paper contract fields for every todo item. "
+                    f"Missing: {', '.join(missing_contract_fields[:8])}."
+                )
+        paper_line_branch: str | None = None
+        paper_line_root: str | None = None
+        paper_line_id: str | None = None
+        if writing_facing:
+            paper_context = self._ensure_active_paper_workspace(
+                quest_root,
+                source_branch=parent_branch,
+                source_run_id=resolved_parent_run_id,
+                source_idea_id=active_idea_id,
+            )
+            paper_line_branch = str(paper_context.get("branch") or "").strip() or None
+            paper_line_root = str(paper_context.get("worktree_root") or "").strip() or None
+            paper_line_id = self._paper_line_id(
+                paper_branch=paper_line_branch,
+                outline_id=resolved_outline_ref,
+                source_run_id=resolved_parent_run_id,
+            )
+            if paper_line_root:
+                self._write_paper_line_state(
+                    quest_root,
+                    workspace_root=Path(paper_line_root),
+                    source_branch=parent_branch,
+                    source_run_id=resolved_parent_run_id,
+                    source_idea_id=active_idea_id,
+                )
         slice_contexts: list[dict[str, Any]] = []
         inventory_entries: list[dict[str, Any]] = []
         for index, raw in enumerate(slices, start=1):
@@ -5123,6 +8085,19 @@ class ArtifactService:
             manuscript_targets = self._normalize_string_list(
                 raw.get("manuscript_targets") or matched_todo.get("manuscript_targets")
             )
+            section_id = str(raw.get("section_id") or matched_todo.get("section_id") or "").strip() or None
+            item_id = str(raw.get("item_id") or matched_todo.get("item_id") or slice_id).strip() or slice_id
+            claim_links = self._normalize_string_list(raw.get("claim_links") or matched_todo.get("claim_links"))
+            paper_role = (
+                str(raw.get("paper_role") or matched_todo.get("paper_role") or matched_todo.get("paper_placement") or "").strip()
+                or None
+            )
+            paper_placement = (
+                str(raw.get("paper_placement") or matched_todo.get("paper_placement") or paper_role or "").strip()
+                or None
+            )
+            tier = str(raw.get("tier") or matched_todo.get("tier") or "").strip() or None
+            exp_id = str(raw.get("exp_id") or matched_todo.get("exp_id") or "").strip() or None
             why_now = str(raw.get("why_now") or matched_todo.get("why_now") or "").strip()
             success_criteria = str(raw.get("success_criteria") or matched_todo.get("success_criteria") or "").strip()
             abandonment_criteria = str(
@@ -5145,14 +8120,24 @@ class ArtifactService:
                 "",
                 str(raw.get("research_question") or matched_todo.get("research_question") or "").strip() or "TBD",
                 "",
-                "## Experimental Design",
-                "",
-                str(raw.get("experimental_design") or matched_todo.get("experimental_design") or "").strip() or "TBD",
-                "",
-                "## Why Now",
-                "",
-                why_now or "TBD",
-                "",
+                    "## Experimental Design",
+                    "",
+                    str(raw.get("experimental_design") or matched_todo.get("experimental_design") or "").strip() or "TBD",
+                    "",
+                    "## Paper Contract Binding",
+                    "",
+                    f"- Section id: `{section_id or 'none'}`",
+                    f"- Item id: `{item_id}`",
+                    f"- Exp id: `{exp_id or 'none'}`",
+                    f"- Paper role: `{paper_role or 'none'}`",
+                    f"- Paper placement: `{paper_placement or 'none'}`",
+                    f"- Tier: `{tier or 'none'}`",
+                    f"- Claim links: {', '.join(claim_links) or 'none'}",
+                    "",
+                    "## Why Now",
+                    "",
+                    why_now or "TBD",
+                    "",
                 "## Hypothesis",
                 "",
                 str(raw.get("hypothesis") or "").strip() or "TBD",
@@ -5228,6 +8213,13 @@ class ArtifactService:
                     "experimental_design": str(
                         raw.get("experimental_design") or matched_todo.get("experimental_design") or ""
                     ).strip(),
+                    "section_id": section_id,
+                    "item_id": item_id,
+                    "exp_id": exp_id,
+                    "paper_role": paper_role,
+                    "paper_placement": paper_placement,
+                    "tier": tier,
+                    "claim_links": claim_links,
                     "why_now": why_now,
                     "hypothesis": str(raw.get("hypothesis") or "").strip(),
                     "required_changes": str(raw.get("required_changes") or "").strip(),
@@ -5275,12 +8267,19 @@ class ArtifactService:
             "experimental_designs": normalized_experimental_designs,
             "todo_items": [
                 {
+                    "exp_id": str(item.get("exp_id") or context.get("exp_id") or "").strip() or None,
                     "todo_id": str(item.get("todo_id") or item.get("slice_id") or context["slice_id"]).strip() or context["slice_id"],
                     "slice_id": context["slice_id"],
                     "title": str(item.get("title") or context["title"]).strip() or context["title"],
                     "status": str(item.get("status") or "pending").strip() or "pending",
                     "research_question": item.get("research_question") or context.get("research_question"),
                     "experimental_design": item.get("experimental_design") or context.get("experimental_design"),
+                    "tier": item.get("tier") or context.get("tier"),
+                    "paper_placement": item.get("paper_placement") or context.get("paper_placement"),
+                    "paper_role": item.get("paper_role") or context.get("paper_role"),
+                    "section_id": item.get("section_id") or context.get("section_id"),
+                    "item_id": item.get("item_id") or context.get("item_id"),
+                    "claim_links": item.get("claim_links") or context.get("claim_links") or [],
                     "completion_condition": item.get("completion_condition") or context.get("completion_condition") or context.get("must_not_simplify"),
                     "why_now": item.get("why_now") or context.get("why_now"),
                     "success_criteria": item.get("success_criteria") or context.get("success_criteria"),
@@ -5339,6 +8338,11 @@ class ArtifactService:
                     f"- Goal: {item['goal'] or 'TBD'}",
                     f"- Research question: {item['research_question'] or 'TBD'}",
                     f"- Experimental design: {item['experimental_design'] or 'TBD'}",
+                    f"- Section id: `{item['section_id'] or 'none'}`",
+                    f"- Item id: `{item['item_id'] or 'none'}`",
+                    f"- Exp id: `{item['exp_id'] or 'none'}`",
+                    f"- Paper role: `{item['paper_role'] or 'none'}`",
+                    f"- Claim links: {', '.join(item['claim_links']) or 'none'}",
                     f"- Why now: {item['why_now'] or 'TBD'}",
                     f"- Required baselines: {', '.join(self._analysis_baseline_label(entry) for entry in item['required_baselines']) or 'none'}",
                     f"- Success criteria: {item['success_criteria'] or 'TBD'}",
@@ -5361,6 +8365,9 @@ class ArtifactService:
                 "active_idea_id": active_idea_id,
                 "parent_branch": parent_branch,
                 "parent_worktree_root": str(parent_worktree_root),
+                "paper_line_id": paper_line_id,
+                "paper_line_branch": paper_line_branch,
+                "paper_line_root": paper_line_root,
                 "campaign_origin": normalized_campaign_origin,
                 "selected_outline_ref": resolved_outline_ref,
                 "research_questions": normalized_research_questions,
@@ -5398,6 +8405,13 @@ class ArtifactService:
                         "run_kind": item["run_kind"],
                         "research_question": item["research_question"],
                         "experimental_design": item["experimental_design"],
+                        "section_id": item["section_id"],
+                        "item_id": item["item_id"],
+                        "exp_id": item["exp_id"],
+                        "paper_role": item["paper_role"],
+                        "paper_placement": item["paper_placement"],
+                        "tier": item["tier"],
+                        "claim_links": item["claim_links"],
                         "why_now": item["why_now"],
                         "completion_condition": item["completion_condition"] or item["must_not_simplify"],
                         "must_not_simplify": item["must_not_simplify"],
@@ -5433,6 +8447,9 @@ class ArtifactService:
                     "campaign_title": campaign_title,
                     "campaign_goal": campaign_goal,
                     "parent_run_id": resolved_parent_run_id,
+                    "paper_line_id": paper_line_id,
+                    "paper_line_branch": paper_line_branch,
+                    "paper_line_root": paper_line_root,
                     "campaign_origin": normalized_campaign_origin,
                     "selected_outline_ref": resolved_outline_ref,
                     "todo_manifest_path": str(todo_manifest_path),
@@ -5447,6 +8464,13 @@ class ArtifactService:
                             "goal": item["goal"],
                             "research_question": item["research_question"],
                             "experimental_design": item["experimental_design"],
+                            "section_id": item["section_id"],
+                            "item_id": item["item_id"],
+                            "exp_id": item["exp_id"],
+                            "paper_role": item["paper_role"],
+                            "paper_placement": item["paper_placement"],
+                            "tier": item["tier"],
+                            "claim_links": item["claim_links"],
                             "why_now": item["why_now"],
                             "completion_condition": item["completion_condition"] or item["must_not_simplify"],
                             "must_not_simplify": item["must_not_simplify"],
@@ -5463,6 +8487,32 @@ class ArtifactService:
             checkpoint=False,
             workspace_root=parent_worktree_root,
         )
+        if writing_facing:
+            self._sync_outline_sections(
+                quest_root,
+                items=[
+                    {
+                        "item_id": item.get("item_id"),
+                        "title": item.get("title"),
+                        "kind": "analysis_slice",
+                        "paper_role": item.get("paper_role"),
+                        "status": "pending",
+                        "claim_links": item.get("claim_links"),
+                        "section_id": item.get("section_id"),
+                        "source_paths": [self._workspace_relative(quest_root, Path(item["plan_path"]))] if item.get("plan_path") else [],
+                    }
+                    for item in slice_contexts
+                ],
+                workspace_root=Path(paper_line_root) if paper_line_root else None,
+            )
+            if paper_line_root:
+                self._write_paper_line_state(
+                    quest_root,
+                    workspace_root=Path(paper_line_root),
+                    source_branch=parent_branch,
+                    source_run_id=resolved_parent_run_id,
+                    source_idea_id=active_idea_id,
+                )
         research_state = self.quest_service.update_research_state(
             quest_root,
             active_idea_id=active_idea_id,
@@ -5568,9 +8618,7 @@ class ArtifactService:
             selected_outline_path = paper_root / "selected_outline.json"
         else:
             selected_outline_path = self._paper_selected_outline_path(quest_root, workspace_root=workspace_root)
-        existing_selected = read_json(selected_outline_path, {})
-        if not isinstance(existing_selected, dict) or not existing_selected:
-            existing_selected = read_json(quest_root / "paper" / "selected_outline.json", {})
+        _, existing_selected = self._read_selected_outline_record(quest_root, workspace_root=workspace_root)
         existing_selected = existing_selected if isinstance(existing_selected, dict) else {}
         if normalized_mode == "candidate":
             resolved_outline_id = str(outline_id or self._next_paper_outline_id(quest_root)).strip()
@@ -5650,10 +8698,8 @@ class ArtifactService:
             created_at=str(source_record.get("created_at") or "") or None,
         )
 
-        write_json(selected_outline_path, resolved_record)
-        canonical_selected_outline_path = quest_root / "paper" / "selected_outline.json"
-        if canonical_selected_outline_path.resolve() != selected_outline_path.resolve():
-            write_json(canonical_selected_outline_path, resolved_record)
+        self._write_selected_outline_sync(quest_root, resolved_record, workspace_root=workspace_root)
+        selected_outline_path = paper_root / "selected_outline.json"
         if source_candidate_path.exists():
             source_record["status"] = "selected" if normalized_mode == "select" else "revised"
             source_record["updated_at"] = utc_now()
@@ -5682,6 +8728,13 @@ class ArtifactService:
             "",
         ]
         write_text(outline_selection_path, "\n".join(selection_lines).rstrip() + "\n")
+        paper_line_state = self._write_paper_line_state(
+            quest_root,
+            workspace_root=workspace_root,
+            source_branch=str(paper_context.get("source_branch") or "").strip() or None,
+            source_run_id=str(paper_context.get("source_run_id") or "").strip() or None,
+            source_idea_id=str(paper_context.get("source_idea_id") or "").strip() or None,
+        )
         self.quest_service.update_settings(self._quest_id(quest_root), active_anchor="write")
         artifact = self.record(
             quest_root,
@@ -5695,13 +8748,17 @@ class ArtifactService:
                 "protocol_step": "select" if normalized_mode == "select" else "revise",
                 "paths": {
                     "selected_outline_json": str(selected_outline_path),
+                    "outline_manifest_json": str(self._paper_outline_manifest_path(quest_root, workspace_root=workspace_root)),
                     "outline_selection_md": str(outline_selection_path),
+                    "paper_line_state_json": str(self._paper_line_state_path(quest_root, workspace_root=workspace_root)),
                     **({"revised_outline_json": str(revised_outline_path)} if revised_outline_path else {}),
                 },
                 "details": {
                     "outline_id": source_outline_id,
                     "title": resolved_record.get("title"),
                     "selected_reason": selected_reason,
+                    "paper_line_id": paper_line_state.get("paper_line_id"),
+                    "paper_branch": paper_line_state.get("paper_branch"),
                 },
             },
             checkpoint=False,
@@ -5742,6 +8799,8 @@ class ArtifactService:
                     "title": resolved_record.get("title"),
                     "selected_reason": selected_reason,
                     "selected_outline_path": str(selected_outline_path),
+                    "outline_manifest_path": str(self._paper_outline_manifest_path(quest_root, workspace_root=workspace_root)),
+                    "paper_line_state_path": str(self._paper_line_state_path(quest_root, workspace_root=workspace_root)),
                     "outline_selection_path": str(outline_selection_path),
                     "revised_outline_path": str(revised_outline_path) if revised_outline_path else None,
                 }
@@ -5752,9 +8811,12 @@ class ArtifactService:
             "mode": normalized_mode,
             "outline_id": source_outline_id,
             "selected_outline_path": str(selected_outline_path),
+            "outline_manifest_path": str(self._paper_outline_manifest_path(quest_root, workspace_root=workspace_root)),
+            "paper_line_state_path": str(self._paper_line_state_path(quest_root, workspace_root=workspace_root)),
             "outline_selection_path": str(outline_selection_path),
             "revised_outline_path": str(revised_outline_path) if revised_outline_path else None,
             "record": resolved_record,
+            "paper_line_state": paper_line_state,
             "artifact": artifact,
             "interaction": interaction,
         }
@@ -5773,36 +8835,78 @@ class ArtifactService:
         compile_report_path: str | None = None,
         pdf_path: str | None = None,
         latex_root_path: str | None = None,
+        prepare_open_source: bool = False,
     ) -> dict[str, Any]:
         paper_context = self._ensure_active_paper_workspace(quest_root)
         workspace_root = Path(str(paper_context.get("worktree_root") or self._workspace_root_for(quest_root)))
         paper_root = self._paper_root(quest_root, workspace_root=workspace_root, create=True)
-        selected_outline_path = self._paper_selected_outline_path(quest_root, workspace_root=workspace_root)
-        selected_outline = read_json(selected_outline_path, {})
-        if not isinstance(selected_outline, dict) or not selected_outline:
-            fallback_selected_outline_path = quest_root / "paper" / "selected_outline.json"
-            selected_outline = read_json(fallback_selected_outline_path, {})
-            if isinstance(selected_outline, dict) and selected_outline:
-                selected_outline_path = fallback_selected_outline_path
+        selected_outline_path, selected_outline = self._read_selected_outline_record(
+            quest_root,
+            workspace_root=workspace_root,
+        )
         selected_outline = selected_outline if isinstance(selected_outline, dict) else {}
         if not selected_outline and not str(outline_path or "").strip():
             raise ValueError("submit_paper_bundle requires a selected outline or explicit `outline_path`.")
+        gate_status = self._paper_bundle_gate_status(quest_root, workspace_root=workspace_root)
+        if gate_status.get("unresolved_required_items") or gate_status.get("unmapped_completed_items"):
+            problems: list[str] = []
+            if gate_status.get("unresolved_required_items"):
+                preview = [
+                    f"{item.get('section_id') or 'section'}:{item.get('item_id') or 'item'}"
+                    for item in (gate_status.get("unresolved_required_items") or [])[:5]
+                    if isinstance(item, dict)
+                ]
+                problems.append(
+                    "unresolved required outline items"
+                    + (f" ({', '.join(preview)})" if preview else "")
+                )
+            if gate_status.get("unmapped_completed_items"):
+                preview = [
+                    f"{item.get('campaign_id') or 'analysis'}:{item.get('slice_id') or item.get('item_id') or 'slice'}"
+                    for item in (gate_status.get("unmapped_completed_items") or [])[:5]
+                    if isinstance(item, dict)
+                ]
+                problems.append(
+                    "completed analysis results still unmapped into the paper contract"
+                    + (f" ({', '.join(preview)})" if preview else "")
+                )
+            raise ValueError(
+                "submit_paper_bundle blocked because the paper evidence contract is incomplete: "
+                + "; ".join(problems)
+                + "."
+            )
 
         manifest_path = self._paper_bundle_manifest_path(quest_root, workspace_root=workspace_root)
         baseline_inventory = self._write_paper_baseline_inventory(quest_root, workspace_root=workspace_root)
         baseline_inventory_path = self._paper_baseline_inventory_path(quest_root, workspace_root=workspace_root)
+        evidence_ledger_path = self._paper_evidence_ledger_path(quest_root)
+        if not evidence_ledger_path.exists():
+            self._write_paper_evidence_ledger(
+                quest_root,
+                {
+                    "selected_outline_ref": str(selected_outline.get("outline_id") or "").strip() or None,
+                    "items": [],
+                },
+                workspace_root=workspace_root,
+            )
+        experiment_matrix_path = paper_root / "paper_experiment_matrix.md"
+        experiment_matrix_json_path = self._paper_experiment_matrix_json_path(quest_root, workspace_root=workspace_root)
         source_branch = str(paper_context.get("source_branch") or "").strip() or None
         paper_branch = str(paper_context.get("branch") or "").strip() or current_branch(workspace_root)
         source_run_id = str(paper_context.get("source_run_id") or "").strip() or None
         source_idea_id = str(paper_context.get("source_idea_id") or "").strip() or None
         paper_manifest_rel = self._workspace_relative(quest_root, manifest_path) or "paper/paper_bundle_manifest.json"
         paper_inventory_rel = self._workspace_relative(quest_root, baseline_inventory_path) or "paper/baseline_inventory.json"
-        open_source_manifest = self._ensure_open_source_prep(
-            quest_root,
-            workspace_root=workspace_root,
-            source_branch=source_branch,
-            source_bundle_manifest_path=paper_manifest_rel,
-            baseline_inventory_path=paper_inventory_rel,
+        open_source_manifest = (
+            self._ensure_open_source_prep(
+                quest_root,
+                workspace_root=workspace_root,
+                source_branch=source_branch,
+                source_bundle_manifest_path=paper_manifest_rel,
+                baseline_inventory_path=paper_inventory_rel,
+            )
+            if prepare_open_source
+            else {}
         )
         default_draft_path = self._workspace_relative(quest_root, paper_root / "draft.md") or "paper/draft.md"
         default_writing_plan_path = self._workspace_relative(quest_root, paper_root / "writing_plan.md") or "paper/writing_plan.md"
@@ -5838,23 +8942,53 @@ class ArtifactService:
             "writing_plan_path": str(writing_plan_path or default_writing_plan_path).strip() or None,
             "references_path": str(references_path or default_references_path).strip() or None,
             "claim_evidence_map_path": str(claim_evidence_map_path or default_claim_map_path).strip() or None,
+            "evidence_ledger_path": self._workspace_relative(quest_root, evidence_ledger_path) or "paper/evidence_ledger.json",
+            "experiment_matrix_path": (
+                self._workspace_relative(quest_root, experiment_matrix_path) if experiment_matrix_path.exists() else None
+            ),
+            "experiment_matrix_json_path": (
+                self._workspace_relative(quest_root, experiment_matrix_json_path)
+                if experiment_matrix_json_path.exists()
+                else None
+            ),
             "compile_report_path": str(compile_report_path or default_compile_report_path).strip() or None,
             "pdf_path": str(pdf_path or "").strip() or None,
             "latex_root_path": normalized_latex_root_path,
             "baseline_inventory_path": paper_inventory_rel,
-            "open_source_manifest_path": self._workspace_relative(
-                quest_root,
-                self._open_source_manifest_path(quest_root, workspace_root=workspace_root),
+            "prepare_open_source": bool(prepare_open_source),
+            "open_source_manifest_path": (
+                self._workspace_relative(
+                    quest_root,
+                    self._open_source_manifest_path(quest_root, workspace_root=workspace_root),
+                )
+                if prepare_open_source
+                else None
+            ),
+            "open_source_cleanup_plan_path": (
+                str(open_source_manifest.get("cleanup_plan_path") or "").strip() or None
             )
-            or "release/open_source/manifest.json",
-            "open_source_cleanup_plan_path": str(open_source_manifest.get("cleanup_plan_path") or "").strip()
-            or "release/open_source/cleanup_plan.md",
+            if prepare_open_source
+            else None,
             "selected_outline_ref": str(selected_outline.get("outline_id") or "").strip() or None,
+            "evidence_gate": gate_status,
             "created_at": utc_now(),
             "updated_at": utc_now(),
         }
         write_json(manifest_path, manifest)
+        paper_line_state = self._write_paper_line_state(
+            quest_root,
+            workspace_root=workspace_root,
+            source_branch=source_branch,
+            source_run_id=source_run_id,
+            source_idea_id=source_idea_id,
+        )
         self.quest_service.update_settings(self._quest_id(quest_root), active_anchor="finalize")
+        self.quest_service.set_continuation_state(
+            quest_root,
+            policy="wait_for_user_or_resume",
+            anchor="decision",
+            reason="paper_bundle_submitted",
+        )
         artifact = self.record(
             quest_root,
             {
@@ -5870,17 +9004,27 @@ class ArtifactService:
                     "outline_path": manifest.get("outline_path"),
                     "draft_path": manifest.get("draft_path"),
                     "pdf_path": manifest.get("pdf_path"),
+                    "evidence_ledger_path": str(evidence_ledger_path) if evidence_ledger_path.exists() else None,
                     "baseline_inventory_path": str(baseline_inventory_path),
-                    "open_source_manifest_path": str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root)),
+                    "open_source_manifest_path": (
+                        str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root))
+                        if prepare_open_source
+                        else None
+                    ),
                 },
                 "details": {
                     "title": manifest.get("title"),
                     "selected_outline_ref": manifest.get("selected_outline_ref"),
+                    "ready_section_count": gate_status.get("ready_section_count"),
+                    "section_count": gate_status.get("section_count"),
+                    "ledger_item_count": gate_status.get("ledger_item_count"),
+                    "paper_line_id": paper_line_state.get("paper_line_id"),
                     "baseline_inventory_count": len(baseline_inventory.get("supplementary_baselines") or []),
-                    "open_source_status": open_source_manifest.get("status"),
+                    "open_source_status": open_source_manifest.get("status") if prepare_open_source else None,
                     "paper_branch": paper_branch,
                     "source_branch": source_branch,
                     "source_run_id": source_run_id,
+                    "prepare_open_source": bool(prepare_open_source),
                 },
             },
             checkpoint=False,
@@ -5901,6 +9045,7 @@ class ArtifactService:
                 writing_plan_rel_path=str(manifest.get("writing_plan_path") or "").strip() or None,
                 references_rel_path=str(manifest.get("references_path") or "").strip() or None,
                 claim_evidence_map_rel_path=str(manifest.get("claim_evidence_map_path") or "").strip() or None,
+                evidence_ledger_rel_path=str(manifest.get("evidence_ledger_path") or "").strip() or None,
                 compile_report_rel_path=str(manifest.get("compile_report_path") or "").strip() or None,
                 pdf_rel_path=str(manifest.get("pdf_path") or "").strip() or None,
                 latex_root_rel_path=str(manifest.get("latex_root_path") or "").strip() or None,
@@ -5922,11 +9067,17 @@ class ArtifactService:
                     "writing_plan_path": manifest.get("writing_plan_path"),
                     "references_path": manifest.get("references_path"),
                     "claim_evidence_map_path": manifest.get("claim_evidence_map_path"),
+                    "evidence_ledger_path": manifest.get("evidence_ledger_path"),
                     "compile_report_path": manifest.get("compile_report_path"),
                     "pdf_path": manifest.get("pdf_path"),
                     "latex_root_path": manifest.get("latex_root_path"),
                     "baseline_inventory_path": str(baseline_inventory_path),
-                    "open_source_manifest_path": str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root)),
+                    "prepare_open_source": bool(prepare_open_source),
+                    "open_source_manifest_path": (
+                        str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root))
+                        if prepare_open_source
+                        else None
+                    ),
                 }
             ],
         )
@@ -5935,7 +9086,14 @@ class ArtifactService:
             "manifest_path": str(manifest_path),
             "manifest": manifest,
             "baseline_inventory_path": str(baseline_inventory_path),
-            "open_source_manifest_path": str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root)),
+            "evidence_ledger_path": str(evidence_ledger_path),
+            "paper_line_state_path": str(self._paper_line_state_path(quest_root, workspace_root=workspace_root)),
+            "paper_line_state": paper_line_state,
+            "open_source_manifest_path": (
+                str(self._open_source_manifest_path(quest_root, workspace_root=workspace_root))
+                if prepare_open_source
+                else None
+            ),
             "artifact": artifact,
             "interaction": interaction,
         }
@@ -6079,10 +9237,18 @@ class ArtifactService:
             "result_kind": "analysis_slice",
             "campaign_id": campaign_id,
             "slice_id": slice_id,
+            "selected_outline_ref": str(manifest.get("selected_outline_ref") or "").strip() or None,
             "status": status,
             "title": target.get("title"),
             "goal": target.get("goal"),
             "run_kind": target.get("run_kind"),
+            "exp_id": target.get("exp_id"),
+            "section_id": target.get("section_id"),
+            "item_id": target.get("item_id"),
+            "paper_role": target.get("paper_role"),
+            "paper_placement": target.get("paper_placement"),
+            "tier": target.get("tier"),
+            "claim_links": target.get("claim_links") or [],
             "required_baselines": target.get("required_baselines") or [],
             "comparison_baselines": normalized_comparison_baselines,
             "metrics_summary": normalized_metrics_summary,
@@ -6119,6 +9285,15 @@ class ArtifactService:
             "## Goal",
             "",
             str(target.get("goal") or "").strip() or "TBD",
+            "",
+            "## Paper Contract Binding",
+            "",
+            f"- Selected outline: `{str(manifest.get('selected_outline_ref') or 'none').strip() or 'none'}`",
+            f"- Section id: `{str(target.get('section_id') or 'none').strip() or 'none'}`",
+            f"- Item id: `{str(target.get('item_id') or slice_id).strip() or slice_id}`",
+            f"- Exp id: `{str(target.get('exp_id') or 'none').strip() or 'none'}`",
+            f"- Paper role: `{str(target.get('paper_role') or 'none').strip() or 'none'}`",
+            f"- Claim links: {', '.join(str(value).strip() for value in (target.get('claim_links') or []) if str(value).strip()) or 'none'}",
             "",
             "## Core Requirement",
             "",
@@ -6191,6 +9366,14 @@ class ArtifactService:
                     "must_not_simplify": target.get("must_not_simplify"),
                     "dataset_scope": normalized_scope,
                     "subset_approval_ref": subset_approval_ref,
+                    "selected_outline_ref": str(manifest.get("selected_outline_ref") or "").strip() or None,
+                    "section_id": target.get("section_id"),
+                    "item_id": target.get("item_id"),
+                    "exp_id": target.get("exp_id"),
+                    "paper_role": target.get("paper_role"),
+                    "paper_placement": target.get("paper_placement"),
+                    "tier": target.get("tier"),
+                    "claim_links": target.get("claim_links") or [],
                     "metric_rows": normalized_metric_rows,
                     "claim_impact": normalized_claim_impact,
                     "reviewer_resolution": normalized_reviewer_resolution,
@@ -6227,6 +9410,7 @@ class ArtifactService:
             updated["result_path"] = str(result_path)
             updated["result_json_path"] = str(result_json_path)
             updated["mirror_path"] = str(mirror_path)
+            updated["selected_outline_ref"] = str(manifest.get("selected_outline_ref") or "").strip() or None
             updated["claim_impact"] = normalized_claim_impact
             updated["reviewer_resolution"] = normalized_reviewer_resolution
             updated["manuscript_update_hint"] = normalized_manuscript_update_hint
@@ -6245,6 +9429,49 @@ class ArtifactService:
                 "slices": updated_slices,
             },
         )
+        paper_line_root = str(manifest.get("paper_line_root") or "").strip() or None
+        self._upsert_paper_evidence_item(
+            quest_root,
+            {
+                "item_id": str(target.get("item_id") or slice_id).strip() or slice_id,
+                "title": str(target.get("title") or slice_id).strip() or slice_id,
+                "kind": "analysis_slice",
+                "status": status,
+                "paper_role": str(target.get("paper_role") or target.get("paper_placement") or "").strip() or None,
+                "section_id": str(target.get("section_id") or "").strip() or None,
+                "claim_links": self._normalize_string_list(target.get("claim_links")),
+                "setup": setup.strip() or None,
+                "result_summary": results.strip() or normalized_claim_impact or normalized_manuscript_update_hint or None,
+                "key_metrics": self._paper_evidence_key_metrics(
+                    metric_rows=normalized_metric_rows,
+                    metrics_summary=normalized_metrics_summary,
+                ),
+                "source_paths": [
+                    value
+                    for value in [
+                        self._workspace_relative(quest_root, result_path),
+                        self._workspace_relative(quest_root, result_json_path),
+                        self._workspace_relative(quest_root, mirror_path),
+                        *evidence_paths,
+                    ]
+                    if value
+                ],
+                "campaign_id": campaign_id,
+                "slice_id": slice_id,
+                "selected_outline_ref": str(manifest.get("selected_outline_ref") or "").strip() or None,
+                "evaluation_summary": normalized_evaluation_summary,
+                "claim_impact": normalized_claim_impact,
+            },
+            workspace_root=Path(paper_line_root) if paper_line_root else None,
+        )
+        if paper_line_root:
+            self._write_paper_line_state(
+                quest_root,
+                workspace_root=Path(paper_line_root),
+                source_branch=str(manifest.get("parent_branch") or "").strip() or None,
+                source_run_id=str(manifest.get("parent_run_id") or "").strip() or None,
+                source_idea_id=str(manifest.get("active_idea_id") or "").strip() or None,
+            )
         baseline_inventory = (
             self._upsert_analysis_baseline_inventory(
                 quest_root,
@@ -6837,6 +10064,7 @@ class ArtifactService:
                     "source_mode": source_mode,
                     "comment": comment,
                 },
+                "startup_contract": self._startup_contract(quest_root) or None,
                 "source": {"kind": "system", "role": "artifact"},
             },
             checkpoint=True,
@@ -6856,7 +10084,7 @@ class ArtifactService:
             quest_root,
             baseline_gate="confirmed",
             confirmed_baseline_ref=confirmed_ref,
-            active_anchor="idea" if auto_advance else "baseline",
+            active_anchor=self._post_baseline_anchor(quest_root) if auto_advance else "baseline",
         )
         registry_entry = self._sync_confirmed_baseline_registry_entry(
             quest_root=quest_root,
@@ -6914,6 +10142,7 @@ class ArtifactService:
                     "baseline_gate": "waived",
                     "comment": comment,
                 },
+                "startup_contract": self._startup_contract(quest_root) or None,
                 "source": {"kind": "system", "role": "artifact"},
             },
             checkpoint=True,
@@ -6922,7 +10151,7 @@ class ArtifactService:
             quest_root,
             baseline_gate="waived",
             confirmed_baseline_ref=None,
-            active_anchor="idea" if auto_advance else "baseline",
+            active_anchor=self._post_baseline_anchor(quest_root) if auto_advance else "baseline",
         )
         return {
             "ok": True,
@@ -7037,9 +10266,13 @@ class ArtifactService:
         reply_schema: dict[str, Any] | None = None,
         reply_to_interaction_id: str | None = None,
         supersede_open_requests: bool = True,
+        dedupe_key: str | None = None,
+        suppress_if_unchanged: bool | None = None,
+        min_interval_seconds: int | None = None,
     ) -> dict:
         durable_kind = {
             "progress": "progress",
+            "answer": "answer",
             "milestone": "milestone",
             "decision_request": "decision",
             "approval_result": "approval",
@@ -7051,7 +10284,7 @@ class ArtifactService:
         reply_schema_resolved = reply_schema if isinstance(reply_schema, dict) else {}
         reply_mode_resolved = str(
             reply_mode
-            or ("blocking" if kind == "decision_request" else "threaded" if kind in {"progress", "milestone"} else "none")
+            or ("blocking" if kind == "decision_request" else "threaded" if kind in {"progress", "milestone", "answer"} else "none")
         ).strip().lower()
         if reply_mode_resolved not in {"none", "threaded", "blocking"}:
             reply_mode_resolved = "blocking" if kind == "decision_request" else "threaded"
@@ -7128,6 +10361,59 @@ class ArtifactService:
                 "decision_type": decision_type or None,
                 "guidance": guidance,
             }
+        suppress_resolved = (kind == "progress") if suppress_if_unchanged is None else bool(suppress_if_unchanged)
+        dedupe_key_resolved = str(dedupe_key or self._normalize_interaction_message(message)).strip() or None
+        if (
+            kind == "progress"
+            and suppress_resolved
+            and dedupe_key_resolved
+            and int(self.quest_service.snapshot(self._quest_id(quest_root)).get("pending_user_message_count") or 0) == 0
+        ):
+            prior_interaction = self._latest_duplicate_progress_interaction(
+                quest_root,
+                dedupe_key=dedupe_key_resolved,
+                min_interval_seconds=min_interval_seconds,
+            )
+            if prior_interaction is not None:
+                interaction_state = self._read_interaction_state(quest_root)
+                waiting_requests = [
+                    dict(item)
+                    for item in (interaction_state.get("open_requests") or [])
+                    if str(item.get("status") or "") == "waiting"
+                ]
+                return {
+                    "status": "suppressed_duplicate",
+                    "artifact_id": prior_interaction.get("artifact_id"),
+                    "interaction_id": prior_interaction.get("interaction_id"),
+                    "expects_reply": False,
+                    "reply_mode": "threaded",
+                    "surface_actions": [],
+                    "connector_hints": connector_hints_resolved,
+                    "normalized_attachments": attachments_resolved,
+                    "attachment_issues": attachment_issues,
+                    "delivered": False,
+                    "delivery_results": [],
+                    "response_phase": response_phase,
+                    "delivery_targets": [],
+                    "delivery_policy": self._delivery_policy(self._connectors_config()),
+                    "preferred_connector": self._preferred_connector(self._connectors_config()),
+                    "recent_inbound_messages": [],
+                    "delivery_batch": None,
+                    "recent_interaction_records": self.quest_service.latest_artifact_interaction_records(quest_root, limit=10),
+                    "agent_instruction": self.quest_service.localized_copy(
+                        quest_root=quest_root,
+                        zh="当前用户可见状态没有变化，不需要再发送一条重复 progress。继续工作，等出现真实变化再汇报。",
+                        en="The user-visible state has not changed. Do not send another duplicate progress update; continue working until there is a real change.",
+                    ),
+                    "queued_message_count_before_delivery": 0,
+                    "queued_message_count_after_delivery": 0,
+                    "open_request_count": len(waiting_requests),
+                    "active_request": waiting_requests[-1] if waiting_requests else None,
+                    "default_reply_interaction_id": interaction_state.get("default_reply_interaction_id"),
+                    "guidance": "Duplicate progress was suppressed because the latest user-visible state is unchanged.",
+                    "suppressed_reason": "unchanged_progress",
+                    "dedupe_key": dedupe_key_resolved,
+                }
         resolved_artifact_id = generate_id(durable_kind)
         resolved_interaction_id = interaction_id or (
             resolved_artifact_id if reply_mode_resolved != "none" or reply_to_interaction_id else None
@@ -7135,7 +10421,7 @@ class ArtifactService:
         payload: dict[str, Any] = {
             "kind": durable_kind,
             "artifact_id": resolved_artifact_id,
-            "status": "active" if durable_kind == "progress" else "completed",
+            "status": "completed" if kind == "answer" else "active" if durable_kind == "progress" else "completed",
             "message": message,
             "summary": message,
             "interaction_phase": "request" if kind == "decision_request" else response_phase,
@@ -7217,6 +10503,9 @@ class ArtifactService:
                 if delivery_result.get("ok", False) or delivery_result.get("queued", False):
                     delivery_targets.append(target)
                     delivered = True
+        counts_as_visible = (not deliver_to_bound_conversations) or (not delivery_results) or any(
+            bool(item.get("ok", False)) for item in delivery_results
+        )
 
         mailbox_payload = {
             "delivery_batch": None,
@@ -7242,11 +10531,13 @@ class ArtifactService:
             artifact_id=artifact.get("artifact_id"),
             kind=kind,
             message=message,
+            dedupe_key=dedupe_key_resolved,
             response_phase=response_phase,
             reply_mode=reply_mode_resolved,
             surface_actions=surface_actions_resolved,
             connector_hints=connector_hints_resolved,
             created_at=(artifact.get("record") or {}).get("updated_at"),
+            counts_as_visible=counts_as_visible,
         )
 
         return {
@@ -7276,6 +10567,36 @@ class ArtifactService:
             "default_reply_interaction_id": request_state.get("default_reply_interaction_id"),
             "guidance": "如果收到新的用户要求，请先吸收这些要求；如果没有新消息，请继续当前任务并在真实检查点再次汇报。",
         }
+
+    @staticmethod
+    def _normalize_interaction_message(message: str) -> str:
+        return " ".join(str(message or "").split())
+
+    def _latest_duplicate_progress_interaction(
+        self,
+        quest_root: Path,
+        *,
+        dedupe_key: str,
+        min_interval_seconds: int | None,
+    ) -> dict[str, Any] | None:
+        recent = self.quest_service.latest_artifact_interaction_records(quest_root, limit=40)
+        for item in reversed(recent):
+            record_type = str(item.get("type") or "").strip()
+            if record_type == "user_inbound":
+                return None
+            if record_type != "artifact_outbound":
+                continue
+            if str(item.get("kind") or "").strip() != "progress":
+                continue
+            previous_key = str(item.get("dedupe_key") or self._normalize_interaction_message(item.get("message") or "")).strip()
+            if previous_key != dedupe_key:
+                continue
+            if min_interval_seconds:
+                seconds_since = self.quest_service._seconds_since_iso_timestamp(item.get("created_at"))
+                if seconds_since is not None and seconds_since > int(min_interval_seconds):
+                    return None
+            return dict(item)
+        return None
 
     def complete_quest(
         self,
@@ -7465,6 +10786,7 @@ class ArtifactService:
     def _default_status(kind: str) -> str:
         return {
             "progress": "active",
+            "answer": "completed",
             "decision": "pending",
             "approval": "accepted",
             "graph": "generated",

@@ -164,6 +164,188 @@ def test_deleted_quest_ids_are_not_reused(temp_home: Path) -> None:
     assert [first["quest_id"], second["quest_id"], third["quest_id"], fourth["quest_id"]] == ["001", "002", "003", "004"]
 
 
+def test_snapshot_exposes_paper_contract_and_analysis_inventory(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    service = QuestService(temp_home)
+    snapshot = service.create("paper analysis snapshot quest")
+    quest_root = Path(snapshot["quest_root"])
+    idea_root = ensure_dir(quest_root / "artifacts" / "ideas")
+    run_root = ensure_dir(quest_root / "artifacts" / "runs")
+
+    write_json(
+        idea_root / "idea-001.json",
+        {
+            "kind": "idea",
+            "idea_id": "idea-001",
+            "branch": "idea/001-idea-001",
+            "parent_branch": "main",
+            "updated_at": "2026-03-28T00:00:00Z",
+            "details": {
+                "title": "Audit-ready idea",
+                "lineage_intent": "continue_line",
+            },
+            "paths": {
+                "idea_md": str(quest_root / "memory" / "ideas" / "idea-001" / "idea.md"),
+                "idea_draft_md": str(quest_root / "memory" / "ideas" / "idea-001" / "draft.md"),
+            },
+        },
+    )
+    write_json(
+        run_root / "run-main-001.json",
+        {
+            "kind": "run",
+            "idea_id": "idea-001",
+            "run_id": "run-main-001",
+            "run_kind": "experiment",
+            "branch": "run/run-main-001",
+            "parent_branch": "idea/001-idea-001",
+            "updated_at": "2026-03-28T00:05:00Z",
+            "metric_rows": [{"metric_id": "acc", "value": 0.91}],
+        },
+    )
+
+    paper_root = ensure_dir(quest_root / "paper")
+    write_json(
+        paper_root / "selected_outline.json",
+        {
+            "outline_id": "outline-001",
+            "title": "Outline Title",
+            "story": "Outline story",
+            "detailed_outline": {
+                "research_questions": ["RQ1", "RQ2"],
+                "experimental_designs": ["EXP1", "EXP2"],
+                "contributions": ["C1"],
+            },
+            "sections": [
+                {
+                    "section_id": "results-main",
+                    "title": "Main Results",
+                    "paper_role": "main_text",
+                    "required_items": ["run-main-001"],
+                    "result_table": [],
+                }
+            ],
+            "evidence_contract": {"main_text_items_must_be_ready": True},
+        },
+    )
+    write_text(paper_root / "paper_experiment_matrix.md", "# Matrix\n")
+    write_json(paper_root / "paper_bundle_manifest.json", {"paper_branch": "paper/test", "selected_outline_ref": "outline-001"})
+    write_json(paper_root / "claim_evidence_map.json", {"claims": []})
+    write_json(
+        paper_root / "paper_line_state.json",
+        {
+            "paper_line_id": "paper-line-001",
+            "paper_branch": "paper/test",
+            "source_branch": "run/run-main-001",
+            "source_run_id": "run-main-001",
+            "source_idea_id": "idea-001",
+            "selected_outline_ref": "outline-001",
+            "title": "Outline Title",
+            "required_count": 1,
+            "ready_required_count": 1,
+            "unmapped_count": 0,
+            "open_supplementary_count": 0,
+            "updated_at": "2026-03-28T00:00:00Z",
+        },
+    )
+    write_json(
+        paper_root / "evidence_ledger.json",
+        {
+            "selected_outline_ref": "outline-001",
+            "items": [
+                {
+                    "item_id": "run-main-001",
+                    "title": "Main run",
+                    "kind": "main_experiment",
+                    "paper_role": "main_text",
+                    "section_id": "results-main",
+                    "status": "completed",
+                }
+            ],
+        },
+    )
+    write_text(paper_root / "evidence_ledger.md", "# Ledger\n")
+    review_root = ensure_dir(paper_root / "review")
+    write_json(review_root / "submission_checklist.json", {"blocking_items": []})
+    write_text(paper_root / "draft.md", "# Draft\n")
+    analysis_manifest_root = ensure_dir(quest_root / ".ds" / "analysis_campaigns")
+    write_json(
+        analysis_manifest_root / "analysis-test.json",
+        {
+            "campaign_id": "analysis-test",
+            "active_idea_id": "idea-001",
+            "parent_run_id": "run-main-001",
+            "parent_branch": "run/run-main-001",
+            "paper_line_id": "paper-line-001",
+            "paper_line_branch": "paper/test",
+            "paper_line_root": str(quest_root),
+            "selected_outline_ref": "outline-001",
+            "slices": [
+                {
+                    "slice_id": "slice-a",
+                    "branch": "analysis/idea-001/analysis-test-slice-a",
+                    "worktree_root": str(quest_root / ".ds" / "worktrees" / "analysis-test-slice-a"),
+                    "status": "completed",
+                }
+            ],
+        },
+    )
+
+    analysis_root = ensure_dir(quest_root / "experiments" / "analysis-results" / "analysis-test")
+    write_json(
+        analysis_root / "todo_manifest.json",
+        {
+            "selected_outline_ref": "outline-001",
+            "todo_items": [
+                {
+                    "slice_id": "slice-a",
+                    "title": "Slice A",
+                    "status": "completed",
+                    "section_id": "results-main",
+                    "item_id": "AN-001",
+                    "claim_links": ["C1"],
+                    "research_question": "RQ-A",
+                    "experimental_design": "ED-A",
+                    "paper_role": "main_text",
+                }
+            ],
+        },
+    )
+    write_text(analysis_root / "campaign.md", "# Campaign\n")
+    write_text(analysis_root / "SUMMARY.md", "# Summary\n\nCampaign summary.\n")
+    write_text(analysis_root / "slice-a.md", "# Slice A\n\nResult summary.\n")
+
+    refreshed = service.snapshot(snapshot["quest_id"])
+
+    assert refreshed["paper_contract"]["selected_outline_ref"] == "outline-001"
+    assert refreshed["paper_contract"]["title"] == "Outline Title"
+    assert refreshed["paper_contract"]["research_questions"] == ["RQ1", "RQ2"]
+    assert refreshed["paper_contract"]["paths"]["experiment_matrix"].endswith("paper/paper_experiment_matrix.md")
+    assert refreshed["paper_contract"]["paths"]["evidence_ledger_json"].endswith("paper/evidence_ledger.json")
+    assert refreshed["paper_contract"]["paths"]["paper_line_state"].endswith("paper/paper_line_state.json")
+    assert refreshed["paper_contract"]["sections"][0]["section_id"] == "results-main"
+    assert refreshed["paper_contract"]["evidence_summary"]["item_count"] == 1
+    assert refreshed["paper_evidence"]["item_count"] == 1
+    assert refreshed["idea_lines"][0]["idea_line_id"] == "idea-001"
+    assert refreshed["active_idea_line_ref"] == "idea-001"
+    assert refreshed["idea_lines"][0]["latest_main_run_id"] == "run-main-001"
+    assert refreshed["idea_lines"][0]["paper_line_id"] == "paper-line-001"
+    assert refreshed["paper_contract_health"]["contract_ok"] is True
+    assert refreshed["paper_contract_health"]["writing_ready"] is True
+    assert refreshed["paper_contract_health"]["recommended_next_stage"] == "finalize"
+    assert refreshed["paper_lines"][0]["paper_line_id"] == "paper-line-001"
+    assert refreshed["active_paper_line_ref"] == "paper-line-001"
+    assert refreshed["analysis_inventory"]["campaign_count"] == 1
+    assert refreshed["analysis_inventory"]["slice_count"] == 1
+    assert refreshed["analysis_inventory"]["mapped_slice_count"] == 1
+    assert refreshed["analysis_inventory"]["campaigns"][0]["campaign_id"] == "analysis-test"
+    assert refreshed["analysis_inventory"]["campaigns"][0]["active_idea_id"] == "idea-001"
+    assert refreshed["analysis_inventory"]["campaigns"][0]["paper_line_id"] == "paper-line-001"
+    assert refreshed["analysis_inventory"]["campaigns"][0]["slices"][0]["slice_id"] == "slice-a"
+    assert refreshed["analysis_inventory"]["campaigns"][0]["slices"][0]["branch"] == "analysis/idea-001/analysis-test-slice-a"
+    assert refreshed["analysis_inventory"]["campaigns"][0]["slices"][0]["mapped"] is True
+
+
 def test_auto_generated_quest_ids_initialize_from_existing_numeric_quests(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     for quest_id in ("001", "002", "010"):

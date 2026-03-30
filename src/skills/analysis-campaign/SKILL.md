@@ -70,6 +70,7 @@ It preserves the core old DeepScientist analysis-experimenter discipline:
 The campaign should behave like a disciplined evidence program, not an unstructured pile of extra runs.
 
 For campaign prioritization and writing-facing slice design, read `references/campaign-design.md`.
+When the campaign is paper-facing and the mapping fields are not obvious, also read `references/writing-facing-slice-examples.md`.
 
 ## Quick workflow
 
@@ -93,6 +94,7 @@ Treat this as the compressed campaign map. The authoritative slice protocol and 
 - When a selected outline exists, every slice should map to a named `research_question` and `experimental_design` from that outline.
 - When the campaign is supporting a paper or paper-like report, do not launch or reorder the slice set without first reading `paper/paper_experiment_matrix.md` when it exists.
 - For writing-facing campaigns, every slice should correspond to a stable matrix row such as `exp_id`, not just a free-form note.
+- For writing-facing campaigns, every todo item must also carry `section_id`, `item_id`, `claim_links`, and `paper_role`; otherwise the slice is not paper-ready.
 - Do not aggregate campaign conclusions without per-run evidence.
 - Do not bury null or contradictory findings.
 
@@ -129,6 +131,22 @@ Treat quest files, attached user assets, checkpoints, configs, extracted texts, 
 Do not design slices around hypothetical resources that the current system cannot actually access or run.
 If a slice cannot be executed with the current system, redesign it around available assets or explicitly report that the task cannot currently be completed.
 If infeasibility appears mid-run, attempt bounded recovery first; if still blocked, record the slice with a non-success status and explain why.
+If ids, active refs, or current quest state are unclear after restart, call `artifact.get_quest_state(detail='summary')` and `artifact.resolve_runtime_refs(...)` before launching or recording slices.
+If the exact quest brief / plan / status wording matters for campaign scope, call `artifact.read_quest_documents(...)`.
+If earlier user instructions materially affect campaign scope or ordering, call `artifact.get_conversation_context(...)` before changing the slice set.
+
+For concrete paper-facing cases:
+
+- if the slice is the only thing keeping a main-text section unsupported, make it `main_required` / `main_text`
+- if the slice is useful but non-blocking, make it `appendix`
+- if the slice is informative but not meant for the manuscript, keep it durable and mark it `reference_only` with a reason
+- after every completed paper-facing slice, verify the return path immediately:
+  - the matching outline `result_table` row is updated
+  - the section notes are updated when the outline folder exists
+  - `paper/evidence_ledger.json` reflects the new mapping
+  - the active paper line summary no longer treats that slice as missing
+
+Do not leave a slice "completed" while the paper contract still looks stale.
 
 ## Required plan and checklist
 
@@ -234,6 +252,16 @@ If the campaign exists to support a paper or paper-like report:
   - `tier`
   - `paper_placement`
   - `completion_condition`
+
+For writing-facing campaigns, every slice should also carry paper-contract identity, not just free-form text:
+
+- `section_id`
+- `item_id`
+- `claim_links`
+- `paper_role`
+
+Do not treat a completed analysis slice as paper-ready until those fields exist and the slice is mappable back into the selected outline or paper experiment matrix.
+Use `references/writing-facing-slice-examples.md` when the correct field values are not obvious.
 
 This keeps the analysis campaign aligned with the paper plan instead of becoming a free-floating batch of slices.
 
@@ -393,8 +421,8 @@ For slices that run longer than a quick smoke check:
   - if you only need wall-clock waiting between checks, use `bash_exec(command='sleep N', mode='await', timeout_seconds=N+buffer, ...)`
   - keep a real buffer on that sleep timeout; do not set `timeout_seconds` exactly equal to `N`
   - if you are waiting on an already running managed session, prefer `bash_exec(mode='await', id=..., timeout_seconds=...)` instead of starting a new sleep command
-- after the first meaningful signal and then at real checkpoints (e.g., completion, or roughly every ~30 minutes if still running), send `artifact.interact(kind='progress', ...)` so the user sees slice status, latest evidence, and the next check point
-- after each completed sleep / await monitoring cycle for an active slice, send another concise `artifact.interact(kind='progress', ...)` update rather than going silent
+- after the first meaningful signal and then at real checkpoints (e.g., completion, blocker, recovery, or a materially changed evidence frontier), send `artifact.interact(kind='progress', ...)` so the user sees the newest real state
+- after each completed sleep / await monitoring cycle for an active slice, inspect state first; only send another `artifact.interact(kind='progress', ...)` update if the user-visible state materially changed
 - include the estimated next reply time or next check time in those monitoring updates
 - stop them with `bash_exec(mode='kill', id=..., wait=true, timeout_seconds=...)` if the slice is invalid, wedged, or superseded; add `force=true` when immediate termination is required
 - when you control the slice code, prefer a throttled `tqdm` progress reporter and, when feasible, pair it with concise `__DS_PROGRESS__` lines carrying phase and ETA
