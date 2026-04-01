@@ -35,6 +35,10 @@
   <a href="https://openreview.net/forum?id=cZFgsLq8Gs">Paper</a>
 </p>
 
+
+https://github.com/user-attachments/assets/3c7abb44-2b25-4477-a011-10a3154d6d76
+
+
 ## About
 
 DeepScientist is not just a long-running autonomous scientific discovery system. It is also a persistent research map that lives on your own machine.
