@@ -41,6 +41,7 @@ not:
 Unless the acceptance target explicitly requires a stronger package, prefer the lightest route that still makes the downstream comparison honest.
 Do not escalate from attach / import / verify-local-existing into full source reproduction unless the lighter route cannot support a fair comparison.
 A more complete baseline package is only the default when the acceptance target is explicitly `paper_repro_ready` or `registry_publishable`.
+For `comparison_ready`, `verify-local-existing`, attach, or import should usually beat full reproduction.
 
 ## Non-negotiable rules
 
@@ -181,6 +182,16 @@ The stage should leave one accepted baseline or one explicit blocker.
 - one accepted baseline artifact or one explicit blocked report
 - one concise `1-2` sentence summary naming trust state and next anchor
 
+## File-by-file contract
+
+- `PLAN.md` or a compatibility alias such as `analysis_plan.md` is the route contract for non-trivial baseline work
+- `CHECKLIST.md` or a compatibility alias such as `REPRO_CHECKLIST.md` is the living baseline frontier
+- `setup.md` when environment or layout choices are non-trivial
+- `execution.md` when the run is long, multi-step, or rerun-heavy
+- `verification.md` as a filename when a separate verification note is clearer
+- `attachment.yaml` for attached or imported baselines
+- `<baseline_root>/json/metric_contract.json` as the canonical accepted comparison contract
+
 ## Baseline identity note
 
 Keep baseline identifiers and variant names stable enough that later stages can cite the same comparator without guesswork.
@@ -237,6 +248,8 @@ Prepare the selected route:
 For Python baselines, prefer `uv` unless a repo-native route is clearly more trustworthy or required.
 
 ### Python environment rule: prefer `uv`
+
+For Python baselines, environment setup should be standardized around `uv` unless a repo-native route is concretely more trustworthy or required.
 
 - use `uv sync` when the repo already ships a trustworthy `pyproject.toml` or lockfile
 - otherwise create an isolated environment with `uv venv`

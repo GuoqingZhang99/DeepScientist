@@ -352,6 +352,7 @@ Retry-delta discipline:
 - before each retry, state the expected effect and the fastest falsification signal
 - if the retry produced no interpretable delta, do not treat it as meaningful evidence about the underlying research hypothesis
 - if the retry does not change the hypothesis, code path, command path, or evidence surface, stop rerunning and route through `decision`
+- if the same failure class appears again without a real route or evidence change, stop looping and route through `decision`
 
 ### 5. Execute the run
 
