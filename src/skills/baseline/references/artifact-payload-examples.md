@@ -1,6 +1,6 @@
 # Artifact Payload Examples
 
-Use this reference when the `baseline` stage needs a stable payload shape without re-expanding the main skill body.
+Use this reference when `baseline` needs a stable artifact shape without re-expanding the whole skill body.
 
 ## Route or blocked decision
 

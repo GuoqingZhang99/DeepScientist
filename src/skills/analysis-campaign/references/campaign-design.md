@@ -31,16 +31,6 @@ Prefer this order:
 - `supporting`
   - broadens confidence or interpretability after the main claim is already credible
 
-## Campaign question
-
-Each slice should answer one of these:
-
-- does the main claim still hold when X changes?
-- which component actually causes the gain?
-- where does the method fail?
-- how sensitive is the method to a controllable factor?
-- what boundary should be written into the paper?
-
 ## Writing-facing policy
 
 If the campaign is tied to a selected outline:

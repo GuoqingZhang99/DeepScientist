@@ -16,16 +16,7 @@ The goal is to keep the discovery work reusable so later `baseline` and `idea` p
   - missing baseline candidate
   - resumed quest refresh
 
-## 2. Memory consulted before external search
-
-List:
-
-- quest cards read
-- global cards read
-- what they already answered
-- what remained missing or stale
-
-## 3. Search ledger
+## 2. Search ledger
 
 For each meaningful search pass, record:
 
@@ -42,7 +33,7 @@ Recommended source labels:
 - `open-web`
 - `repo-search`
 
-## 4. Reference buckets
+## 3. Reference buckets
 
 Split retained references into:
 
@@ -69,7 +60,7 @@ For each retained item include:
   - `community`
   - `uncertain`
 
-## 5. Evaluation-contract implications
+## 4. Evaluation-contract implications
 
 State:
 
@@ -80,7 +71,7 @@ State:
 - fairness constraints
 - still-open ambiguity, if any
 
-## 6. Baseline-shortlist implications
+## 5. Baseline-shortlist implications
 
 For each serious candidate:
 
@@ -94,17 +85,7 @@ For each serious candidate:
   - reproduce
   - reject
 
-## 7. Durable follow-up writes
-
-List:
-
-- quest `papers` cards to create or refresh
-- quest `knowledge` cards to create or refresh
-- any global lesson that may later be promotable
-
-At least one survey-derived memory card should be written if external search materially changed the frame.
-
-## 8. Next anchor recommendation
+## 6. Next anchor recommendation
 
 Choose one:
 
