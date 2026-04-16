@@ -58,6 +58,10 @@ export default defineConfig(({ mode }) => {
       alias: [
         { find: /^@\//, replacement: `${resolve(__dirname, 'src')}/` },
         {
+          find: /^novel$/,
+          replacement: resolve(__dirname, 'vendor/novel-headless/dist/index.js'),
+        },
+        {
           find: /^@reduxjs\/toolkit$/,
           replacement: resolve(__dirname, 'node_modules/@reduxjs/toolkit/dist/redux-toolkit.legacy-esm.js'),
         },
