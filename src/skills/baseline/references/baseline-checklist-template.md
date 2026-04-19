@@ -1,7 +1,7 @@
 # Baseline Gate Checklist Template
 
-Use this compact checklist only when it helps.
-The hard requirement is a durable accepted, blocked, waived, or route-changed state.
+Use this as a compact acceptance-boundary checklist when it helps.
+It is optional; the hard requirement is that the accepted, blocked, waived, or route-changed state is durable and unambiguous.
 
 ## Identity
 
@@ -10,26 +10,27 @@ The hard requirement is a durable accepted, blocked, waived, or route-changed st
 - acceptance target:
 - primary comparator:
 
+## Current Frontier
+
+- [ ] next execution, verification, acceptance, blocker, or route-switch step is explicit
+- [ ] active uncertainty is written as a concrete question
+- [ ] next stage is known if this gate clears
+
 ## Core Gate
 
 - [ ] comparator identity and provenance are explicit
-- [ ] dataset, split, evaluation path, required metrics, and metric directions are explicit
-- [ ] trusted outputs or metrics are traceable
+- [ ] dataset, split, evaluation path, required metrics, and metric directions are explicit enough to judge comparability
+- [ ] trusted outputs or metrics are traceable to concrete files, logs, service responses, source artifacts, or accepted package records
+- [ ] smoke was used, skipped, or replaced by direct verification for an explicit reason when that choice matters
 - [ ] expected result files or trusted-output pointers have been checked
-- [ ] `<baseline_root>/json/metric_contract.json` exists before acceptance
-- [ ] `artifact.confirm_baseline(...)` or `artifact.waive_baseline(...)` is the gate result
-
-## Artifact Flow
-
-- [ ] registry reuse is attached with `artifact.attach_baseline(...)` when applicable
-- [ ] reusable publication uses `artifact.publish_baseline(...)` only after verification
-- [ ] attach/import/publish is not treated as confirmation by itself
+- [ ] `<baseline_root>/json/metric_contract.json` exists or will be produced before acceptance
+- [ ] baseline is accepted, blocked, waived, or route-changed with a durable note
 
 ## Blocked Boundary
 
-- [ ] failure class is explicit
-- [ ] tried steps and evidence paths are recorded
-- [ ] next best move is attach, import, retry, repair, reset, waive, or ask the user
+- [ ] if blocked, the failure class is explicit
+- [ ] if blocked, tried steps and evidence paths are recorded
+- [ ] if blocked, next best move is attach, import, retry, repair, reset, waive, or ask the user
 
 ## Closeout
 

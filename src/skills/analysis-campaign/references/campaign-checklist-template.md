@@ -1,7 +1,7 @@
 # Analysis Evidence Gate Checklist
 
-Use this compact checklist only when it helps.
-The hard requirement is durable launched-slice outcomes, evidence boundaries, blockers, and next routes.
+Use this as a compact acceptance-boundary checklist when it helps.
+It is optional; the hard requirement is that launched slices, evidence boundaries, blockers, and next routes are durable and unambiguous.
 
 ## Identity
 
@@ -10,31 +10,37 @@ The hard requirement is durable launched-slice outcomes, evidence boundaries, bl
 - route:
 - campaign id:
 
+## Current Frontier
+
+- [ ] next slice, aggregation, blocker, or route decision is explicit
+- [ ] active uncertainty is written as a concrete question
+- [ ] next route is known if this gate clears or fails
+
 ## Evidence Gate
 
-- [ ] parent claim, paper gap, reviewer item, or decision is explicit
+- [ ] parent claim, paper gap, reviewer item, or decision being tested is explicit
 - [ ] each launched slice has a durable outcome or active monitoring path
 - [ ] evidence-bearing slices record question, intervention or inspection target, fixed conditions, metric or observable, and evidence path
 - [ ] claim update and comparability verdict are explicit
 - [ ] null, negative, partial, failed, blocked, or contradictory findings are visible
 - [ ] campaign-level interpretation is backed by per-slice evidence
 
-## Artifact Gate
-
-- [ ] `artifact.create_analysis_campaign(...)` is used for launched campaign slices
-- [ ] `artifact.record_analysis_slice(...)` is used after each launched slice finishes, fails, becomes infeasible, or is superseded
-- [ ] local notes, chat, memory, or final summary are not substitutes for launched-slice artifact state
-
 ## Comparability Gate
 
 - [ ] baseline or main comparison contract is preserved, or deviation is recorded
-- [ ] new dataset / split / metric / protocol changes are labeled
+- [ ] new dataset / split / metric / protocol changes are labeled as generalization, stress-test, boundary, or non-comparable
 - [ ] additional comparators do not overwrite the canonical quest baseline gate
 
 ## Paper / Review Gate
 
 - [ ] paper-ready slices map to outline, paper matrix, evidence ledger, section, claim, table, reviewer item, or rebuttal item
-- [ ] completed paper-facing slices update the write-back target or record a stale-contract blocker
+- [ ] if a paper-facing slice is complete, the write-back target is updated or the stale contract is recorded as a blocker
+
+## Blocked Boundary
+
+- [ ] if blocked, the failure class is explicit
+- [ ] if blocked, tried steps and evidence paths are recorded
+- [ ] if blocked, next best move is continue, redesign, return to experiment, return to idea, write, decision, stop, or reset
 
 ## Closeout
 

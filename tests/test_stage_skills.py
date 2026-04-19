@@ -101,10 +101,14 @@ def test_stage_plan_and_checklist_templates_exist() -> None:
     assert (root / "baseline" / "references" / "baseline-plan-template.md").exists()
     assert (root / "baseline" / "references" / "baseline-checklist-template.md").exists()
     assert (root / "baseline" / "references" / "artifact-payload-examples.md").exists()
+    assert (root / "baseline" / "references" / "artifact-flow-examples.md").exists()
+    assert (root / "baseline" / "references" / "boundary-cases.md").exists()
     assert (root / "experiment" / "references" / "main-experiment-plan-template.md").exists()
     assert (root / "experiment" / "references" / "main-experiment-checklist-template.md").exists()
     assert (root / "analysis-campaign" / "references" / "campaign-plan-template.md").exists()
     assert (root / "analysis-campaign" / "references" / "campaign-checklist-template.md").exists()
+    assert (root / "analysis-campaign" / "references" / "artifact-flow-examples.md").exists()
+    assert (root / "analysis-campaign" / "references" / "boundary-cases.md").exists()
 
 
 def test_write_skill_venue_templates_exist_and_sync(temp_home: Path) -> None:
@@ -137,7 +141,7 @@ def test_idea_skill_requires_memory_first_literature_survey() -> None:
     assert "literature survey report" in text
     assert "at least `5` and usually `5-10`" in text
     assert "task-modeling-related" in text
-    assert "Treat that literature floor as a hard gate" in text
+    assert "`5-10` usable-paper floor is durably satisfied" in text
     assert "standard citation format" in text
     assert "`References` or `Bibliography` section" in text
 
@@ -174,14 +178,18 @@ def test_quest_creation_syncs_all_stage_skills(temp_home: Path) -> None:
 
     codex_skills = sorted((quest_root / ".codex" / "skills").glob("deepscientist-*"))
     claude_skills = sorted((quest_root / ".claude" / "agents").glob("deepscientist-*.md"))
+    opencode_skills = sorted((quest_root / ".opencode" / "skills").glob("deepscientist-*"))
 
     synced_codex = {path.name.removeprefix("deepscientist-") for path in codex_skills}
     synced_claude = {path.stem.removeprefix("deepscientist-") for path in claude_skills}
+    synced_opencode = {path.name.removeprefix("deepscientist-") for path in opencode_skills}
 
     assert EXPECTED_STAGE_SKILLS.issubset(synced_codex)
     assert EXPECTED_STAGE_SKILLS.issubset(synced_claude)
+    assert EXPECTED_STAGE_SKILLS.issubset(synced_opencode)
     assert EXPECTED_COMPANION_SKILLS.issubset(synced_codex)
     assert EXPECTED_COMPANION_SKILLS.issubset(synced_claude)
+    assert EXPECTED_COMPANION_SKILLS.issubset(synced_opencode)
     assert (quest_root / ".codex" / "prompts" / "system.md").exists()
     assert (quest_root / ".codex" / "prompts" / "contracts" / "shared_interaction.md").exists()
     assert (quest_root / ".codex" / "prompts" / "connectors" / "qq.md").exists()
@@ -242,22 +250,18 @@ def test_baseline_skill_documents_environment_autonomy_with_uv_as_tactic() -> No
     assert "uv sync" in text
     assert "uv venv" in text
     assert "uv pip install" in text
-    assert "uv run python" in text
+    assert "uv run ..." in text
     assert "Switch to repo-native conda, docker, poetry" in text
-    assert "Do not force a global `uv` route" in text
+    assert "Do not force a global `uv` route when it would make the reproduced baseline less faithful" in text
 
 
-def test_baseline_skill_has_hard_artifact_gate_and_flexible_route_records() -> None:
+def test_baseline_skill_has_compact_durable_output_contract() -> None:
     text = (repo_root() / "src" / "skills" / "baseline" / "SKILL.md").read_text(encoding="utf-8")
-    assert "## Hard artifact flow" in text
-    assert "artifact.attach_baseline(...)" in text
-    assert "artifact.publish_baseline(...)" in text
-    assert "artifact.confirm_baseline(...)" in text
-    assert "artifact.waive_baseline(...)" in text
-    assert "Do not treat chat, memory, `attachment.yaml`, `PLAN.md`, local files, or published registry entries as a substitute" in text
     assert "## Durable route records" in text
-    assert "`PLAN.md`, `CHECKLIST.md`, `setup.md`, `execution.md`, `verification.md`, `analysis_plan.md`, and `REPRO_CHECKLIST.md` are compatibility surfaces" in text
+    assert "Durable records are required in substance, not in fixed filenames" in text
+    assert "`PLAN.md`, `CHECKLIST.md`, `setup.md`, `execution.md`, `verification.md`, `analysis_plan.md`, and `REPRO_CHECKLIST.md` are allowed compatibility surfaces" in text
     assert "`attachment.yaml` or equivalent provenance is required for attached or imported baselines" in text
+    assert "`<baseline_root>/json/metric_contract.json` as the canonical accepted comparison contract" in text
 
 
 def test_decision_skill_requires_reuse_baseline_to_land_on_attach_and_confirm() -> None:
@@ -318,7 +322,7 @@ def test_stage_and_companion_skills_reference_shared_interaction_contract() -> N
 
 def test_all_stage_skills_require_stage_start_memory_retrieval_and_stage_end_memory_write() -> None:
     root = repo_root() / "src" / "skills"
-    for skill_id in ("scout", "baseline", "idea", "experiment", "analysis-campaign", "write", "finalize"):
+    for skill_id in ("scout", "idea", "experiment", "analysis-campaign", "write", "finalize"):
         text = (root / skill_id / "SKILL.md").read_text(encoding="utf-8")
         assert "Stage-start requirement:" in text
         assert "memory.list_recent(scope='quest', limit=5)" in text
@@ -327,6 +331,8 @@ def test_all_stage_skills_require_stage_start_memory_retrieval_and_stage_end_mem
         assert "memory.write(...)" in text
 
     baseline_text = (root / "baseline" / "SKILL.md").read_text(encoding="utf-8")
+    assert "do not require a fresh memory pass for every fast-path validation" in baseline_text
+    assert "use `memory.list_recent(...)` or `memory.search(...)` when resuming" in baseline_text
     assert "fast-path exception:" in baseline_text
 
 
@@ -396,6 +402,7 @@ def test_experiment_and_analysis_references_cover_evidence_ladder_and_campaign_d
     root = repo_root() / "src" / "skills"
     experiment_text = (root / "experiment" / "SKILL.md").read_text(encoding="utf-8")
     campaign_text = (root / "analysis-campaign" / "SKILL.md").read_text(encoding="utf-8")
+    baseline_text = (root / "baseline" / "SKILL.md").read_text(encoding="utf-8")
 
     assert "references/evidence-ladder.md" in experiment_text
     assert "auxiliary/dev" in experiment_text
@@ -404,9 +411,13 @@ def test_experiment_and_analysis_references_cover_evidence_ladder_and_campaign_d
     assert (root / "experiment" / "references" / "evidence-ladder.md").exists()
 
     assert "references/campaign-design.md" in campaign_text
+    assert "references/artifact-flow-examples.md" in campaign_text
+    assert "references/boundary-cases.md" in campaign_text
     assert "claim-carrying" in campaign_text
     assert "supporting" in campaign_text
     assert (root / "analysis-campaign" / "references" / "campaign-design.md").exists()
+    assert "references/artifact-flow-examples.md" in baseline_text
+    assert "references/boundary-cases.md" in baseline_text
 
 
 def test_figure_polish_skill_requires_render_inspect_revise_workflow_and_style_asset() -> None:
@@ -460,8 +471,8 @@ def test_stage_skills_document_new_branch_lineage_semantics() -> None:
 def test_analysis_campaign_skill_requires_one_slice_campaign_for_single_extra_experiment() -> None:
     text = (repo_root() / "src" / "skills" / "analysis-campaign" / "SKILL.md").read_text(encoding="utf-8")
     assert "one-slice campaign" in text
-    assert "artifact.create_analysis_campaign(...)" in text
-    assert "artifact.record_analysis_slice(...)" in text
+    assert "durable lineage matters" in text
+    assert "Use a lighter durable report when one bounded answer is enough" in text
 
 
 def test_review_and_rebuttal_skills_route_extra_evidence_into_shared_campaign_protocol() -> None:
