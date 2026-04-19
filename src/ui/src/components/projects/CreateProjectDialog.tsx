@@ -1559,10 +1559,18 @@ function isSetupQuestActivelyRunning(snapshot: unknown, options?: { hasLiveRun?:
     (options?.activeToolCount || 0) === 0 &&
     Number.isFinite(latestActivityMs) &&
     Date.now() - latestActivityMs > START_SETUP_STALE_RUNNING_TIMEOUT_MS
-  if (activeRunId) return true
-  if ((runtimeStatus === 'running' || runtimeStatus === 'retrying') && !staleWithoutLiveSignals) return true
-  if (Number.isFinite(bashRunningCount) && bashRunningCount > 0 && !staleWithoutLiveSignals) return true
+
+  // If there are live signals (streaming, active tools), always consider it running
   if (options?.hasLiveRun || options?.streaming || (options?.activeToolCount || 0) > 0) return true
+
+  // If stale without any live signals, consider it stopped
+  if (staleWithoutLiveSignals) return false
+
+  // Check for active run or running status
+  if (activeRunId) return true
+  if (runtimeStatus === 'running' || runtimeStatus === 'retrying') return true
+  if (Number.isFinite(bashRunningCount) && bashRunningCount > 0) return true
+
   return false
 }
 
