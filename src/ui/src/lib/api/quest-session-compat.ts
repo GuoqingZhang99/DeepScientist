@@ -392,6 +392,14 @@ function normalizeQuestToolEvent(
           : undefined,
   })
   const functionName = canonicalToolFunction(rawToolName, mcpServer, mcpTool)
+  const eventType = asString(update.event_type)
+  const backendStatus = asString(dataRecord?.status).toLowerCase()
+  const toolStatus: ToolEventData['status'] =
+    eventType === 'runner.tool_call'
+      ? 'calling'
+      : backendStatus === 'failed' || backendStatus === 'error'
+        ? 'failed'
+        : 'called'
   const toolData: ToolEventData = {
     event_id: eventId,
     timestamp,
@@ -400,10 +408,10 @@ function normalizeQuestToolEvent(
     tool_call_id: asString(dataRecord?.tool_call_id) || eventId,
     name: mcpTool || rawToolName || mcpServer || 'tool',
     function: functionName,
-    status: asString(update.event_type) === 'runner.tool_call' ? 'calling' : 'called',
+    status: toolStatus,
     args: buildToolArgs(functionName, dataRecord?.args, rawMetadata),
     metadata,
-    ...(asString(update.event_type) === 'runner.tool_result'
+    ...(eventType === 'runner.tool_result'
       ? { content: buildToolContent(functionName, asString(dataRecord?.status), dataRecord?.output, rawMetadata) }
       : {}),
   }

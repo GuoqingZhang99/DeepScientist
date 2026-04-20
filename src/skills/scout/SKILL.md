@@ -11,11 +11,8 @@ The goal is to make the task frame concrete enough that a heavier stage can star
 
 ## Interaction discipline
 
-- Follow the shared interaction contract injected by the system prompt.
-- For ordinary active work, prefer a concise progress update once work has crossed roughly 6 tool calls with a human-meaningful delta, and do not drift beyond roughly 12 tool calls or about 8 minutes without a user-visible update.
-- Message templates are references only. Adapt to the actual context and vary wording so updates feel natural and non-robotic.
-- If a threaded user reply arrives, interpret it relative to the latest scout progress update before assuming the task changed completely.
-- When scouting actually resolves the framing ambiguity, locks the evaluation contract, or makes the next anchor obvious, send one richer `artifact.interact(kind='milestone', reply_mode='threaded', ...)` update that says what is now clear, why it matters, and which stage should come next.
+Follow the shared interaction contract injected by the system prompt.
+Only send a richer scout milestone when the framing ambiguity actually shrank or the next anchor became clear.
 
 ## Tool discipline
 
@@ -24,11 +21,9 @@ The goal is to make the task frame concrete enough that a heavier stage can star
 - **For git inspection inside the current quest repository or worktree, prefer `artifact.git(...)` before raw shell git commands.**
 - **If scouting only needs durable quest context, prefer `artifact.read_quest_documents(...)`, `artifact.get_quest_state(...)`, and `memory.*` instead of shelling out.**
 
-## Three-layer todo contract
+## Planning note
 
-- keep quest-root `plan.md` as the research map and framing surface for the whole quest
-- create or refresh workspace `PLAN.md` / `CHECKLIST.md` only when scouting becomes multi-step enough to need a current-node contract and frontier
-- when scout resolves the frame, update quest-root `plan.md` with the next anchor instead of leaving that transition only in chat
+Use quest/workspace planning files only when scouting becomes a real multi-step framing pass instead of a short clarification step.
 
 ## Stage purpose
 
@@ -100,17 +95,9 @@ Before spending time scouting, first verify whether the current quest already co
 
 If the answer is already clear, exit quickly and move to the correct next anchor.
 
-## Companion skill rule
+## Companion-skill note
 
-`scout` is the framing anchor.
-It often prepares for `baseline`.
-
-In practice:
-
-- use `scout` to determine the task frame, evaluation contract, paper neighborhood, and candidate baselines
-- use `baseline` once a concrete baseline route is justified
-
-Do not stay in `scout` once the next `baseline` route is obvious enough to record durably.
+`scout` should hand off as soon as the next `baseline` or `idea` move is obvious enough to record durably.
 
 ## Truth sources
 
@@ -125,50 +112,15 @@ Prefer the following sources in order:
 
 Do not let the scout stage rest on vague recollection alone.
 
-## Required durable outputs
+## Durable-output note
 
-The scout stage should usually leave behind:
+When scout matters, leave behind just enough durable framing state to make the next anchor obvious rather than building a large documentation package by default.
+If external search materially changed the frame, leave a literature scouting report rather than letting the survey live only in chat.
+Prefer the structure in `references/literature-scout-template.md`.
 
-- an updated `brief.md`
-- an updated `plan.md`
-- optional `status.md` refresh if the quest state changed
-- a literature scouting report when external search was needed
-- `memory` cards for key references or framing notes
-- a report or decision artifact that points to the next anchor
+## Thinking note
 
-Recommended durable scout files:
-
-- `artifacts/scout/literature_scout.md`
-- `artifacts/scout/framing_report.md`
-- `artifacts/scout/eval_contract.md`
-- `artifacts/scout/baseline_shortlist.md`
-
-For more explicit output shapes, read:
-
-- `references/paper-triage-playbook.md`
-- `references/literature-scout-template.md`
-- `references/eval-contract-template.md`
-- `references/baseline-shortlist-template.md`
-
-## Thinking protocol
-
-Scout should be:
-
-- conclusion-first
-- bounded
-- evidence-first
-- oriented toward the next stage
-
-Use a simple reasoning order:
-
-1. what is already known?
-2. what is still ambiguous?
-3. which ambiguity actually changes later stages?
-4. what is the cheapest way to resolve it?
-5. which next anchor becomes justified after that?
-
-Do not dump disconnected facts.
-Turn them into a framing decision.
+Keep scout conclusion-first and bounded: identify the minimum unknowns, resolve only the ones that change the next stage, then stop.
 
 ## Workflow
 
@@ -203,40 +155,23 @@ Also classify each unknown:
 - blocks both
 - useful but non-blocking
 
-### 2.1 Reuse durable memory before external search
+### 2.1 Reuse durable state before broad new search
 
-Before opening the web, check what the quest already knows.
+Before a fresh wide search, quickly reuse existing quest state and memory so scouting only fills real gaps instead of restarting from zero.
 
-At minimum:
+Stage-start requirement:
 
-- inspect recent quest `papers`, `knowledge`, and `decisions`
-- inspect recent global `papers`, `knowledge`, and `templates` when the topic or benchmark looks reusable
-- run `memory.search(...)` over:
-  - task name
-  - dataset or benchmark
-  - metric or split keywords
-  - likely baseline names
-  - mechanism or failure-mode keywords
-
-Then classify the current state:
-
-- already covered well
-- stale and needs refresh
-- still missing
+- begin every scout pass with `memory.list_recent(scope='quest', limit=5)`
+- then run at least one scout-relevant `memory.search(...)` before broad new search
+- if several lines already exist, narrow retrieval to the current task, benchmark, dataset, metric, split, and likely baselines
 
 If the frame is already explicit after memory reuse, stop and record the next anchor.
-Do not open a fresh broad search just because scouting feels unfinished.
 
 ### 3. Search the paper and repo neighborhood
 
 Build a compact but sufficient neighborhood of references and implementations.
 
 Use external search actively when local evidence is not enough.
-When available, prefer:
-
-1. web search targeting arXiv for paper discovery
-2. official benchmark docs and official repos for evaluation truth
-3. broader web search for provenance checks, follow-up work, and comparison context
 
 For papers that survive triage and need real reading, switch from discovery to reading:
 
@@ -244,64 +179,17 @@ For papers that survive triage and need real reading, switch from discovery to r
 - then use `artifact.arxiv(paper_id=..., full_text=False)` to read or summarize it
 - only switch to `full_text=True` or the raw PDF when the shorter view does not cover the needed detail
 
-Search buckets should include:
-
-- same task, same dataset, same metric
-- same task, same mechanism
-- same task, same failure mode
-- strongest recent competitors
-- papers or repos that may have already solved the claimed gap
-- official benchmark or evaluation documentation
-- official or de facto reference repos
-
-Use a layered search ladder:
+Search only the unresolved neighborhood that still changes framing, evaluation, or baseline choice.
+Use a compact search ladder:
 
 1. direct neighborhood:
-   - same task
-   - same dataset
-   - same metric
+   - same task, dataset, and metric
 2. mechanism neighborhood:
-   - same main lever or architectural trick
-   - same objective or loss family
+   - same main lever, objective, or architectural trick
 3. bottleneck neighborhood:
-   - papers or repos attacking the same failure mode
-   - papers exposing the same evaluation caveat
-4. adjacent inspiration neighborhood when useful:
-   - nearby tasks or domains that attack the same structural bottleneck
+   - same failure mode, evaluation caveat, or boundary condition
 
-Prefer recent papers more heavily when the area is moving quickly, but keep older anchor papers when they define the true baseline landscape.
-
-Keep a compact scouting ledger while searching.
-For each meaningful search pass, record:
-
-- query text
-- source, such as `memory`, `arXiv`, benchmark docs, repo search, or open web
-- why the query was issued
-- what new references were added
-- what prior references were re-confirmed
-- which ambiguity is still unresolved
-
-For each retained reference, record:
-
-- identifier or title
-- why it matters
-- whether it mainly informs:
-  - task framing
-  - evaluation contract
-  - baseline choice
-  - later ideation
-
-Also keep the retained set legible by classifying papers into:
-
-- closest competitors
-- adjacent inspirations
-- problem-defining anchors
-- maybe-already-solved references
-
-If you used external search, write a literature scouting report before ending the stage.
-Prefer the structure in `references/literature-scout-template.md`.
-
-Use `references/paper-triage-playbook.md` for a more detailed search and triage method.
+For a more explicit search and triage method, read `references/paper-triage-playbook.md`.
 
 ### 4. Clarify the evaluation contract
 
@@ -319,8 +207,6 @@ The evaluation contract should be strong enough that later `baseline`, `idea`, a
 
 If the evaluation contract is still ambiguous after local analysis, ask the user for a structured decision instead of guessing.
 
-Use `references/eval-contract-template.md` when writing the contract durably.
-
 ### 5. Produce a baseline shortlist
 
 End scouting with a clear baseline direction.
@@ -330,7 +216,6 @@ For each serious candidate, score at least:
 - trustworthiness of provenance
 - metric and split compatibility
 - implementation availability
-- environment and dependency risk
 - reproduction or import cost
 - value as a downstream comparison reference
 
@@ -347,7 +232,7 @@ For each serious candidate, also state:
 - whether the repo path or paper evidence is strong enough to trust the route
 - the cheapest credible next action: attach, import, reproduce, or reject
 
-Use `references/baseline-shortlist-template.md` for a structured shortlist.
+Keep the shortlist small and decision-facing rather than turning it into a broad survey of every plausible baseline.
 
 ### 6. Recommend the next anchor
 
@@ -399,101 +284,17 @@ Continue searching only if:
 
 Do not continue searching just to collect more papers after the next anchor is already clear.
 
-## Memory rules
+## Memory note
 
-Stage-start requirement:
-
-- begin every scout pass with `memory.list_recent(scope='quest', limit=5)`
-- then run at least one scout-relevant `memory.search(...)` before broad new search
-- if several idea or baseline lines already exist, narrow retrieval to the current line instead of mixing unrelated memory casually
-
-Write durable memory only when it is reusable later.
-
-Preferred memory usage:
-
-- quest `papers`:
-  - literature scouting summaries
-  - paper cards
-  - benchmark notes
-  - official-doc references
-  - repo provenance notes
-- quest `knowledge`:
-  - dataset quirks
-  - metric-contract notes
-  - split caveats
-  - bounded framing lessons for this quest
-- quest `decisions`:
-  - why a baseline route was preferred
-  - why a conflicting evaluation interpretation was rejected
-- global `knowledge`:
-  - reusable benchmark caveats
-  - general scouting heuristics
-- global `templates`:
-  - paper-card templates
-  - eval-contract templates
-  - shortlist templates
-
-Useful tags include:
-
-- `stage:scout`
-- `type:literature-scout`
-- `type:related-work`
-- `type:benchmark-note`
-- `type:metric-contract`
-- `type:baseline-shortlist`
-- `topic:<task-or-dataset>`
-
-When calling `memory.write(...)`, pass `tags` as an array like `["stage:scout", "type:related-work", "topic:<task-or-dataset>"]`, not as one comma-joined string.
-
-Recommended read timing:
-
-- before any new web search:
-  - run `memory.search(...)` over task, benchmark, metric, split, and likely baselines
-- at scout start:
-  - read recent quest `papers`, `knowledge`, and `decisions`
-- before baseline recommendation:
-  - re-check quest `decisions` and shortlist-related notes
-- after a long pause:
-  - warm-start from quest `papers` and `knowledge` before re-searching
+Use memory to avoid repeating old scouting work and to preserve reusable framing conclusions, but do not let memory-writing become the stage's main output.
 
 Stage-end requirement:
 
-- if scouting produced a durable framing conclusion, paper note, shortlist lesson, or metric-contract caveat, write at least one `memory.write(...)` before leaving the stage
+- if scouting produced a durable framing conclusion, literature scouting report, baseline-shortlist lesson, or metric-contract caveat, write at least one `memory.write(...)` before leaving the stage
 
-When writing quest `papers` cards, include enough metadata to reduce repeated scouting later:
+## Artifact note
 
-- title
-- identifier or arXiv id when available
-- URL
-- year
-- task / dataset / metric relevance
-- baseline relevance or provenance relevance
-- whether the source is official, community, or uncertain
-- whether it is `new_this_pass`, `known_before`, or `watchlist`
-
-At least one durable piece of the scouting survey should be written into quest memory whenever external search materially shaped the framing or baseline shortlist.
-
-Prefer concise, high-signal notes over long prose dumps.
-
-## Artifact rules
-
-Preferred artifact usage:
-
-- use `report` for:
-  - literature scouting synthesis
-  - framing synthesis
-  - evaluation contract
-  - baseline shortlist
-- use `decision` for:
-  - next-anchor recommendation
-  - blocked-state routing
-  - structured user choice requests when evidence cannot resolve the ambiguity
-- use `milestone` when the scout stage reached a clear framing checkpoint
-- use `approval` only if the user explicitly confirms a preference-sensitive route
-
-Use `artifact.interact(...)` for a structured decision request only when a real ambiguity remains and local evidence cannot safely resolve it.
-
-Do not close a scout stage that depended on external literature search without a durable `report`.
+Record only the framing outputs that the next stage will actually consume, such as the evaluation contract, baseline direction, or next-anchor recommendation.
 
 ## Blocked-state handling
 

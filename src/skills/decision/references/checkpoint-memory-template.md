@@ -25,7 +25,6 @@ Use this when later turns could otherwise resume from the wrong node, route, or 
 
 - strongest still-valid result
 - or the dominant current blocker
-- why it matters
 
 ### 5. Do-not-reopen by default
 
@@ -35,7 +34,6 @@ Use this when later turns could otherwise resume from the wrong node, route, or 
 ### 6. Next resume step
 
 - the single best next step
-- why it dominates alternatives
 
 ### 7. First-read files
 

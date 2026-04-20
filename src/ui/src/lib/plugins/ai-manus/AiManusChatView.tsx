@@ -151,7 +151,6 @@ import type {
   ToolContent,
 } from './types'
 import { ChatBox } from './components/ChatBox'
-import { NotebookChatBox } from './components/NotebookChatBox'
 import { ChatMessage } from './components/ChatMessage'
 import { ThinkingIndicator } from './components/ThinkingIndicator'
 import OrbitLogoStatus from './components/OrbitLogoStatus'
@@ -449,6 +448,14 @@ const VNCViewer = dynamic(
         Loading sandbox view...
       </div>
     ),
+  }
+)
+
+const NotebookChatBox = dynamic(
+  () => import('./components/NotebookChatBox').then((mod) => mod.NotebookChatBox),
+  {
+    ssr: false,
+    loading: () => null,
   }
 )
 
@@ -1682,6 +1689,7 @@ export function AiManusChatView({
   } | null>(null)
   const recoveryTimeoutRef = useRef<number | null>(null)
   const autoResumeTimerRef = useRef<number | null>(null)
+  const sessionQuiescenceReconcileTimerRef = useRef<number | null>(null)
   const refreshingAgentsRef = useRef(false)
   const lastOnlineServersKeyRef = useRef<string | null>(null)
   const lastMentionRefreshRef = useRef<string | null>(null)
@@ -4238,6 +4246,80 @@ export function AiManusChatView({
     updateStatusTodo(null)
   }, [pendingRun, updateStatusTodo])
 
+  useEffect(() => {
+    if (sessionQuiescenceReconcileTimerRef.current) {
+      window.clearTimeout(sessionQuiescenceReconcileTimerRef.current)
+      sessionQuiescenceReconcileTimerRef.current = null
+    }
+    if (!sessionId || !sessionActive) return
+    if (pendingRun || questionPrompt || clarifyPrompt || hasActiveRun) return
+
+    sessionQuiescenceReconcileTimerRef.current = window.setTimeout(() => {
+      sessionQuiescenceReconcileTimerRef.current = null
+      const targetSessionId = sessionIdRef.current ?? sessionId
+      if (!targetSessionId) return
+
+      void (async () => {
+        try {
+          const reconciled = await getSession(
+            targetSessionId,
+            isQuestSessionId(targetSessionId) ? { limit: 80 } : { limit: 40 }
+          )
+          if ((sessionIdRef.current ?? sessionId) !== targetSessionId) return
+
+          syncRuntimeFromSession(reconciled)
+          const normalizedStatus = normalizeSessionStatus(reconciled.status ?? null)
+          const nextActive =
+            Boolean(reconciled.is_active) || isSessionStatusRunning(normalizedStatus)
+
+          upsertSession(targetSessionId, {
+            status: normalizedStatus,
+            latest_message: reconciled.latest_message ?? undefined,
+            latest_message_at: reconciled.latest_message_at ?? undefined,
+            updated_at:
+              reconciled.updated_at ?? Math.floor(Date.now() / 1000),
+            is_active: nextActive,
+          })
+          setSessionStatus(normalizedStatus)
+          setSessionActive(nextActive)
+
+          if (!nextActive) {
+            if (isCopilotSurface) {
+              setCopilotStatus(null)
+            }
+            updateStatusTodo(null)
+            finalizeActiveMessages(normalizedStatus === 'failed' ? 'failed' : 'completed')
+          }
+        } catch (error) {
+          debugLog('session:reconcile:error', {
+            sessionId: targetSessionId,
+            message: error instanceof Error ? error.message : String(error),
+          })
+        }
+      })()
+    }, 1200)
+
+    return () => {
+      if (sessionQuiescenceReconcileTimerRef.current) {
+        window.clearTimeout(sessionQuiescenceReconcileTimerRef.current)
+        sessionQuiescenceReconcileTimerRef.current = null
+      }
+    }
+  }, [
+    clarifyPrompt,
+    debugLog,
+    finalizeActiveMessages,
+    hasActiveRun,
+    isCopilotSurface,
+    pendingRun,
+    questionPrompt,
+    sessionActive,
+    sessionId,
+    syncRuntimeFromSession,
+    updateStatusTodo,
+    upsertSession,
+  ])
+
 
   useEffect(() => {
     if (mode !== 'welcome' || !openToolPanel) return
@@ -5895,7 +5977,7 @@ export function AiManusChatView({
           if (event.type === 'tool_call' || event.type === 'tool_result') {
             const data = event.data as CopilotToolEvent
             const status =
-              data.status === 'calling' || data.status === 'called'
+              data.status === 'calling' || data.status === 'called' || data.status === 'failed'
                 ? data.status
                 : event.type === 'tool_call'
                   ? 'calling'
@@ -6785,7 +6867,7 @@ export function AiManusChatView({
             ? toolData.tool_call_id
             : createMessageId('tool')
         const status =
-          toolData.status === 'calling' || toolData.status === 'called' ? toolData.status : 'called'
+          toolData.status === 'calling' || toolData.status === 'called' || toolData.status === 'failed' ? toolData.status : 'called'
         const toolName = typeof toolData.name === 'string' ? toolData.name : ''
         const activeLock = displayLockRef.current
         closeAssistantSegment()
@@ -7084,7 +7166,7 @@ export function AiManusChatView({
                 ? baseArgs.text
                 : ''
           const status =
-            toolData.status === 'calling' || toolData.status === 'called' ? toolData.status : 'called'
+            toolData.status === 'calling' || toolData.status === 'called' || toolData.status === 'failed' ? toolData.status : 'called'
           const shouldRender = status === 'calling' || toolData.status == null
           if (!shouldRender || !statusMessage) {
             if (isCopilotSurface) {
@@ -7771,6 +7853,10 @@ export function AiManusChatView({
       if (autoResumeTimerRef.current) {
         window.clearTimeout(autoResumeTimerRef.current)
         autoResumeTimerRef.current = null
+      }
+      if (sessionQuiescenceReconcileTimerRef.current) {
+        window.clearTimeout(sessionQuiescenceReconcileTimerRef.current)
+        sessionQuiescenceReconcileTimerRef.current = null
       }
     }
   }, [])
