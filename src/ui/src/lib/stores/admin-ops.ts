@@ -1,25 +1,77 @@
-// TODO(upstream ea21104): the real admin-ops store (dock/repair/session surfaces)
-// was never committed upstream. This stub provides a no-op shape so SettingsPage
-// and anything else that imports `useAdminOpsStore` can compile and run.
-// Replace with the real store once it lands.
 import { create } from 'zustand'
 
-interface ActiveRepair {
-  repair_id: string
+import type { AdminRepair } from '@/lib/types/admin'
+
+export type AdminOpsContext = {
+  sourcePage?: string
+  scope?: string
+  targets?: Record<string, unknown>
+  selectedPaths?: string[]
 }
 
 interface AdminOpsState {
   dockOpen: boolean
-  activeRepair: ActiveRepair | null
+  activeRepair: AdminRepair | null
+  context: AdminOpsContext
   closeDock: () => void
   startFreshSession: (path: string) => void
   resetContext: (path: string) => void
+  clearContext: (path: string) => void
+  setContext: (next: AdminOpsContext) => void
+  openRepair: (repair: AdminRepair) => void
+  clearActiveRepair: () => void
 }
 
-export const useAdminOpsStore = create<AdminOpsState>(() => ({
+function createDefaultContext(path = '/settings'): AdminOpsContext {
+  return {
+    sourcePage: path,
+    scope: 'system',
+    targets: {},
+    selectedPaths: [],
+  }
+}
+
+export const useAdminOpsStore = create<AdminOpsState>((set) => ({
   dockOpen: false,
   activeRepair: null,
-  closeDock: () => {},
-  startFreshSession: () => {},
-  resetContext: () => {},
+  context: createDefaultContext(),
+  closeDock: () => {
+    set({ dockOpen: false })
+  },
+  startFreshSession: (path) => {
+    set({
+      dockOpen: true,
+      activeRepair: null,
+      context: createDefaultContext(path),
+    })
+  },
+  resetContext: (path) => {
+    set((state) => ({
+      context: createDefaultContext(path || state.context.sourcePage || '/settings'),
+    }))
+  },
+  clearContext: (path) => {
+    set((state) => ({
+      context: createDefaultContext(path || state.context.sourcePage || '/settings'),
+    }))
+  },
+  setContext: (next) => {
+    set((state) => ({
+      context: {
+        ...state.context,
+        ...next,
+        targets: next.targets ? { ...next.targets } : state.context.targets,
+        selectedPaths: next.selectedPaths ? [...next.selectedPaths] : state.context.selectedPaths,
+      },
+    }))
+  },
+  openRepair: (repair) => {
+    set({
+      dockOpen: true,
+      activeRepair: repair,
+    })
+  },
+  clearActiveRepair: () => {
+    set({ activeRepair: null })
+  },
 }))
