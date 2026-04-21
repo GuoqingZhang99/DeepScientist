@@ -19,24 +19,24 @@ function copy(locale: 'en' | 'zh') {
     ? {
         title: 'SetupAgent',
         intro:
-          '你可以直接填写左侧表单并启动。如果你想让我帮你整理，也可以直接告诉我任务目标、现有材料和限制，我会启动真实后端助手来补齐表单。',
+          '你可以直接填写左侧表单并启动。如果你想让我帮你整理，也可以直接告诉我任务目标、现有材料和限制，我会帮你补齐这份启动表单。',
         benchmarkIntro:
-          '这个 benchmark 已经带来了一版草案。你可以直接启动后端 SetupAgent，让它结合当前设备、安装路径和任务信息继续帮你补齐表单。',
+          '这个 benchmark 已经带来了一版草案。你可以继续让 SetupAgent 结合当前设备、安装路径和任务信息，把这份启动表单补充完整。',
         placeholder:
           '请帮我找一个适合本机的 LLM 方向的任务',
         cta: '启动协助',
-        note: '启动后，右侧会切换成真实的实时 copilot；它会直接把建议写回左侧表单。',
+        note: '启动后，右侧聊天面板会继续帮你整理内容，并把建议直接写回左侧表单。',
       }
     : {
         title: 'SetupAgent',
         intro:
-          'You can fill the form on the left and launch directly. If you want help, tell me the goal, the materials you already have, and the main limits, and I will start a real backend assistant to complete the form.',
+          'You can fill the form on the left and launch directly. If you want help, tell me the goal, the materials you already have, and the main limits, and I will help complete the launch form.',
         benchmarkIntro:
-          'This benchmark already comes with a draft. You can start the backend SetupAgent to keep refining the form from the benchmark, the device, and the local install path.',
+          'This benchmark already comes with a draft. You can keep using SetupAgent to finish the launch form from the benchmark, the device, and the local install path.',
         placeholder:
           'Please help me find an LLM-oriented task that fits this machine.',
         cta: 'Start Assist',
-        note: 'Once started, the right side switches into a realtime copilot and writes suggestions back into the left form.',
+        note: 'Once started, the chat panel on the right keeps refining the launch form and writes suggestions back into the left form.',
       }
 }
 

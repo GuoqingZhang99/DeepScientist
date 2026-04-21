@@ -69,8 +69,10 @@ export function SetupAgentQuestPanel({
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border-light)] px-4 py-3">
         <div>
           <div className="text-sm font-semibold text-[var(--text-primary)]">SetupAgent</div>
-          <div className="mt-1 text-xs text-[var(--text-tertiary)]">
-            {locale === 'zh' ? '实时后端协助' : 'Realtime backend assist'}
+          <div className="mt-1 text-xs leading-5 text-[var(--text-tertiary)]">
+            {locale === 'zh'
+              ? '这个 Agent 可以帮助你更好地建立一个任务表单。你有任务启动配置的问题都可以询问；当表单顺利建立之后，可以点击创建项目启动 DeepScientist。'
+              : 'This agent helps you build a better task form. Ask it about launch and configuration questions. Once the form is ready, click Create Project to start DeepScientist.'}
           </div>
         </div>
         <div className="inline-flex items-center gap-2 rounded-full border border-[var(--border-light)] bg-[var(--fill-tsp-white-light)] px-3 py-1 text-[11px] text-[var(--text-secondary)]">

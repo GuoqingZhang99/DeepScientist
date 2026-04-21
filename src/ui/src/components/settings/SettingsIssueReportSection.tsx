@@ -18,12 +18,12 @@ const defaultIssueBase = 'https://github.com/ResearAI/DeepScientist/issues/new'
 const PAGE_COPY = {
   en: {
     title: 'Issue Report',
-    subtitle: 'Generate a prefilled GitHub issue from local runtime evidence, then open the GitHub submission page in one click.',
+    subtitle: 'Turn local errors and logs into a GitHub issue draft, then open the submission page in one click.',
     guide: `
 ### What this page is for
 
-- Use **Issue Report** to prepare a GitHub issue from real local runtime evidence.
-- The page keeps one live draft surface instead of a separate editable draft panel.
+- Use **Issue Report** to turn local errors and logs into a GitHub issue draft.
+- The page keeps one live draft so you can review and edit it before opening GitHub.
 
 ### What gets collected
 
@@ -38,7 +38,7 @@ const PAGE_COPY = {
 ### Operator workflow
 
 1. add or refine a short summary and notes if needed
-2. refresh the draft if you want to regenerate it from current runtime evidence
+2. refresh the draft if you want to regenerate it from the latest local errors and logs
 3. adjust the generated title or markdown body only if you need a final edit
 4. click **Submit GitHub Issue** to open the prefilled GitHub issue page
 `,
@@ -55,12 +55,12 @@ const PAGE_COPY = {
   },
   zh: {
     title: '问题报告',
-    subtitle: '基于本地运行时证据生成一份预填好的 GitHub issue，并一键打开 GitHub 提交页。',
+    subtitle: '把本地错误和日志整理成 GitHub issue 草稿，然后一键打开 GitHub 提交页。',
     guide: `
 ### 这一页用来做什么
 
-- 用 **问题报告** 基于真实的本地运行时证据准备 GitHub issue。
-- 页面只保留一份正在使用的草稿，不再额外拆出一个独立的可编辑草稿面板。
+- 用 **问题报告** 把本地错误和日志整理成 GitHub issue 草稿。
+- 页面只保留一份当前草稿，方便你检查和修改后再打开 GitHub。
 
 ### 会收集什么
 
@@ -75,7 +75,7 @@ const PAGE_COPY = {
 ### 使用流程
 
 1. 如有需要，补充或修改简短总结与备注
-2. 如果想按当前运行时证据重新生成，就刷新草稿
+2. 如果想按最新的本地错误和日志重新生成，就刷新草稿
 3. 只在需要最终微调时修改标题或 Markdown 正文
 4. 点击 **提交 GitHub Issue** 打开 GitHub 预填页面
 `,

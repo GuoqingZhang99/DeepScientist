@@ -30,6 +30,11 @@ describe('SetupAgentQuestPanel', () => {
     render(<SetupAgentQuestPanel questId="B-001" locale="en" />)
 
     expect(screen.getByText('Running')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'This agent helps you build a better task form. Ask it about launch and configuration questions. Once the form is ready, click Create Project to start DeepScientist.'
+      )
+    ).toBeInTheDocument()
   })
 
   it('shows ready when the setup quest is idle and a durable suggested form exists', () => {

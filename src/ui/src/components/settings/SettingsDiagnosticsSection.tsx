@@ -25,12 +25,12 @@ function summarizeToolPayload(payload: Record<string, unknown>) {
 const PAGE_COPY = {
   en: {
     title: 'Diagnostics',
-    subtitle: 'Manual diagnosis, failure triage, and runtime tool visibility.',
+    subtitle: 'Run checks by hand, inspect recent failures, and confirm which tools are available.',
     guide: `
 ### What this page is for
 
-- Use **Diagnostics** when you need explicit health checks, recent failure evidence, and runtime tool status.
-- This page is **manual-first**. It avoids background-heavy work unless you explicitly start a task.
+- Use **Diagnostics** when you need health checks, recent failures, and tool status.
+- This page is **manual-first**. Nothing heavy runs unless you explicitly start it.
 
 ### Doctor
 
@@ -63,12 +63,12 @@ const PAGE_COPY = {
   },
   zh: {
     title: '诊断',
-    subtitle: '手动诊断、失败分诊与运行时工具可见性。',
+    subtitle: '手动运行检查、查看最近失败，并确认当前有哪些工具可用。',
     guide: `
 ### 这一页用来做什么
 
-- 当你需要显式健康检查、最近失败证据和运行时工具状态时，用 **诊断** 页面。
-- 这一页是 **人工触发优先** 的，除非你明确启动任务，否则不会主动做重型后台工作。
+- 当你需要健康检查、最近失败信息和工具状态时，用 **诊断** 页面。
+- 这一页是 **手动触发优先** 的；除非你明确启动任务，否则不会主动做重型后台工作。
 
 ### Doctor
 
@@ -264,4 +264,3 @@ export function SettingsDiagnosticsSection() {
     </div>
   )
 }
-

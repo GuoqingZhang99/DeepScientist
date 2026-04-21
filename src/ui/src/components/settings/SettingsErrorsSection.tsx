@@ -16,17 +16,17 @@ const dividerClassName = 'border-black/[0.06] dark:border-white/[0.08]'
 const PAGE_COPY = {
   en: {
     title: 'Error Console',
-    subtitle: 'Merged operator-facing error surfaces across the local runtime.',
+    subtitle: 'One place to see the most important local errors and decide what to check next.',
     guide: `
 ### What this page is for
 
-- Use **Error Console** when you want the strongest operator-facing problem list in one place.
-- This page merges degraded connectors, runtime failures, daemon warnings/errors, and failed admin tasks.
+- Use **Error Console** when you want the most important problems in one place.
+- This page brings together connector problems, runtime failures, daemon errors, and failed admin tasks.
 
 ### How to use it
 
-- Start here before opening a detailed log or quest page.
-- If the problem is worth reporting upstream, continue to **Issue Report** with one click.
+- Start here before opening detailed logs or a project page.
+- If the problem should be reported upstream, continue to **Issue Report** with one click.
 `,
     degradedConnectors: 'Degraded connectors',
     runtimeFailures: 'Runtime failures',
@@ -35,7 +35,7 @@ const PAGE_COPY = {
     action: 'Action',
     prepareIssue: 'Prepare GitHub Issue',
     issueHelp:
-      'Use the issue reporter to open a prefilled GitHub issue with environment, recent failures, connector state, and cached doctor output.',
+      'Use Issue Report to prepare a GitHub issue draft with environment info, recent failures, connector status, and doctor results.',
     runtimeFailuresTitle: 'Runtime Failures',
     connectorErrors: 'Connector Errors',
     quest: 'Quest',
@@ -44,17 +44,17 @@ const PAGE_COPY = {
   },
   zh: {
     title: '错误控制台',
-    subtitle: '汇总本地运行时所有面向运维的错误视图。',
+    subtitle: '把当前最重要的本地错误集中放在一个地方，方便判断下一步该检查什么。',
     guide: `
 ### 这一页用来做什么
 
-- 当你想把最强的运维问题列表集中放在一个地方时，就用 **错误控制台**。
-- 这一页会合并退化连接器、运行时失败、daemon 警告/错误，以及失败的 admin 任务。
+- 当你想先快速看清当前最重要的问题时，就用 **错误控制台**。
+- 这一页会把连接器异常、运行时失败、daemon 错误，以及失败的管理任务放在一起。
 
 ### 怎么使用
 
-- 在打开更细的日志页或 quest 页之前，先看这里。
-- 如果问题值得向上游报告，可以一键继续到 **问题报告**。
+- 在打开更细的日志页或项目页之前，先看这里。
+- 如果问题值得提交给上游，可以一键继续到 **问题报告**。
 `,
     degradedConnectors: '退化连接器',
     runtimeFailures: '运行时失败',
@@ -62,7 +62,7 @@ const PAGE_COPY = {
     failedTasks: '失败任务',
     action: '动作',
     prepareIssue: '准备 GitHub Issue',
-    issueHelp: '使用问题报告器打开一个预填好的 GitHub issue，其中包含环境信息、最近失败、连接器状态和缓存的 Doctor 输出。',
+    issueHelp: '用问题报告生成 GitHub issue 草稿，其中会包含环境信息、最近失败、连接器状态和 Doctor 结果。',
     runtimeFailuresTitle: '运行时失败',
     connectorErrors: '连接器错误',
     quest: 'Quest',

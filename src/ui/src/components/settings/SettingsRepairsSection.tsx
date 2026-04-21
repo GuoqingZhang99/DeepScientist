@@ -18,19 +18,19 @@ const dividerClassName = 'border-black/[0.06] dark:border-white/[0.08]'
 const PAGE_COPY = {
   en: {
     title: 'Repairs',
-    subtitle: 'Manage admin repair sessions and reopen them in the left-side copilot dock.',
+    subtitle: 'Create, continue, and reopen problem-solving sessions from one place.',
     guide: `
 ### What this page is for
 
-- Use **Repairs** to manage administrator repair sessions that open in the left-side AdminOps dock.
-- Each repair session is backed by an **ops quest**, so it reuses the normal quest event stream and copilot surfaces.
+- Use **Repairs** to keep track of problem-solving sessions.
+- Each repair can be reopened in the left chat panel, so you do not lose the troubleshooting context.
 
 ### Workflow
 
 1. Create a repair with a precise request.
-2. Open it in the dock.
-3. Continue diagnosis or repair inside the dock.
-4. Close the repair when the operator workflow is done.
+2. Open it in the chat panel.
+3. Continue diagnosis or repair there.
+4. Close the repair when the work is done.
 `,
     newRepair: 'New Repair',
     requestPlaceholder: 'Describe the issue to diagnose or fix',
@@ -48,19 +48,19 @@ const PAGE_COPY = {
   },
   zh: {
     title: '修复',
-    subtitle: '管理管理员修复会话，并在左下 Copilot Dock 中重新打开它们。',
+    subtitle: '把排查和修复会话集中管理，需要时可以继续打开处理。',
     guide: `
 ### 这一页用来做什么
 
-- 用 **修复** 管理管理员修复会话，这些会话会在左侧 AdminOps Dock 中打开。
-- 每个修复会话背后都是一个 **ops quest**，因此会复用正常 quest 的事件流与 copilot 面。
+- 用 **修复** 管理排查和修复会话。
+- 每个修复会话都可以在左侧聊天面板里重新打开，这样不会丢失排查上下文。
 
 ### 工作流
 
 1. 用明确请求创建一个修复会话。
-2. 在 Dock 中打开它。
-3. 在 Dock 里继续诊断或修复。
-4. 当运维流程结束后，再关闭这个修复会话。
+2. 在聊天面板里打开它。
+3. 在那里继续诊断或修复。
+4. 当问题处理结束后，再关闭这个修复会话。
 `,
     newRepair: '新建修复',
     requestPlaceholder: '描述需要诊断或修复的问题',

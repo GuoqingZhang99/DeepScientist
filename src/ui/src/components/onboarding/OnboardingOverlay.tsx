@@ -352,8 +352,8 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
     route: 'landing',
     targetId: 'start-research-preview-surface',
     title: {
-      en: 'Review the kickoff prompt before you create',
-      zh: '创建前看一眼 kickoff Prompt',
+      en: 'Review the launch preview before you create',
+      zh: '创建前看一眼启动预览',
     },
     body: onboardingStepBodies['dialog-preview'],
     placement: 'left',
