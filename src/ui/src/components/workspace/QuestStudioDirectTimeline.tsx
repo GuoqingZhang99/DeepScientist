@@ -563,6 +563,7 @@ export function QuestStudioDirectTimeline({
     async (href: string) => {
       const target = resolveStudioFileLinkTarget(href, {
         currentOrigin: typeof window !== 'undefined' ? window.location.origin : null,
+        questId,
       })
       if (!target) {
         return false
@@ -650,34 +651,52 @@ export function QuestStudioDirectTimeline({
 
   const markdownComponents = React.useMemo<Components>(
     () => ({
-      a: ({ href, children, ...props }) => {
+      a: ({ href, children, className, title, ...props }) => {
         const rawHref = typeof href === 'string' ? href : ''
         const fileTarget = rawHref
           ? resolveStudioFileLinkTarget(rawHref, {
               currentOrigin: typeof window !== 'undefined' ? window.location.origin : null,
+              questId,
             })
           : null
         const shouldOpenInNewTab = !fileTarget && /^(https?:)?\/\//i.test(rawHref)
 
+        if (fileTarget) {
+          return (
+            <button
+              type="button"
+              title={title || rawHref}
+              data-studio-file-link="true"
+              className={cn(
+                'inline cursor-pointer border-0 bg-transparent p-0 text-left align-baseline font-inherit text-[inherit] underline decoration-current underline-offset-[0.18em] transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current/40 focus-visible:ring-offset-1',
+                className
+              )}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                void handleOpenStudioFile(rawHref)
+              }}
+            >
+              {children}
+            </button>
+          )
+        }
+
         return (
           <a
             {...props}
+            className={className}
             href={rawHref || undefined}
+            title={title}
             target={shouldOpenInNewTab ? '_blank' : undefined}
             rel={shouldOpenInNewTab ? 'noopener noreferrer' : undefined}
-            onClick={(event) => {
-              if (!fileTarget) return
-              event.preventDefault()
-              event.stopPropagation()
-              void handleOpenStudioFile(rawHref)
-            }}
           >
             {children}
           </a>
         )
       },
     }),
-    [handleOpenStudioFile]
+    [handleOpenStudioFile, questId]
   )
 
   React.useEffect(() => {

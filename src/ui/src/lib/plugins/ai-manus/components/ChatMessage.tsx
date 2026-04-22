@@ -24,6 +24,7 @@ import {
   renderMarkdownWithCitations,
   type CitationLookup,
 } from '../lib/markdown'
+import { resolveStudioFileLinkTarget } from '@/components/workspace/studio-file-links'
 import { formatRelativeTime } from '../lib/time'
 import { getToolInfo } from '../lib/tool-map'
 import { getMcpToolKind } from '../lib/mcp-tools'
@@ -50,6 +51,7 @@ type ChatMessageProps = {
   readOnly?: boolean
   onToolClick?: (tool: ToolContent) => void
   onFileClick?: (fileId: string) => void
+  onFileLinkClick?: (href: string) => boolean
   onQuestionPromptSubmit?: (toolCallId: string, answers: QuestionPromptAnswerMap) => Promise<void>
   onClarifyQuestionSubmit?: (toolCallId: string | undefined, selections: string[]) => Promise<void>
   onPatchAccept?: (messageId: string) => void
@@ -265,6 +267,7 @@ function ChatMessageBase({
   readOnly,
   onToolClick,
   onFileClick,
+  onFileLinkClick,
   onQuestionPromptSubmit,
   onClarifyQuestionSubmit,
   onPatchAccept,
@@ -485,6 +488,24 @@ function ChatMessageBase({
     )
   }
 
+  const handleWorkspaceLinkClick = useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (!onFileLinkClick) return false
+      const target = event.target as HTMLElement | null
+      const fileButton = target?.closest<HTMLElement>('[data-file-href]')
+      const buttonHref = fileButton?.getAttribute('data-file-href')?.trim() || ''
+      const anchor = target?.closest<HTMLAnchorElement>('a[href]')
+      const rawHref = buttonHref || anchor?.getAttribute('href')?.trim() || ''
+      if (!rawHref) return false
+      const handled = onFileLinkClick(rawHref)
+      if (!handled) return false
+      event.preventDefault()
+      event.stopPropagation()
+      return true
+    },
+    [onFileLinkClick]
+  )
+
   const handleMarkdownAction = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
       const target = event.target as HTMLElement | null
@@ -552,15 +573,28 @@ function ChatMessageBase({
   })
 
   const reasoningBody = streamedReasoning ?? reasoningText
+  const workspaceLinkResolver = useCallback(
+    (href: string) =>
+      Boolean(
+        projectId &&
+          resolveStudioFileLinkTarget(href, {
+            currentOrigin: typeof window !== 'undefined' ? window.location.origin : null,
+            questId: projectId,
+          })
+      ),
+    [projectId]
+  )
   const userHtml = useMemo(
-    () => (isUserMessage ? renderMarkdown(fullContent) : ''),
-    [fullContent, isUserMessage]
+    () => (isUserMessage ? renderMarkdown(fullContent, { resolveWorkspaceFileLink: workspaceLinkResolver }) : ''),
+    [fullContent, isUserMessage, workspaceLinkResolver]
   )
   const assistantRendered = useMemo(() => {
     if (!isAssistantTextDelta) return { html: '', citationLookup: {} as CitationLookup }
     const resolved = streamedContent !== null ? streamedContent : fullContent
-    return renderMarkdownWithCitations(resolved, messageContent.metadata?.citations)
-  }, [fullContent, isAssistantTextDelta, messageContent.metadata?.citations, streamedContent])
+    return renderMarkdownWithCitations(resolved, messageContent.metadata?.citations, {
+      resolveWorkspaceFileLink: workspaceLinkResolver,
+    })
+  }, [fullContent, isAssistantTextDelta, messageContent.metadata?.citations, streamedContent, workspaceLinkResolver])
   const assistantHtml = assistantRendered.html
   const citationLookupRef = useRef<CitationLookup>({})
   useEffect(() => {
@@ -568,12 +602,14 @@ function ChatMessageBase({
   }, [assistantRendered.citationLookup])
   const reasoningHtml = useMemo(() => {
     if (message.type !== 'reasoning') return ''
-    return renderMarkdown(reasoningBody)
-  }, [message.type, reasoningBody])
+    return renderMarkdown(reasoningBody, { resolveWorkspaceFileLink: workspaceLinkResolver })
+  }, [message.type, reasoningBody, workspaceLinkResolver])
   const stepDescriptionHtml = useMemo(() => {
     if (message.type !== 'step') return ''
-    return renderMarkdown(stepContent.description || '')
-  }, [message.type, stepContent.description])
+    return renderMarkdown(stepContent.description || '', {
+      resolveWorkspaceFileLink: workspaceLinkResolver,
+    })
+  }, [message.type, stepContent.description, workspaceLinkResolver])
   const toolContentKey = useMemo(() => {
     if (!isToolMessage) return ''
     const args =
@@ -622,10 +658,11 @@ function ChatMessageBase({
 
   const handleAssistantClick = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
+      if (handleWorkspaceLinkClick(event)) return
       if (handleMarkdownAction(event)) return
       handleCitationClick(event)
     },
-    [handleCitationClick, handleMarkdownAction]
+    [handleCitationClick, handleMarkdownAction, handleWorkspaceLinkClick]
   )
 
   useEffect(() => {
@@ -760,6 +797,7 @@ function ChatMessageBase({
               isCompact ? 'text-[11px] leading-relaxed' : 'text-[12px] leading-relaxed'
             )}
             onClick={handleMarkdownAction}
+            onClickCapture={handleAssistantClick}
             dangerouslySetInnerHTML={{ __html: userHtml }}
           />
         </div>
@@ -936,6 +974,7 @@ function ChatMessageBase({
                 : 'prose-sm text-[12px] [&_p]:text-[12px] [&_li]:text-[12px]'
             )}
             onClick={handleMarkdownAction}
+            onClickCapture={handleAssistantClick}
             dangerouslySetInnerHTML={{
               __html: reasoningHtml,
             }}
@@ -967,7 +1006,7 @@ function ChatMessageBase({
             )}
             <div
               className="truncate font-medium"
-              onClick={handleMarkdownAction}
+              onClick={handleAssistantClick}
               dangerouslySetInnerHTML={{ __html: stepDescriptionHtml }}
             />
             <ChevronDown
@@ -1099,6 +1138,7 @@ const ChatMessage = memo(ChatMessageBase, (prev, next) => {
   if (prev.displayStreaming !== next.displayStreaming) return false
   if (prev.onToolClick !== next.onToolClick) return false
   if (prev.onFileClick !== next.onFileClick) return false
+  if (prev.onFileLinkClick !== next.onFileLinkClick) return false
   if (prev.onQuestionPromptSubmit !== next.onQuestionPromptSubmit) return false
   if (prev.onClarifyQuestionSubmit !== next.onClarifyQuestionSubmit) return false
   if (prev.onPatchAccept !== next.onPatchAccept) return false

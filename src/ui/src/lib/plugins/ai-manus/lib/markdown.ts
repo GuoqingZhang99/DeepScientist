@@ -33,6 +33,7 @@ const ALLOWED_ATTR = [
   'data-code-lines',
   'type',
   'aria-label',
+  'data-file-href',
 ]
 
 const NAMED_ENTITY_MAP: Record<string, string> = {
@@ -53,6 +54,10 @@ type CitationRenderState = {
   lookup: CitationLookup
   byIndex: Map<number, NormalizedCitation>
   inlineCounter: number
+}
+
+type MarkdownRenderOptions = {
+  resolveWorkspaceFileLink?: (href: string) => boolean
 }
 
 export function decodeHtmlEntities(text: string | null | undefined): string {
@@ -299,7 +304,7 @@ const replaceCitations = (escaped: string, state: CitationRenderState): string =
 const wrapMentions = (value: string) =>
   value.replace(/(^|[\s({])(@[A-Za-z0-9_-]+)/g, '$1<span class="ai-manus-mention">$2</span>')
 
-const createRenderer = (state: CitationRenderState | null) => {
+const createRenderer = (state: CitationRenderState | null, options?: MarkdownRenderOptions) => {
   const renderer = new marked.Renderer()
   renderer.code = ({ text, lang }: Tokens.Code) => {
     const raw = typeof text === 'string' ? text : ''
@@ -325,6 +330,9 @@ const createRenderer = (state: CitationRenderState | null) => {
   renderer.link = ({ href, title, text }: Tokens.Link) => {
     const safeHref = href ?? ''
     const titleAttr = title ? ` title="${title}"` : ''
+    if (options?.resolveWorkspaceFileLink?.(safeHref)) {
+      return `<button type="button" class="ai-manus-inline-link" data-file-href="${escapeHtml(safeHref)}"${titleAttr}>${text}</button>`
+    }
     return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer"${titleAttr}>${text}</a>`
   }
   renderer.text = (token: any) => {
@@ -350,7 +358,8 @@ const renderMarkdownInternal = (
   text: string,
   citations?: CitationPayload[],
   enableCitations: boolean = false,
-  inline: boolean = false
+  inline: boolean = false,
+  options?: MarkdownRenderOptions
 ): { html: string; citationLookup: CitationLookup } => {
   if (!text) return { html: '', citationLookup: {} }
   const normalized = decodeHtmlEntities(text)
@@ -375,8 +384,8 @@ const renderMarkdownInternal = (
   }
 
   const html = inline
-    ? (marked.parseInline(normalized, { renderer: createRenderer(citationState) }) as string)
-    : (marked.parse(normalized, { renderer: createRenderer(citationState) }) as string)
+    ? (marked.parseInline(normalized, { renderer: createRenderer(citationState, options) }) as string)
+    : (marked.parse(normalized, { renderer: createRenderer(citationState, options) }) as string)
   const sanitized = DOMPurify.sanitize(html, {
     ALLOWED_TAGS,
     ALLOWED_ATTR,
@@ -385,17 +394,18 @@ const renderMarkdownInternal = (
   return { html: sanitized, citationLookup: lookup }
 }
 
-export function renderMarkdown(text: string): string {
-  return renderMarkdownInternal(text, undefined, false).html
+export function renderMarkdown(text: string, options?: MarkdownRenderOptions): string {
+  return renderMarkdownInternal(text, undefined, false, false, options).html
 }
 
-export function renderMarkdownInline(text: string): string {
-  return renderMarkdownInternal(text, undefined, false, true).html
+export function renderMarkdownInline(text: string, options?: MarkdownRenderOptions): string {
+  return renderMarkdownInternal(text, undefined, false, true, options).html
 }
 
 export function renderMarkdownWithCitations(
   text: string,
-  citations?: CitationPayload[]
+  citations?: CitationPayload[],
+  options?: MarkdownRenderOptions
 ): { html: string; citationLookup: CitationLookup } {
-  return renderMarkdownInternal(text, citations, true)
+  return renderMarkdownInternal(text, citations, true, false, options)
 }

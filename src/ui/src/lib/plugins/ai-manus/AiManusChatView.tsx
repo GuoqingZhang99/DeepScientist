@@ -138,6 +138,8 @@ import { getMcpToolKind } from './lib/mcp-tools'
 import { mergeApplyPatchChanges, parseApplyPatchFiles } from './lib/patch-utils'
 import { resolveToolCategory } from './lib/tool-map'
 import { ChatScrollProvider } from './lib/chat-scroll-context'
+import { resolveStudioFileLinkTarget } from '@/components/workspace/studio-file-links'
+import { dispatchWorkspaceLeftVisibility, dispatchWorkspaceRevealFile } from '@/components/workspace/workspace-events'
 import { ensureDefaultAgent, resolveAgentMention } from '@/lib/utils/agent-mentions'
 import type {
   AttachmentsContent,
@@ -8421,6 +8423,102 @@ export function AiManusChatView({
     [addToast, findNodeByPath, openFileInTab, projectId, setActiveTab, tabs]
   )
 
+  const handleWorkspaceFileLinkClick = useCallback(
+    (href: string) => {
+      const resolvedProjectId = String(projectId || '').trim()
+      if (!resolvedProjectId) return false
+
+      const target = resolveStudioFileLinkTarget(href, {
+        currentOrigin: typeof window !== 'undefined' ? window.location.origin : null,
+        questId: resolvedProjectId,
+      })
+      if (!target) return false
+
+      void (async () => {
+        let node =
+          target.kind === 'file_id'
+            ? findNode(target.fileId)
+            : findNodeByPath(target.filePath)
+
+        if (!node) {
+          await useFileTreeStore.getState().refresh()
+          const refreshedStore = useFileTreeStore.getState()
+          node =
+            target.kind === 'file_id'
+              ? refreshedStore.findNode(target.fileId)
+              : refreshedStore.findNodeByPath(target.filePath)
+        }
+
+        if (!node) {
+          addToast({
+            type: 'error',
+            title: 'File not found',
+            description:
+              target.kind === 'file_id'
+                ? 'The linked workspace file is not available in Explorer yet.'
+                : target.filePath,
+          })
+          return
+        }
+
+        dispatchWorkspaceLeftVisibility({ projectId: resolvedProjectId, visible: true })
+        if (node.path) {
+          const revealDetail = {
+            projectId: resolvedProjectId,
+            filePath: node.path,
+            label: node.name,
+          }
+          dispatchWorkspaceRevealFile(revealDetail)
+          if (typeof window !== 'undefined') {
+            window.setTimeout(() => dispatchWorkspaceRevealFile(revealDetail), 50)
+            window.setTimeout(() => dispatchWorkspaceRevealFile(revealDetail), 180)
+            window.setTimeout(() => dispatchWorkspaceRevealFile(revealDetail), 360)
+          }
+        }
+
+        const revealNodeInExplorer = () => {
+          const store = useFileTreeStore.getState()
+          store.expandToFile(node.id)
+          store.select(node.id)
+          store.setFocused(node.id)
+          store.highlightFile(node.id)
+        }
+
+        const retriggerExplorerReveal = () => {
+          const store = useFileTreeStore.getState()
+          store.clearHighlight()
+          revealNodeInExplorer()
+        }
+
+        revealNodeInExplorer()
+        if (typeof window !== 'undefined') {
+          window.setTimeout(retriggerExplorerReveal, 80)
+          window.setTimeout(retriggerExplorerReveal, 220)
+        }
+
+        if (node.type === 'folder') {
+          useFileTreeStore.getState().expand(node.id)
+          return
+        }
+
+        useFileTreeStore.getState().markFileRead(node.id)
+        const result = await openFileInTab(node, {
+          customData: { projectId: resolvedProjectId },
+        })
+        if (!result.success) {
+          addToast({
+            type: 'error',
+            title: 'Unable to open file',
+            description: result.error || 'The linked workspace file could not be opened.',
+          })
+        }
+      })()
+
+      return true
+    },
+    [addToast, findNode, findNodeByPath, openFileInTab, projectId]
+  )
+
   const connectionStatus = useMemo(() => {
     if (connection.status === 'rate_limited') return 'Rate limited. Retrying…'
     if (connection.status === 'reconnecting') return 'Reconnecting…'
@@ -8796,6 +8894,7 @@ export function AiManusChatView({
             compact={isCopilotSurface}
             onToolClick={toolPanelEnabled ? handleToolClick : undefined}
             onFileClick={handleAttachmentClick}
+            onFileLinkClick={handleWorkspaceFileLinkClick}
             onQuestionPromptSubmit={readOnlyMode ? undefined : handleQuestionSubmit}
             onClarifyQuestionSubmit={readOnlyMode ? undefined : handleClarifySubmit}
             onPatchAccept={readOnlyMode ? undefined : (id) => handlePatchDecision(id, 'accept')}
@@ -8809,6 +8908,7 @@ export function AiManusChatView({
     },
     [
       handleAttachmentClick,
+      handleWorkspaceFileLinkClick,
       handleClarifySubmit,
       handlePatchDecision,
       handleToolClick,

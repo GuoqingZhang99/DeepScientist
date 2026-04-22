@@ -1870,6 +1870,15 @@ function LeftPanel({
       return
     }
 
+    if (!effectiveSelection) {
+      setDiffFiles([])
+      setDiffCompareBase(null)
+      setDiffCompareHead(null)
+      setScopedExplorerLoading(false)
+      setExplorerLocation(DEFAULT_EXPLORER_LOCATION)
+      return
+    }
+
     const snapshotRevision = resolveExplorerSnapshotRevision(effectiveSelection)
     const scopePaths = [
       ...(effectiveSelection.scope_paths || []),

@@ -617,6 +617,29 @@
     word-break: break-word;
   }
 
+  .ai-manus-inline-link {
+    display: inline;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+    cursor: pointer;
+  }
+
+  .ai-manus-inline-link:hover {
+    opacity: 0.82;
+  }
+
+  .ai-manus-inline-link:focus-visible {
+    outline: 1px solid currentColor;
+    outline-offset: 1px;
+  }
+
   .ds-copilot-markdown pre,
   .ds-copilot-dock pre {
     max-width: 100%;
