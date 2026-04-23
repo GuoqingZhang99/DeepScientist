@@ -7814,6 +7814,150 @@ def test_running_turn_consumes_queued_user_messages_via_artifact_without_duplica
     assert snapshot["pending_user_message_count"] == 0
 
 
+def test_retry_backoff_new_user_message_interrupts_wait_and_runs_immediately(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app.runners_config["codex"].update(
+        {
+            "retry_on_failure": True,
+            "retry_max_attempts": 4,
+            "retry_initial_backoff_sec": 0.3,
+            "retry_backoff_multiplier": 2,
+            "retry_max_backoff_sec": 0.3,
+        }
+    )
+    quest = app.quest_service.create("retry wait interrupt quest")
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+
+    class RetryInterruptRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests: list[dict[str, object]] = []
+            self.first_retry_scheduled = threading.Event()
+            self.latest_retry_context: dict[str, object] | None = None
+
+        def run(self, request):
+            self.requests.append(
+                {
+                    "message": request.message,
+                    "attempt_index": request.attempt_index,
+                    "run_id": request.run_id,
+                }
+            )
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            if request.message == "First request.":
+                if request.attempt_index == 1:
+                    self.first_retry_scheduled.set()
+                    return RunResult(
+                        ok=False,
+                        run_id=request.run_id,
+                        model=request.model,
+                        output_text="first failure",
+                        exit_code=1,
+                        history_root=history_root,
+                        run_root=run_root,
+                        stderr_text="temporary failure before retry",
+                    )
+                return RunResult(
+                    ok=True,
+                    run_id=request.run_id,
+                    model=request.model,
+                    output_text="unexpected resumed first request",
+                    exit_code=0,
+                    history_root=history_root,
+                    run_root=run_root,
+                    stderr_text="",
+                )
+            if request.message == "Second request should run now.":
+                if request.attempt_index == 1:
+                    return RunResult(
+                        ok=False,
+                        run_id=request.run_id,
+                        model=request.model,
+                        output_text="second failure",
+                        exit_code=1,
+                        history_root=history_root,
+                        run_root=run_root,
+                        stderr_text="temporary second failure",
+                    )
+                self.latest_retry_context = dict(request.retry_context or {})
+                return RunResult(
+                    ok=True,
+                    run_id=request.run_id,
+                    model=request.model,
+                    output_text="second request recovered after retry",
+                    exit_code=0,
+                    history_root=history_root,
+                    run_root=run_root,
+                    stderr_text="",
+                )
+            raise AssertionError(f"unexpected message: {request.message}")
+
+        def interrupt(self, target_quest_id: str) -> bool:
+            return True
+
+    runner = RetryInterruptRunner()
+    app.runners["codex"] = runner
+
+    first_payload = app.handlers.chat(quest_id, {"text": "First request.", "source": "tui-ink"})
+    assert first_payload["ok"] is True
+    assert runner.first_retry_scheduled.wait(timeout=3)
+
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        snapshot = app.quest_service.snapshot(quest_id)
+        retry_state = snapshot.get("retry_state") if isinstance(snapshot.get("retry_state"), dict) else None
+        if (
+            str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip() == "running"
+            and retry_state
+            and str(retry_state.get("next_retry_at") or "").strip()
+            and not str(snapshot.get("active_run_id") or "").strip()
+        ):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("retry backoff state was not reached")
+
+    second_payload = app.handlers.chat(
+        quest_id,
+        {"text": "Second request should run now.", "source": "web-react"},
+    )
+    assert second_payload["ok"] is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        history = app.quest_service.history(quest_id, limit=20)
+        if any(
+            str(item.get("role") or "") == "assistant"
+            and str(item.get("content") or "") == "second request recovered after retry"
+            for item in history
+        ):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("interrupted retry wait did not execute the new user message")
+
+    messages_with_attempts = [(str(item["message"]), int(item["attempt_index"])) for item in runner.requests]
+    assert ("First request.", 1) in messages_with_attempts
+    assert ("First request.", 2) not in messages_with_attempts
+    assert messages_with_attempts.count(("Second request should run now.", 1)) == 1
+    assert messages_with_attempts.count(("Second request should run now.", 2)) == 1
+    assert runner.latest_retry_context is not None
+    assert "temporary second failure" in str(runner.latest_retry_context.get("failure_summary") or "")
+
+    events = read_jsonl(quest_root / ".ds" / "events.jsonl")
+    aborted = [item for item in events if item.get("type") == "runner.turn_retry_aborted"]
+    assert aborted
+    assert any("newer user message arrived" in str(item.get("summary") or "") for item in aborted)
+
+    snapshot = app.quest_service.snapshot(quest_id)
+    assert snapshot["retry_state"] is None
+
+
 def test_status_formatter_includes_detailed_runtime_state(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()

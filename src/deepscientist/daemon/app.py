@@ -1711,13 +1711,36 @@ class DaemonApp:
             )
         turn_state = self._refresh_turn_worker_state(quest_id)
         has_live_turn = bool(turn_state.get("running"))
+        retry_wait_details = self._retry_waiting_turn_details(
+            quest_id,
+            snapshot=snapshot,
+            turn_state=turn_state,
+            turn_reason="user_message",
+        )
         stalled_details = self._stalled_running_turn_details(
             quest_id,
             snapshot=snapshot,
             turn_state=turn_state,
             turn_reason="user_message",
         )
-        if runtime_status == "running" and has_live_turn and stalled_details is None:
+        if retry_wait_details is not None:
+            restart = self._interrupt_retry_wait_for_new_user_message(
+                quest_id,
+                snapshot=snapshot,
+                turn_state=turn_state,
+                details=retry_wait_details,
+                source=source,
+            )
+            if restart is not None:
+                scheduled = restart
+            else:
+                scheduled = {
+                    "scheduled": True,
+                    "started": False,
+                    "queued": True,
+                    "reason": "queued_for_artifact_interact",
+                }
+        elif runtime_status == "running" and has_live_turn and stalled_details is None:
             scheduled = {
                 "scheduled": True,
                 "started": False,
@@ -1732,6 +1755,127 @@ class DaemonApp:
             "previous_status": previous_status or None,
             **scheduled,
         }
+
+    def _retry_waiting_turn_details(
+        self,
+        quest_id: str,
+        *,
+        snapshot: dict | None,
+        turn_state: dict[str, object] | None,
+        turn_reason: str,
+    ) -> dict[str, Any] | None:
+        if str(turn_reason or "").strip() != "user_message":
+            return None
+        snapshot = dict(snapshot or self.quest_service.snapshot(quest_id))
+        runtime_status = str(snapshot.get("runtime_status") or snapshot.get("status") or "").strip().lower()
+        if runtime_status != "running":
+            return None
+        state = dict(turn_state or self._refresh_turn_worker_state(quest_id))
+        if not state.get("running"):
+            return None
+        retry_state = snapshot.get("retry_state") if isinstance(snapshot.get("retry_state"), dict) else None
+        if not retry_state:
+            return None
+        next_retry_at = str(retry_state.get("next_retry_at") or "").strip()
+        if not next_retry_at:
+            return None
+        if str(snapshot.get("active_run_id") or "").strip():
+            return None
+        pending_user_count = int(snapshot.get("pending_user_message_count") or 0)
+        if pending_user_count <= 0:
+            return None
+        try:
+            attempt_index = int(retry_state.get("attempt_index") or 0)
+        except (TypeError, ValueError):
+            attempt_index = 0
+        try:
+            max_attempts = int(retry_state.get("max_attempts") or 0)
+        except (TypeError, ValueError):
+            max_attempts = 0
+        delay_seconds = self._recovery_retry_delay_seconds(snapshot) or 0.0
+        return {
+            "retry_state": dict(retry_state),
+            "attempt_index": attempt_index,
+            "max_attempts": max_attempts,
+            "pending_user_count": pending_user_count,
+            "delay_seconds": max(0.0, float(delay_seconds)),
+        }
+
+    def _interrupt_retry_wait_for_new_user_message(
+        self,
+        quest_id: str,
+        *,
+        snapshot: dict[str, Any],
+        turn_state: dict[str, object],
+        details: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any] | None:
+        try:
+            restart = self._quiet_interrupt_for_turn_restart(quest_id, source=source)
+        except RuntimeError as exc:
+            self.logger.log(
+                "warning",
+                "runner.turn_retry_interrupt_failed",
+                quest_id=quest_id,
+                source=source,
+                error=str(exc),
+                pending_user_message_count=int(details.get("pending_user_count") or 0),
+            )
+            return None
+
+        retry_state = details.get("retry_state") if isinstance(details.get("retry_state"), dict) else {}
+        turn_id = str(retry_state.get("turn_id") or "").strip() or None
+        previous_run_id = str(retry_state.get("last_run_id") or "").strip() or None
+        attempt_index = max(0, int(details.get("attempt_index") or 0))
+        max_attempts = max(0, int(details.get("max_attempts") or 0))
+        pending_user_count = max(0, int(details.get("pending_user_count") or 0))
+        delay_seconds = max(0.0, float(details.get("delay_seconds") or 0.0))
+        runner_name = self._runner_name_for(snapshot)
+        skill_id = self._turn_skill_for(snapshot, None, turn_reason="user_message", turn_mode=self._turn_mode_for(snapshot, None, turn_reason="user_message"))
+        model = str((self.runners_config.get(runner_name) or {}).get("model", "gpt-5.4"))
+        summary = (
+            f"Retry wait aborted after attempt {attempt_index}/{max_attempts or attempt_index or 1} "
+            f"because a newer user message arrived. "
+            f"Pending queued user messages: {pending_user_count}. "
+            f"Skipped remaining backoff wait: {delay_seconds:.1f}s."
+        )
+        self.quest_service.update_runtime_state(
+            quest_root=self.quest_service._quest_root(quest_id),
+            retry_state=None,
+        )
+        self._append_retry_event(
+            quest_id,
+            event_type="runner.turn_retry_aborted",
+            runner_name=runner_name,
+            run_id=previous_run_id,
+            turn_id=turn_id,
+            skill_id=skill_id,
+            model=model,
+            attempt_index=attempt_index,
+            max_attempts=max_attempts,
+            summary=summary,
+            failure_summary=str(retry_state.get("last_error") or "").strip() or None,
+            previous_run_id=previous_run_id,
+        )
+        self._relay_quest_message_to_bound_connectors(
+            quest_id,
+            message=self._polite_copy(
+                zh="我收到新的用户消息，已中断上一轮等待中的自动重试，先优先处理最新要求。",
+                en="A new user message arrived, so I interrupted the pending retry wait and will handle the latest request first.",
+            ),
+            kind="system",
+            response_phase="update",
+            importance="normal",
+            attachments=[
+                {
+                    "kind": "retry_interrupted",
+                    "run_id": previous_run_id,
+                    "runner": runner_name,
+                    "turn_id": turn_id,
+                }
+            ],
+        )
+        return self.schedule_turn(quest_id, reason="user_message")
 
     def submit_web_user_message(
         self,
