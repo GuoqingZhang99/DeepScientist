@@ -4806,7 +4806,7 @@ class QuestService:
         }
 
     def search_files(self, quest_id: str, term: str, limit: int = 50) -> dict[str, Any]:
-        query = term.strip()
+        query = self._normalize_explorer_search_query(term)
         normalized_query = query.casefold()
         workspace_root = self.active_workspace_root(self._require_initialized_quest_root(quest_id))
         resolved_limit = max(1, min(limit, 200))
@@ -4832,6 +4832,41 @@ class QuestService:
             except OSError:
                 continue
 
+            relative = path.relative_to(workspace_root).as_posix()
+            scope, writable = self._classify_path_scope(workspace_root, path)
+            path_haystack = relative.casefold()
+            name_haystack = path.name.casefold()
+            if normalized_query in path_haystack or normalized_query in name_haystack:
+                haystack = path_haystack
+                match_spans: list[dict[str, int]] = []
+                start = 0
+                while True:
+                    found = haystack.find(normalized_query, start)
+                    if found < 0:
+                        break
+                    match_spans.append({"start": found, "end": found + len(query)})
+                    start = found + max(1, len(query))
+                renderer_hint, mime_type = self._renderer_hint_for(path)
+                items.append(
+                    {
+                        "id": f"{relative}:path",
+                        "document_id": f"path::{relative}",
+                        "title": path.name,
+                        "path": relative,
+                        "scope": scope,
+                        "writable": writable,
+                        "line_number": 0,
+                        "line_text": relative,
+                        "snippet": relative[:320],
+                        "match_spans": match_spans,
+                        "open_kind": renderer_hint,
+                        "mime_type": mime_type,
+                    }
+                )
+                if len(items) >= resolved_limit:
+                    truncated = True
+                    break
+
             renderer_hint, mime_type = self._renderer_hint_for(path)
             if not self._is_text_document(path, mime_type, renderer_hint):
                 continue
@@ -4854,8 +4889,6 @@ class QuestService:
                 continue
 
             files_scanned += 1
-            relative = path.relative_to(workspace_root).as_posix()
-            scope, writable = self._classify_path_scope(workspace_root, path)
 
             for line_index, line in enumerate(content.splitlines(), start=1):
                 haystack = line.casefold()
@@ -4901,6 +4934,15 @@ class QuestService:
             "truncated": truncated,
             "files_scanned": files_scanned,
         }
+
+    @staticmethod
+    def _normalize_explorer_search_query(term: str) -> str:
+        query = str(term or "").strip()
+        if len(query) >= 2 and query.startswith("*") and query.endswith("*"):
+            inner = query.strip("*").strip()
+            if inner and not any(marker in inner for marker in "*?[]"):
+                return inner
+        return query
 
     def open_document(self, quest_id: str, document_id: str) -> dict:
         quest_root = self._require_initialized_quest_root(quest_id)
