@@ -731,8 +731,13 @@ Use **Test** when the file exposes runtime dependencies.
                 "preview": preview,
             }
         results = parsed.get("results") if isinstance(parsed.get("results"), list) else []
+        if not results and isinstance(parsed.get("result"), list):
+            results = parsed.get("result") or []
+        total = parsed.get("total")
+        if total is None:
+            total = parsed.get("total_count")
         preview_payload = {
-            "total": parsed.get("total"),
+            "total": total,
             "took": parsed.get("took"),
             "results": results[: min(3, len(results))],
         }
@@ -742,7 +747,7 @@ Use **Test** when the file exposes runtime dependencies.
         details.update(
             {
                 "request_url": url,
-                "total": parsed.get("total"),
+                "total": total,
                 "result_count": len(results),
                 "first_title": str((results[0] or {}).get("title") or "").strip() if results else None,
             }

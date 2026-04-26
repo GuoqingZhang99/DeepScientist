@@ -209,6 +209,63 @@ safe_remove_dir() {
   rm -rf "$target"
 }
 
+source_copy_excludes() {
+  cat <<'EOF'
+./.git
+./.claude
+./.pytest_cache
+./.mypy_cache
+./.ruff_cache
+./.venv
+./build
+./node_modules
+./ui
+./test-results
+./runtime
+./src/ui/node_modules
+./src/ui/lib/node_modules
+./src/ui/test-results
+./src/ui/vendor/novel-headless/node_modules
+./src/ui/vendor/novel-headless/.turbo
+./src/tui/node_modules
+./src/deepscientist.egg-info
+./Codex
+./*.tgz
+./*.log
+./*.pid
+./*.rootbak
+./*.rootbak/
+./dist.bak.*
+EOF
+}
+
+tar_exclude_args() {
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    printf '%s\0' "--exclude=$pattern"
+  done < <(source_copy_excludes)
+}
+
+rsync_exclude_args() {
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    pattern="${pattern#./}"
+    case "$pattern" in
+      */*|\**)
+        ;;
+      *)
+        pattern="/$pattern"
+        ;;
+    esac
+    case "$pattern" in
+      \**)
+        pattern="/$pattern"
+        ;;
+    esac
+    printf '%s\0' "--exclude=$pattern"
+  done < <(source_copy_excludes)
+}
+
 stop_existing_install() {
   if [ -x "$INSTALL_DIR/bin/ds" ]; then
     "$INSTALL_DIR/bin/ds" --stop >/dev/null 2>&1 || true
@@ -222,20 +279,21 @@ stop_existing_install() {
 copy_source_tree() {
   local target="$1"
   mkdir -p "$target"
-  if command -v tar >/dev/null 2>&1; then
-    tar -C "$SOURCE_ROOT" -cf - \
-      --exclude='./.git' \
-      --exclude='./.pytest_cache' \
-      --exclude='./build' \
-      --exclude='./node_modules' \
-      --exclude='./ui' \
-      --exclude='./src/ui/node_modules' \
-      --exclude='./src/ui/lib/node_modules' \
-      --exclude='./src/tui/node_modules' \
-      --exclude='./src/deepscientist.egg-info' \
-      . | tar -C "$target" -xf -
+  if command -v rsync >/dev/null 2>&1; then
+    local -a excludes=()
+    while IFS= read -r -d '' item; do
+      excludes+=("$item")
+    done < <(rsync_exclude_args)
+    rsync -a --delete "${excludes[@]}" "$SOURCE_ROOT"/ "$target"/
+  elif command -v tar >/dev/null 2>&1; then
+    local -a excludes=()
+    while IFS= read -r -d '' item; do
+      excludes+=("$item")
+    done < <(tar_exclude_args)
+    tar -C "$SOURCE_ROOT" -cf - "${excludes[@]}" . | tar -C "$target" -xf -
   else
     cp -R "$SOURCE_ROOT"/. "$target"/
+    prune_tree "$target"
   fi
 }
 
@@ -243,14 +301,26 @@ prune_tree() {
   local target="$1"
   rm -rf \
     "$target/.git" \
+    "$target/.claude" \
     "$target/.pytest_cache" \
+    "$target/.mypy_cache" \
+    "$target/.ruff_cache" \
+    "$target/.venv" \
     "$target/build" \
     "$target/node_modules" \
     "$target/ui" \
+    "$target/test-results" \
+    "$target/runtime" \
     "$target/src/ui/node_modules" \
     "$target/src/ui/lib/node_modules" \
+    "$target/src/ui/test-results" \
+    "$target/src/ui/vendor/novel-headless/node_modules" \
+    "$target/src/ui/vendor/novel-headless/.turbo" \
     "$target/src/tui/node_modules" \
-    "$target/src/deepscientist.egg-info"
+    "$target/src/deepscientist.egg-info" \
+    "$target/Codex"
+  find "$target" -maxdepth 1 -type f \( -name '*.tgz' -o -name '*.log' -o -name '*.pid' -o -name '*.rootbak' \) -delete
+  find "$target" -maxdepth 1 -type d \( -name '*.rootbak' -o -name 'dist.bak.*' \) -prune -exec rm -rf {} +
   find "$target" -type d -name '__pycache__' -prune -exec rm -rf {} +
   find "$target" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 }

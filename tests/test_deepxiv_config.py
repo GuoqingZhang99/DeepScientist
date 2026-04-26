@@ -60,6 +60,40 @@ def test_deepxiv_test_payload_returns_preview_and_uses_transformers(temp_home: P
     assert "Transformers for Science" in result["preview"]
 
 
+def test_deepxiv_test_payload_accepts_current_deepxiv_result_shape(temp_home: Path, monkeypatch) -> None:
+    ensure_home_layout(temp_home)
+    manager = ConfigManager(temp_home)
+    manager.ensure_files()
+    payload = manager.load_named_normalized("config")
+    payload["literature"]["deepxiv"] = {
+        "enabled": True,
+        "base_url": "https://data.rag.ac.cn",
+        "token": "token-123",
+        "token_env": None,
+        "default_result_size": 10,
+        "preview_characters": 1200,
+        "request_timeout_seconds": 20,
+    }
+
+    monkeypatch.setattr(
+        config_service_module,
+        "urlopen",
+        lambda request, timeout=None: _FakeResponse({
+            "status": "success",
+            "total_count": 24,
+            "result": [{"title": "Transformers and Large Language Models", "arxiv_id": "2408.07583"}],
+        }),
+    )
+
+    result = manager.test_deepxiv_payload(payload)
+
+    assert result["ok"] is True
+    assert result["details"]["total"] == 24
+    assert result["details"]["result_count"] == 1
+    assert result["details"]["first_title"] == "Transformers and Large Language Models"
+    assert "Transformers and Large Language Models" in result["preview"]
+
+
 def test_deepxiv_test_payload_reports_empty_results(temp_home: Path, monkeypatch) -> None:
     ensure_home_layout(temp_home)
     manager = ConfigManager(temp_home)
