@@ -338,10 +338,11 @@ def test_prompt_builder_includes_paper_contract_health_block(temp_home: Path) ->
         model="gpt-5.4",
     )
 
-    assert "paper_contract_health: blocked" in prompt
+    assert "paper_contract_health: evidence_ready=False, analysis_ready=False" in prompt
     assert "paper_health_counts: unresolved_required=1, unmapped_completed=0, blocking_pending=1" in prompt
     assert "paper_recommended_next_stage: analysis-campaign" in prompt
     assert "paper_health_tool:" in prompt
+    assert "paper_coverage_tool:" in prompt
 
 
 def test_prompt_builder_includes_surface_and_attachment_summary_for_connector_turn(temp_home: Path) -> None:
@@ -1365,6 +1366,9 @@ def test_prompt_builder_start_setup_block_includes_local_daemon_api_context(temp
     assert "built_in_mcp_namespaces: artifact, bash_exec" in prompt
     assert "artifact.prepare_start_setup_form(...)" in prompt
     assert "reply_language_rule: answer in the user's own language" in prompt
+    assert "session_patch={...}" in prompt
+    assert "mode_fit_rule" in prompt
+    assert "preview_plan_rule" in prompt
 
 
 def test_prompt_builder_claude_start_setup_notes_namespaced_mcp_tool_names(temp_home: Path) -> None:
@@ -1442,9 +1446,11 @@ def test_prompt_builder_start_setup_prompt_avoids_unavailable_context_tools(temp
     assert "gpu_confirmation_rule" in prompt
     assert "critical_confirmation_rule" in prompt
     assert "start_setup_prepare_schema_summary" in prompt
-    assert "\"required\": [" in prompt
     assert "\"form_patch\"" in prompt
+    assert "\"session_patch\"" in prompt
     assert "\"runner_namespaced_tool\": \"mcp__artifact__prepare_start_setup_form\"" in prompt
+    assert "copilot_recommendation_rule" in prompt
+    assert "launch_preview_rule" in prompt
 
 
 def test_prompt_builder_runner_namespaced_notes_cover_supported_mcp_profiles(temp_home: Path) -> None:

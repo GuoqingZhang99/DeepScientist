@@ -50,6 +50,7 @@ Make one route judgment from durable evidence, record the verdict and smallest v
 - Do not launch analysis campaigns casually when the expected information gain is weak.
 - Do not choose among candidate packages without naming why the alternatives lost.
 - Do not imply baseline reuse is resolved unless the concrete attachment and confirmation path is clear.
+- Do not choose `finalize` for a paper line unless manuscript coverage reports `submission_ready=true`; a draft checkpoint routes back to `write`, and a review package routes to `review`.
 
 ## Constraints
 
@@ -130,6 +131,7 @@ Use the following canonical actions:
 - `attach_baseline`
 - `publish_baseline`
 - `write`
+- `review`
 - `finalize`
 - `iterate`
 - `reset`

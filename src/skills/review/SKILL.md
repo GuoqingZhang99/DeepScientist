@@ -87,6 +87,7 @@ Do not treat “looks polished” as “is defensible”.
 
 Use, in roughly this order:
 
+- `artifact.validate_manuscript_coverage(detail='full')` for paper bundles, memos, or alleged near-final manuscripts
 - the current paper or report draft
 - the selected outline if one exists
 - the claim-evidence map if one exists
@@ -139,6 +140,7 @@ Before writing the review itself, make the audit explicit.
 
 Identify:
 
+- whether the package is only `draft_checkpoint`, a reviewable manuscript, or truly submission-ready
 - 1 to 3 core claims such as `C1`, `C2`, `C3`
 - the strongest current evidence
 - the weakest current evidence
@@ -204,6 +206,14 @@ For each serious issue, record:
 ### 5. Produce the follow-up experiment TODO list
 
 Only if more evidence is truly needed, write `paper/review/experiment_todo.md` using `references/experiment-todo-template.md`.
+
+Before creating TODOs, separate three blocker types:
+
+- analysis blockers: missing, failed, unmapped, or legacy-method evidence needed for a claim
+- manuscript blockers: missing sections, missing figures/tables, weak narrative, or stale claim-evidence mapping
+- submission blockers: missing PDF, checklist, artifact availability, camera-ready cleanup, or user approval
+
+Do not turn manuscript/submission blockers into fake experiments or mark a `draft_checkpoint_ready` package final.
 
 When the paper still lacks experimental support, also create or revise:
 

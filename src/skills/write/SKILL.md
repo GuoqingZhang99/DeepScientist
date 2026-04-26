@@ -26,13 +26,15 @@ skill_role: stage
 5. Draft by section jobs, not one long stream.
    Write introduction / related work / method / experiments / analysis / conclusion as separate jobs. Write the abstract late, after evidence order and section roles stabilize. For oral-grade upgrades, follow the `Draft To Top Conference Oral` section below.
 6. Validate before output and route if needed.
-   Build or refresh the claim-evidence map, packaging state, and appendix bridges. If the draft is evidence-complete enough, prepare it for `finalize`; otherwise record the blocker and route back through `decision`, `experiment`, or `analysis-campaign`.
+   Refresh claim-evidence, packaging, appendix bridges, and `artifact.validate_manuscript_coverage(detail='full')`. A short memo is only `artifact.submit_paper_bundle(package_type='draft_checkpoint', ...)`; use `submission_package` only when `submission_ready=true`.
 
 ## Tool Use
 - `artifact.get_paper_contract_health(detail='full')`:
   use when a weak section may actually be caused by stale outline state, unresolved experiment rows, or unclear evidence ownership.
 - `artifact.get_paper_contract(detail='full')`:
   use by default before drafting any section, table, or analysis prose that depends on concrete main-experiment rows, analysis rows, or section-level `result_table` content.
+- `artifact.validate_manuscript_coverage(detail='full')`:
+  use before bundle submission or finalize; it checks sections, displays, ready analysis groups, PDF, and checklist state.
 - `artifact.get_quest_state(detail='summary')`, `artifact.read_quest_documents(...)`, `artifact.get_conversation_context(...)`:
   use when restart context is unclear, when exact durable wording matters, or when you need file truth instead of chat recollection.
 - `artifact.submit_paper_outline(mode='candidate'|'select'|'revise', ...)`:
@@ -40,7 +42,7 @@ skill_role: stage
 - `artifact.create_analysis_campaign(...)`:
   use only when a real paper-facing evidence gap needs follow-up analysis; do not use it for prose cleanup, citation chores, or generic "improve the paper" tasks.
 - `artifact.submit_paper_bundle(...)`:
-  use only when the draft, bibliography, and bundle metadata are already durable enough to hand off.
+  use explicit `package_type`: `draft_checkpoint`, `review_package`, or `submission_package` only after coverage is submission-ready.
 - `artifact.interact(...)` or other durable artifact updates:
   use when the writing pass materially changes paper status, route choice, or bundle readiness and the change should survive beyond chat.
 - `bash_exec(...)`:
@@ -58,6 +60,8 @@ skill_role: stage
 - Do not hand-write BibTeX, citations, metrics, or method details from memory.
 - Do not improvise a new plotting stack inside `write` when `paper-plot` should own the first-pass figure.
 - Do not merge experiments and analysis into one undifferentiated result dump when they need distinct reviewer-facing jobs.
+- Do not treat `evidence_ready` or `analysis_ready` as equivalent to `manuscript_ready` or `submission_ready`.
+- Do not submit a paper-shot memo as a final paper package; checkpoint it and continue writing/review.
 - Do not use rows that are not clearly bound to the current `selected_outline_ref` / active paper line.
 - Do not keep appending new material to the top control block until it turns back into prose-heavy documentation; keep the top short and use the longer guidance below only when the task actually matches it.
 
@@ -69,6 +73,7 @@ skill_role: stage
 - Any shell, CLI, Python, bash, node, git, npm, uv, LaTeX, or file-inspection execution in this stage must go through `bash_exec(...)`.
 - Use `artifact.create_analysis_campaign(...)` only for real paper-facing evidence gaps, not for prose cleanup or citation chores.
 - Use `artifact.submit_paper_bundle(...)` only after draft, bibliography, and bundle metadata are durable enough to hand off.
+- A mature empirical paper usually needs 5-10 paper-facing experiment/analysis groups unless scoped otherwise; if fewer, justify or route to `analysis-campaign`.
 - Use `memory.write(...)` only for reusable writing, citation, or search lessons, not one-off local edits.
 - For paper-like deliverables, aim for roughly `30-50` verified references unless the scope clearly justifies fewer.
 - Draft inside `paper/latex/` with a real template from `templates/`; default general ML/AI work to `templates/iclr2026/`.
@@ -82,6 +87,7 @@ skill_role: stage
 - Appendix bridges and artifact availability are described consistently across the manuscript.
 - Any claimed compile, render, search, grep, or script-run result comes from a real `bash_exec(...)` execution rather than hypothetical prose.
 - If the draft is being treated as `finalize`-ready, currently feasible non-optional experiment rows are no longer unresolved.
+- If the draft is being treated as `finalize`-ready, `artifact.validate_manuscript_coverage(detail='full')` reports `submission_ready=true`; `manuscript_ready=true` alone routes to `review`, not `finalize`.
 - The output ends in one of three durable states: a stronger draft, an explicit blocker, or a clear route-back decision.
 
 ## Potentially Reference-Worthy, Code-Grounded Facts

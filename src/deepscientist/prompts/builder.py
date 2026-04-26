@@ -1304,23 +1304,32 @@ class PromptBuilder:
             "- mission: help the user complete the autonomous start form and stop there; do not begin the real research workflow",
             "- context_first_rule: before asking the user for missing information, first read the current setup state and use the information already present in the form or benchmark context",
             "- start_setup_prepare_tool_rule: when you want to update the left-side form, prefer `artifact.prepare_start_setup_form(form_patch={...})` so the browser can patch the form automatically",
-            "- start_setup_prepare_signature_rule: `form_patch` is the required top-level argument for `artifact.prepare_start_setup_form(...)`; do not hide the patch JSON inside `message`.",
+            "- start_setup_prepare_signature_rule: use `form_patch={...}` when the launch form itself changes, `session_patch={...}` when fit judgment or preview-plan state changes, and make sure at least one of them is non-empty; do not hide patch JSON inside `message`.",
+            "- start_setup_session_patch_rule: when you learn or revise launch-fit judgment, missing confirmations, or the launch preview plan, write them back through the optional `session_patch={...}` argument on `artifact.prepare_start_setup_form(...)` so the browser can show them durably.",
+            "- start_setup_session_shape_rule: keep `session_patch.fit_assessment` as an object with verdict, reason, confidence, and optional risk_notes; keep `session_patch.preview_plan.markdown` as structured user-facing Markdown, plus optional phases and risks arrays.",
             "- start_setup_tool_discovery_rule: before claiming the form writeback tool is unavailable, first try the runner-exposed tool name if it is shown (for example `mcp__artifact__prepare_start_setup_form`).",
             "- start_setup_context_rule: the current suggested form and benchmark context are already injected into this prompt; do not assume `memory.*` or other `artifact.*` helpers are available here",
+            "- mode_fit_rule: explicitly judge whether the task is a good fit for autonomous mode, a provisional fit that still needs key confirmations, or should instead move to copilot / collaboration mode.",
+            "- copilot_recommendation_rule: recommend copilot mode when the work cannot mainly run inside the computer system for long horizons, depends heavily on repeated human judgment, or is not primarily a method-optimization research loop.",
+            "- preview_plan_rule: before you treat the setup as complete, submit a structured Markdown launch preview plan through `session_patch.preview_plan`; do not print that plan in the normal visible reply.",
+            "- preview_plan_template_rule: when enough information exists, structure the plan like a Deep Research plan: conclusion and mode recommendation, key questions the main agent should verify, materials/sources table, future execution steps, risks/confirmations, and conditions that should switch the user to copilot mode.",
+            "- preview_plan_reviewability_rule: keep the Markdown preview compact enough for the user to review before launch; it is a confirmation artifact, not a hidden scheduler trace.",
+            "- no_self_execution_rule: the preview plan is explanatory only. Do not start baseline work, experiments, analysis campaigns, or paper drafting from this setup session.",
             "- research_mainline_rule: when the user wants a real research project rather than a baseline-only task, the launch form should make the mainline explicit: baseline is only the starting point, then autonomous optimization and repeated performance improvement, then robust surpassing of strong baselines / SoTA with novelty, then analysis experiments, then literature / figures / paper-writing collaboration.",
             "- baseline_not_endpoint_rule: do not frame the mission as 'reproduce a baseline and stop' unless the user explicitly wants a baseline-only task.",
             "- novelty_confirmation_rule: if the user expects paper-level research or method contribution, explicitly confirm that the goal is not only to beat the baseline but to do so with a sufficiently novel and defensible method direction.",
             "- sequencing_confirmation_rule: if the long-term plan is still unclear, ask the user to confirm the intended sequence among baseline, optimization beyond SoTA, analysis experiments, and later literature / figure / writing work.",
             "- benchmark_context_source_rule: if `benchmark_context.raw_payload` exists, treat it as the full benchmark description file for this setup session rather than relying only on the shorter summary fields.",
-            "- start_setup_message_injection_rule: the recent conversation for this setup session is expanded explicitly below; use that full message history before asking the user to repeat requirements.",
+            "- start_setup_context_injection_rule: the current setup session state is injected below by the system; use it as hidden planning context and never ask the user to paste or repeat this context.",
+            "- start_setup_user_message_rule: treat the latest user message as the user's literal text only. Do not expect hidden planning XML or JSON to be embedded in the user message.",
             "- aisb_selection_rule: when the user asks you to choose or recommend a task, prefer the existing AISB / BenchStore catalog first instead of asking the user to invent a task from scratch.",
             "- aisb_selection_path: use `bash_exec(...)` against the injected local daemon BenchStore endpoints to inspect current catalog entries, then recommend the best fit based on both the user's stated needs and the current device boundary.",
             "- aisb_selection_truncation_rule: if you inspect BenchStore output through `head`, `tail`, `sed -n`, or another clipped shell window, explicitly treat it as truncated / partial output and never infer the global entry count from that preview alone.",
             "- aisb_selection_count_rule: before claiming how many BenchStore entries exist, read an explicit count such as `total`, `count`, or `items | length` from the daemon API result.",
             "- aisb_selection_output_rule: when multiple AISB candidates fit, summarize the top 1 to 3 options briefly, recommend one first, and then patch the form toward that recommendation.",
             "- performance_fit_rule: combine the user's requested task shape with the current machine boundary; if the machine is weak, prefer API-only, low-compute, short-cycle, and benchmark-faithful routes.",
-            "- output_rule: if the prepare tool is unavailable, fall back to one fenced block named `start_setup_patch` containing a JSON object with only the fields that should change",
-            "- no_tool_access_complaint_rule: if you use the fenced `start_setup_patch` fallback, do not complain about missing internal tools in the user-facing prose; just explain the draft briefly and provide the patch block.",
+            "- output_rule: do not emit fenced `start_setup_patch` or JSON patch blocks in the visible reply. If the prepare tool is unavailable, ask a short plain-language question or say the setup tool is temporarily unavailable instead of printing structured data.",
+            "- tool_submission_rule: submit structured form/session data through `artifact.prepare_start_setup_form(...)`; never put JSON patches or structured drafts in the visible assistant message.",
             "- start_setup_prepare_schema_summary:",
             "```json",
             json.dumps(
@@ -1329,11 +1338,14 @@ class PromptBuilder:
                     "runner_namespaced_tool": "mcp__artifact__prepare_start_setup_form",
                     "input_schema": {
                         "type": "object",
-                        "required": ["form_patch"],
                         "properties": {
                             "form_patch": {
                                 "type": "object",
-                                "description": "Required top-level patch object containing only the fields that should change.",
+                                "description": "Optional top-level form patch containing only the launch-form fields that should change.",
+                            },
+                            "session_patch": {
+                                "type": "object",
+                                "description": "Optional durable setup-session metadata such as fit assessment, recommended workspace mode, missing confirmations, preview plan, and materials summary.",
                             },
                             "message": {
                                 "type": "string",
@@ -1350,11 +1362,8 @@ class PromptBuilder:
                 indent=2,
             ),
             "```",
-            "- patch_fallback_example:",
-            "```start_setup_patch",
-            '{"title":"Example Project","goal":"Example goal","runtime_constraints":"- One key limit"}',
-            "```",
-            "- patch_rule: keep the patch small; only include fields that truly need to change",
+            "- patch_rule: keep the patch small; only include fields that truly need to change, and do not emit an empty `form_patch` + empty `session_patch` pair",
+            "- session_patch_fields_rule: use `session_patch.fit_assessment`, `session_patch.recommended_workspace_mode`, `session_patch.launch_readiness`, `session_patch.missing_confirmations`, `session_patch.preview_plan`, and `session_patch.materials_summary` when those values become clear enough to persist durably.",
             "- no_black_talk_rule: use natural user-facing language and avoid internal words like route, taxonomy, stage, slice, trace, checkpoint, or contract unless the user explicitly asks for them",
             "- no_research_execution_rule: do not start baseline work, experiments, analysis campaigns, or paper drafting in this setup session",
             "- user_choice_rule: if the user already filled the form clearly enough, say so and avoid unnecessary follow-up questions",
@@ -1362,7 +1371,7 @@ class PromptBuilder:
             "- mandatory_confirmation_rule: do not guess critical operator-controlled resources. If GPU scope, GPU count, explicit GPU ids, external LLM/API usage, API keys, tokens, paid-call permission, large-download permission, or privacy boundaries would change the launch plan, you must ask the user to confirm them before treating the form as launch-ready.",
             "- credential_confirmation_rule: if the task or benchmark would rely on an external API key, token, or account and that credential is not already explicitly available in context, proactively ask the user whether they want to provide it or switch to a different route.",
             "- gpu_confirmation_rule: do not assume every detected GPU is available. If the allowed GPU scope is unclear and local GPU usage matters, ask the user how many GPUs or which GPU ids may be used.",
-            "- gated_patch_rule: if critical resource confirmations are still missing, you may patch a provisional draft but you must mark the remaining uncertainty clearly in user-facing language instead of presenting the setup as fully ready to launch.",
+            "- gated_patch_rule: if critical resource confirmations are still missing, patch only safe partial fields through the tool, set `launch_readiness=needs_confirmation`, and ask questions only; do not show a provisional draft in prose.",
             "- question_categories: when user input is incomplete, ask at most for these practical categories: task goal, current materials, runtime limits, whether they prefer paper-facing delivery or result-first delivery, and whether the real target is baseline-only or iterative performance improvement beyond SoTA with novelty.",
             "- field_mapping_rule: treat title as a short project name, goal as the real mission, baseline_urls as baseline/code/data inputs, paper_urls as paper or benchmark references, runtime_constraints as hard limits, objectives as the first 2-4 near-term outcomes, and custom_brief as extra preferences",
         ]
@@ -1388,6 +1397,22 @@ class PromptBuilder:
             )
         else:
             lines.append("- current_suggested_form_json: {}")
+        setup_state = {
+            "recommended_workspace_mode": payload.get("recommended_workspace_mode") or "unknown",
+            "launch_readiness": payload.get("launch_readiness") or "unknown",
+            "fit_assessment": payload.get("fit_assessment") if isinstance(payload.get("fit_assessment"), dict) else None,
+            "missing_confirmations": payload.get("missing_confirmations") if isinstance(payload.get("missing_confirmations"), list) else [],
+            "materials_summary": payload.get("materials_summary") if isinstance(payload.get("materials_summary"), list) else [],
+            "preview_plan": payload.get("preview_plan") if isinstance(payload.get("preview_plan"), dict) else None,
+        }
+        lines.extend(
+            [
+                "- current_start_setup_state_json:",
+                "```json",
+                json.dumps(setup_state, ensure_ascii=False, indent=2),
+                "```",
+            ]
+        )
         return "\n".join(lines)
 
     @staticmethod
@@ -1497,7 +1522,9 @@ class PromptBuilder:
                 "- delivery_goal: fill the autonomous start form well enough that the user can launch confidently",
                 "- hard_boundary: this is a setup session, not the real research session",
                 "- start_setup_rule: organize the user's task, materials, and runtime limits into a clean launch-ready form",
-                "- patch_protocol: prefer `artifact.prepare_start_setup_form(form_patch={...})`; only use a fenced `start_setup_patch` block as fallback when the tool path is unavailable",
+                "- mode_recommendation_rule: explicitly judge whether autonomous mode is truly the right fit or whether copilot / collaboration mode is safer.",
+                "- launch_preview_rule: only submit the preview through `session_patch.preview_plan` after launch readiness is `ready`; do not print it in the normal reply.",
+                "- patch_protocol: use `artifact.prepare_start_setup_form(form_patch={...}, session_patch={...})` for all structured form/session updates; do not use fenced `start_setup_patch` blocks in the visible reply",
                 "- completion_rule: once the form is good enough to launch, say so clearly and stop asking for more unless the user requests changes",
                 "- directness_rule: if the current information is already sufficient, tell the user they can launch now",
                 "- ask_rule: only ask short practical questions that directly affect what gets submitted",
@@ -1506,13 +1533,13 @@ class PromptBuilder:
             if locale.startswith("zh"):
                 lines.extend(
                     [
-                        "- example_hint: 可以自然说“我已经先帮你整理出一版草案”“现在还差 2 件事就可以直接启动”。",
+                        "- example_hint: 可以自然说“还差 2 件事就可以判断是否启动”；不要说“整理出草案”，也不要在正文展示草案。",
                     ]
                 )
             else:
                 lines.extend(
                     [
-                        "- example_hint: natural lines like 'I already drafted a starting version for you' and 'Two details remain before launch' are preferred.",
+                        "- example_hint: natural lines like 'Two details remain before launch' are preferred; do not say you drafted a version or show draft content in prose.",
                     ]
                 )
             return "\n".join(lines)
@@ -2007,19 +2034,28 @@ class PromptBuilder:
             ).strip() or "none"
             lines.extend(
                 [
-                    f"- paper_contract_health: {'ready' if bool(paper_contract_health.get('writing_ready')) else 'blocked'}",
+                    (
+                        "- paper_contract_health: "
+                        f"evidence_ready={bool(paper_contract_health.get('evidence_ready', paper_contract_health.get('writing_ready')))}, "
+                        f"analysis_ready={bool(paper_contract_health.get('analysis_ready', paper_contract_health.get('writing_ready')))}, "
+                        f"draft_checkpoint_ready={bool(paper_contract_health.get('draft_checkpoint_ready'))}, "
+                        f"manuscript_ready={bool(paper_contract_health.get('manuscript_ready'))}, "
+                        f"submission_ready={bool(paper_contract_health.get('submission_ready'))}"
+                    ),
                     f"- paper_health_counts: unresolved_required={int(paper_contract_health.get('unresolved_required_count') or 0)}, unmapped_completed={int(paper_contract_health.get('unmapped_completed_count') or 0)}, blocking_pending={int(paper_contract_health.get('blocking_open_supplementary_count') or 0)}",
+                    f"- paper_package_type: {str(paper_contract_health.get('package_type') or 'draft_checkpoint')}",
                     f"- paper_recommended_next_stage: {str(paper_contract_health.get('recommended_next_stage') or 'none')}",
                     f"- paper_recommended_action: {str(paper_contract_health.get('recommended_action') or 'none')}",
                     f"- paper_primary_blocker: {primary_blocker}",
-                    "- paper_contract_tool: call artifact.get_paper_contract(detail='full') before writing sections, tables, or analysis prose that depend on concrete experiment or analysis results.",
-                    "- paper_health_tool: call artifact.get_paper_contract_health(detail='full') before paper-facing write/finalize work when the exact blocking items matter.",
+                    "- paper_contract_tool: call artifact.get_paper_contract(detail='full') before evidence-grounded paper prose.",
+                    "- paper_health_tool: call artifact.get_paper_contract_health(detail='full') before write/finalize routing.",
+                    "- paper_coverage_tool: call artifact.validate_manuscript_coverage(detail='full') before full-manuscript or submission claims.",
                     "- paper_outline_tool: call artifact.list_paper_outlines(...) when outline inventory or a valid outline_id is needed.",
                     "- paper_campaign_tool: call artifact.get_analysis_campaign(campaign_id='active') when exact supplementary slice status matters.",
                 ]
             )
             lines.append(
-                "- paper_contract_rule: if the paper state is blocked, do not stabilize draft prose as if the paper were settled; follow the recommended paper action first."
+                "- paper_contract_rule: do not finalize unless submission_ready is true."
             )
         return "\n".join(lines)
 

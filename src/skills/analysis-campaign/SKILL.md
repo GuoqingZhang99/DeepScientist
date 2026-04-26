@@ -43,6 +43,15 @@ Answer the smallest evidence question that changes, confirms, or blocks a parent
 6. Aggregate only the decision-relevant findings and route the next step.
    End in continue, write, experiment, idea, decision, blocker, or stop.
 
+## Paper-facing analysis quantity gate
+
+For manuscript-support campaigns, first audit `artifact.get_paper_contract(detail='full')` and, when a draft exists, `artifact.validate_manuscript_coverage(detail='full')`.
+
+- A mature empirical manuscript usually needs 5-10 distinct paper-facing experiment/analysis groups before `write` can call it full.
+- Do not pad the count with stale methods, abandoned methods, unrelated baseline repairs, or old exploratory rows. Each slice must identify the current method or claim it supports.
+- If legacy-method analysis is intentionally included, mark it as baseline/comparator/negative evidence and keep it separate from current-method support.
+- If the count is below the needed range, create the smallest claim-critical frontier rather than pretending the manuscript is ready.
+
 ## AVOID / pitfalls
 
 - Do not disguise a new main experiment as an analysis slice.
@@ -63,6 +72,7 @@ Answer the smallest evidence question that changes, confirms, or blocks a parent
 - Campaign design must be conditioned on the current execution envelope, not an idealized future machine.
 - If a slice would materially improve soundness but is infeasible now, record the blocker and choose the best runnable lower-cost alternative or narrower proxy.
 - If a slice is paper-relevant, its result must be bound back into the current paper contract rather than left only in `experiments/analysis-results/*` or chat.
+- Writing-facing slices must carry write-back metadata: `paper_role`, `section_id`, `item_id`, `claim_links`, method/comparator id, display target, and main/appendix role.
 
 ## Validation
 
@@ -190,6 +200,7 @@ For concrete paper-facing cases:
 - if `paper/paper_experiment_matrix.md` exists and the campaign is directly supporting the paper, read it before launching or reordering the slice set
 - for writing-facing campaigns, prefer stable ids such as `exp_id`, `todo_id`, or `slice_id` over free-form notes
 - paper-ready slices should carry the available write-back fields such as `paper_role`, `section_id`, `item_id`, and `claim_links` when those fields exist in the paper contract
+- paper-ready slices should record whether they support the latest method, an older comparator, a failure mode, or an appendix-only sanity check
 - after every completed paper-ready slice, update or verify the relevant paper experiment matrix, section notes, evidence ledger, or active paper-line summary
 
 Do not leave a slice "completed" while the paper contract still looks stale and that slice is meant to unblock the paper.
