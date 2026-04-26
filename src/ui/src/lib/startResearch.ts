@@ -81,6 +81,13 @@ export type StartResearchContractFields = {
   git_strategy: GitStrategy
 }
 
+export type StartResearchPromptAttachment = {
+  label: string
+  location?: string | null
+  contentType?: string | null
+  source?: 'setup' | 'manual' | string | null
+}
+
 export type StartResearchConnectorChoice = {
   name: string
   targets: Array<{
@@ -889,7 +896,10 @@ function customLaunchLines(input: StartResearchTemplate) {
   return lines
 }
 
-export function compileStartResearchPrompt(input: StartResearchTemplate) {
+export function compileStartResearchPrompt(
+  input: StartResearchTemplate,
+  options?: { attachments?: StartResearchPromptAttachment[] }
+) {
   const normalized = sanitizeTemplate(input)
   const derivedContract = resolveStartResearchContractFields(normalized)
   const baselineUrls = sanitizeLines(normalized.baseline_urls)
@@ -907,6 +917,30 @@ export function compileStartResearchPrompt(input: StartResearchTemplate) {
   const objectiveLines = normalized.objectives
     ? sanitizeLines(normalized.objectives).map((line) => `- ${line}`).join('\n')
     : '- Produce a trustworthy baseline\n- Decide whether the current direction is worth implementation\n- Preserve clean artifacts, metrics, and reasons for each decision'
+  const attachmentLines = Array.isArray(options?.attachments)
+    ? options?.attachments
+        .map((item) => {
+          const label = String(item.label || '').trim()
+          const location = String(item.location || '').trim()
+          const contentType = String(item.contentType || '').trim()
+          const source = String(item.source || '').trim()
+          if (!label && !location) return null
+          const sourceLabel =
+            source === 'setup'
+              ? 'inherited from the SetupAgent setup conversation'
+              : source === 'manual'
+                ? 'added directly on the launch form'
+                : 'provided by the user'
+          const parts = [
+            `name=${label || 'attachment'}`,
+            contentType ? `type=${contentType}` : null,
+            `source=${sourceLabel}`,
+            location ? `quest_local_location=${location}` : 'quest_local_location=will be resolved during launch materialization',
+          ].filter(Boolean)
+          return `- User uploaded ${label || 'an attachment'}; ${parts.join(' · ')}. Treat it as launch context and inspect the quest-local file or readable sidecar before relying on memory.`
+        })
+        .filter((item): item is string => Boolean(item))
+    : []
 
   return [
     'Project Bootstrap',
@@ -934,6 +968,15 @@ export function compileStartResearchPrompt(input: StartResearchTemplate) {
     '',
     'Reference Papers / Repositories / Local Paths',
     paperUrls.length > 0 ? paperUrls.map((url) => `- ${url}`).join('\n') : '- None provided',
+    '',
+    'User-Provided Materials',
+    attachmentLines.length > 0
+      ? [
+          `- The user uploaded ${attachmentLines.length} file(s). They have been or will be copied into this quest's local workspace before the first run continues.`,
+          '- When a readable sidecar, extracted text, OCR text, or archive manifest exists, inspect that first; otherwise inspect the raw quest-local file as needed.',
+          ...attachmentLines,
+        ].join('\n')
+      : '- No extra uploaded material was attached at launch time.',
     '',
     'Operational Constraints',
     normalized.runtime_constraints || 'No explicit runtime, privacy, dataset, or hardware constraints were provided.',

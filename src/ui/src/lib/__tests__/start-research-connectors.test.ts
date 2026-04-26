@@ -218,4 +218,37 @@ describe('start research standard profiles', () => {
     expect(prompt).toContain('Baseline Acceptance Target')
     expect(prompt).toContain('Comparison ready')
   })
+
+  it('includes uploaded launch materials in the compiled prompt', () => {
+    const prompt = compileStartResearchPrompt(
+      {
+        ...defaultStartResearchTemplate('en'),
+        goal: 'Use the uploaded dataset and paper as launch context.',
+      },
+      {
+        attachments: [
+          {
+            label: 'dataset.csv',
+            location: 'userfiles/web/batch-001/dataset.csv',
+            contentType: 'text/csv',
+            source: 'setup',
+          },
+          {
+            label: 'paper.pdf',
+            location: 'userfiles/web/batch-002/paper.pdf',
+            contentType: 'application/pdf',
+            source: 'manual',
+          },
+        ],
+      }
+    )
+
+    expect(prompt).toContain('User-Provided Materials')
+    expect(prompt).toContain('dataset.csv')
+    expect(prompt).toContain('quest_local_location=userfiles/web/batch-001/dataset.csv')
+    expect(prompt).toContain('inherited from the SetupAgent setup conversation')
+    expect(prompt).toContain('paper.pdf')
+    expect(prompt).toContain('added directly on the launch form')
+    expect(prompt).toContain('inspect the quest-local file or readable sidecar')
+  })
 })

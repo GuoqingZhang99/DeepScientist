@@ -50,14 +50,18 @@ describe('handleUIEffect route:navigate', () => {
           title: 'Bench Demo Autonomous Research',
           goal: 'Run the benchmark faithfully.',
         },
+        session_patch: {
+          preview_plan: { markdown: '## Launch plan' },
+        },
         message: 'Prepared the start form.',
       },
     })
 
     expect(listener).toHaveBeenCalledTimes(1)
-    const event = listener.mock.calls[0][0] as CustomEvent<{ patch: Record<string, unknown> }>
+    const event = listener.mock.calls[0][0] as CustomEvent<{ patch: Record<string, unknown>; session_patch: Record<string, unknown> }>
     expect(event.detail.patch.title).toBe('Bench Demo Autonomous Research')
     expect(event.detail.patch.goal).toBe('Run the benchmark faithfully.')
+    expect((event.detail.session_patch.preview_plan as Record<string, unknown>).markdown).toBe('## Launch plan')
 
     window.removeEventListener('ds:start-setup:patch', listener as EventListener)
   })

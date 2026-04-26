@@ -78,7 +78,7 @@ async function installBenchStoreStubs(page: Page) {
           ok: true,
           snapshot: {
             quest_id: setupQuestId,
-            title: 'SetupAgent · TDC ADMET Discovery Autonomous Research',
+            title: 'SetupAgent · 通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 Autonomous Research',
             status: 'idle',
             workspace_mode: 'copilot',
             active_anchor: 'decision',
@@ -107,7 +107,7 @@ async function installBenchStoreStubs(page: Page) {
           quest_id: setupQuestId,
           snapshot: {
             quest_id: setupQuestId,
-            title: 'SetupAgent · TDC ADMET Discovery Autonomous Research',
+            title: 'SetupAgent · 通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 Autonomous Research',
             status: 'idle',
             workspace_mode: 'copilot',
             active_anchor: 'decision',
@@ -146,7 +146,7 @@ async function installBenchStoreStubs(page: Page) {
                     message: {
                       role: 'assistant',
                       content:
-                        '我已经根据 AI Scientist Bench 的任务信息、当前设备和本地安装路径，先帮你整理出一版启动草案。你现在可以直接检查并启动；如果你想让我改得更保守、更偏论文，或者更贴近你的实际限制，也可以直接告诉我。\n\n```start_setup_patch\n{\"title\":\"TDC ADMET Discovery Autonomous Research\",\"goal\":\"Run the benchmark faithfully and prepare an autonomous launch packet.\"}\n```',
+                        '我已经根据 AI Scientist Bench 的任务信息、当前设备和本地安装路径，先帮你整理出一版启动草案。你现在可以直接检查并启动；如果你想让我改得更保守、更偏论文，或者更贴近你的实际限制，也可以直接告诉我。\n\n```start_setup_patch\n{\"title\":\"通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 Autonomous Research\",\"goal\":\"通过TreeHFD算法将XGBoost集成预测分解为可解释的主效应和二阶交互作用。\"}\n```',
                       timestamp: Math.floor(Date.now() / 1000),
                     },
                   },
@@ -189,12 +189,12 @@ async function installBenchStoreStubs(page: Page) {
           items: [
             {
               id: entryId,
-              name: 'TDC ADMET Discovery',
+              name: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性',
               one_line: 'Evaluate whether an AI Scientist can improve molecular property prediction through hypothesis-driven experiments.',
               aisb_direction: 'T3',
               task_mode: 'experiment_driven',
               paper: {
-                title: 'TDC ADMET Discovery',
+                title: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性',
                 venue: 'Benchmark Track',
                 year: 2026,
                 url: 'https://example.com/paper',
@@ -242,7 +242,7 @@ async function installBenchStoreStubs(page: Page) {
           ok: true,
           entry: {
             id: entryId,
-            name: 'TDC ADMET Discovery',
+            name: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性',
             one_line: 'Evaluate whether an AI Scientist can improve molecular property prediction through hypothesis-driven experiments.',
             task_description: 'Use this benchmark to evaluate whether a research agent can generate a justified hypothesis, run the required experiments, and improve molecular property prediction.',
             recommended_when: 'Use this benchmark to test hypothesis-driven experimental improvement with real logged experiments.',
@@ -262,7 +262,7 @@ async function installBenchStoreStubs(page: Page) {
             image_path: '../../../AISB/image/001_aisb.t3.001_tdc_admet.jpg',
             image_url: `/api/benchstore/entries/${entryId}/image`,
             paper: {
-              title: 'TDC ADMET Discovery',
+              title: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性',
               venue: 'Benchmark Track',
               year: 2026,
               url: 'https://example.com/paper',
@@ -302,17 +302,17 @@ async function installBenchStoreStubs(page: Page) {
           setup_packet: {
             entry_id: entryId,
             assistant_label: 'BenchStore Setup Agent · Codex',
-            project_title: 'TDC ADMET Discovery Autonomous Research',
+            project_title: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 Autonomous Research',
             benchmark_local_path: '/tmp/AISB/installs/tdc_admet',
             device_fit: 'recommended',
-            benchmark_goal: 'Run the benchmark faithfully and prepare an autonomous launch packet.',
+            benchmark_goal: '通过TreeHFD算法将XGBoost集成预测分解为可解释的主效应和二阶交互作用。',
             constraints: [
               '- benchmark_local_path: /tmp/AISB/installs/tdc_admet',
               '- device_fit: recommended',
             ],
             suggested_form: {
-              title: 'TDC ADMET Discovery Autonomous Research',
-              goal: 'Run the benchmark faithfully and prepare an autonomous launch packet.',
+              title: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 Autonomous Research',
+              goal: '通过TreeHFD算法将XGBoost集成预测分解为可解释的主效应和二阶交互作用。',
               baseline_urls: 'https://example.com/benchmark.zip',
               paper_urls: 'https://example.com/paper',
               runtime_constraints: '- benchmark_local_path: /tmp/AISB/installs/tdc_admet\n- device_fit: recommended',
@@ -369,7 +369,9 @@ test.describe('benchstore storefront', () => {
     await page.getByRole('button', { name: 'BenchStore' }).first().click()
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText('SetupAgent').first()).toBeVisible({ timeout: 20_000 })
-    const discoveryCard = page.getByRole('button', { name: /TDC ADMET Discovery/ }).first()
+    await page.getByRole('button', { name: '进入 Library' }).click()
+    await page.getByPlaceholder(/搜索 benchmark/).fill('Hoeffding')
+    const discoveryCard = page.getByRole('button', { name: /查看详情/ }).first()
     await expect(discoveryCard).toBeVisible({ timeout: 20_000 })
     await expect
       .poll(
@@ -389,12 +391,13 @@ test.describe('benchstore storefront', () => {
 
     await page.getByRole('button', { name: 'Start' }).click()
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 20_000 })
-    await expect(page.getByText('Start Research')).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('[data-onboarding-id="start-research-dialog"]')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText('SetupAgent').first()).toBeVisible({ timeout: 20_000 })
     const titleInput = page.locator('input').first()
     const goalTextarea = page.locator('textarea').first()
-    await expect(titleInput).toHaveValue('TDC ADMET Discovery Autonomous Research', { timeout: 20_000 })
-    await expect(goalTextarea).toHaveValue(/Run the benchmark faithfully and prepare an autonomous launch packet\./, { timeout: 20_000 })
+    await expect(titleInput).toHaveValue('通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 全自动研究', { timeout: 20_000 })
+    await expect(goalTextarea).toHaveValue(/Hoeffding函数分解（HFD）评估XGBoost集成的可解释性/, { timeout: 20_000 })
+    await expect(goalTextarea).toHaveValue(/核心研究目标：把 baseline 视为可信起点/, { timeout: 20_000 })
 
     await page.screenshot({ path: testInfo.outputPath('benchstore-to-autonomous-dialog.png'), fullPage: true })
   })

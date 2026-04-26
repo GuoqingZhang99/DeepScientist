@@ -98,7 +98,8 @@ export interface RouteNavigateEffectData {
 }
 
 export interface StartSetupPatchEffectData {
-  patch: Record<string, unknown>
+  patch?: Record<string, unknown>
+  session_patch?: Record<string, unknown>
   message?: string | null
   [key: string]: unknown
 }

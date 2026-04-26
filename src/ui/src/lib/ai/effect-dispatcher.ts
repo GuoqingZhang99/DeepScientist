@@ -582,9 +582,11 @@ function handleRouteNavigate(data: RouteNavigateEffectData) {
 
 function handleStartSetupPatch(data: StartSetupPatchEffectData) {
   const patch = data.patch && typeof data.patch === 'object' && !Array.isArray(data.patch) ? data.patch : null
-  if (!patch) return
+  const sessionPatch = data.session_patch && typeof data.session_patch === 'object' && !Array.isArray(data.session_patch) ? data.session_patch : null
+  if (!patch && !sessionPatch) return
   dispatchCustomEvent(START_SETUP_PATCH_EVENT, {
-    patch,
+    ...(patch ? { patch } : {}),
+    ...(sessionPatch ? { session_patch: sessionPatch } : {}),
     message: typeof data.message === 'string' ? data.message : undefined,
   })
 }

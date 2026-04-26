@@ -43,6 +43,7 @@ type QuestStudioTraceViewProps = {
   onWithdraw?: (messageId: string) => Promise<MessageQueueActionResult | void>
   onStopRun: () => Promise<void>
   prefill?: CopilotPrefill | null
+  beforeFeed?: React.ReactNode
 }
 
 export function QuestStudioTraceView({
@@ -66,6 +67,7 @@ export function QuestStudioTraceView({
   onWithdraw,
   onStopRun,
   prefill = null,
+  beforeFeed = null,
 }: QuestStudioTraceViewProps) {
   const { t } = useI18n('workspace')
   const { addToast } = useToast()
@@ -217,6 +219,40 @@ export function QuestStudioTraceView({
     })
   }, [prefill])
 
+  const waitingNotice = snapshot?.waiting_notice
+  const waitingNoticeStatus = String(waitingNotice?.status || '').trim().toLowerCase()
+  const waitingNoticeMessage = String(waitingNotice?.message || '').trim()
+  const waitingNoticeLabel = String(waitingNotice?.label || '').trim()
+  const waitingNoticeReason = String(waitingNotice?.reason || snapshot?.continuation_reason || '').trim()
+  const waitingBanner = React.useMemo(() => {
+    if (waitingNoticeStatus !== 'waiting' && waitingNoticeStatus !== 'auto_resumed') return null
+    const isWaiting = waitingNoticeStatus === 'waiting'
+    const title = waitingNoticeLabel || (isWaiting
+      ? t('copilot_waiting_feedback', undefined, 'Waiting for feedback')
+      : t('copilot_auto_resumed', undefined, 'Auto-resumed'))
+    const body = waitingNoticeMessage || (isWaiting
+      ? t('copilot_waiting_feedback_body', undefined, 'DeepScientist paused automatic continuation and is waiting for your decision.')
+      : t('copilot_auto_resumed_body', undefined, 'DeepScientist converted a waiting state back into automatic continuation for this autonomous quest.'))
+    return (
+      <div
+        className={[
+          'mx-4 mt-3 rounded-2xl border px-4 py-3 text-sm shadow-sm',
+          isWaiting
+            ? 'border-amber-500/30 bg-amber-500/10 text-amber-950 dark:border-amber-300/25 dark:bg-amber-300/10 dark:text-amber-100'
+            : 'border-emerald-500/25 bg-emerald-500/10 text-emerald-950 dark:border-emerald-300/25 dark:bg-emerald-300/10 dark:text-emerald-100',
+        ].join(' ')}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] opacity-75">{title}</div>
+            <div className="mt-1 leading-5">{body}</div>
+            {waitingNoticeReason ? <div className="mt-1 text-xs opacity-70">{waitingNoticeReason}</div> : null}
+          </div>
+        </div>
+      </div>
+    )
+  }, [snapshot?.continuation_reason, t, waitingNoticeLabel, waitingNoticeMessage, waitingNoticeReason, waitingNoticeStatus])
+
   return (
     <QuestCopilotPaneLayout
       statusLine={statusLine}
@@ -242,25 +278,29 @@ export function QuestStudioTraceView({
       }
     >
       {({ bottomInset }) => (
-        <QuestStudioDirectTimeline
-          questId={questId}
-          feed={feed}
-          loading={loading}
-          restoring={restoring}
-          streaming={streaming}
-          activeToolCount={activeToolCount}
-          connectionState={connectionState}
-          error={error}
-          snapshot={snapshot}
-          hasOlderHistory={hasOlderHistory}
-          loadingOlderHistory={loadingOlderHistory}
-          onLoadOlderHistory={onLoadOlderHistory}
-          onReadNow={handleReadNow}
-          onWithdraw={handleWithdraw}
-          messageAction={messageAction}
-          emptyLabel={t('copilot_studio_empty', undefined, 'Copilot trace appears here.')}
-          bottomInset={bottomInset}
-        />
+        <div className="flex min-h-0 flex-1 flex-col">
+          {waitingBanner}
+          {beforeFeed}
+          <QuestStudioDirectTimeline
+            questId={questId}
+            feed={feed}
+            loading={loading}
+            restoring={restoring}
+            streaming={streaming}
+            activeToolCount={activeToolCount}
+            connectionState={connectionState}
+            error={error}
+            snapshot={snapshot}
+            hasOlderHistory={hasOlderHistory}
+            loadingOlderHistory={loadingOlderHistory}
+            onLoadOlderHistory={onLoadOlderHistory}
+            onReadNow={handleReadNow}
+            onWithdraw={handleWithdraw}
+            messageAction={messageAction}
+            emptyLabel={t('copilot_studio_empty', undefined, 'Copilot trace appears here.')}
+            bottomInset={bottomInset}
+          />
+        </div>
       )}
     </QuestCopilotPaneLayout>
   )

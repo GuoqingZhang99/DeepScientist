@@ -32,9 +32,9 @@ import { UpdateReminderDialog } from './UpdateReminderDialog'
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
 
-export type LandingDialogRequest = 'quests' | 'copilot' | 'autonomous'
+export type LandingDialogRequest = 'quests' | 'copilot' | 'autonomous' | 'benchstore'
 
-type ActiveLandingDialog = LandingDialogRequest | 'launch' | 'benchstore' | null
+type ActiveLandingDialog = LandingDialogRequest | 'launch' | null
 
 function sortQuests(items: QuestSummary[]) {
   return [...items].sort((left, right) => {
@@ -113,6 +113,53 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
+async function uploadLocalAttachmentsToQuest(questId: string, attachments: QuestMessageAttachmentDraft[] = []) {
+  const draftIds: string[] = []
+  for (const attachment of attachments) {
+    if (attachment.status !== 'success' || !attachment.file) continue
+    const contentBase64 = await fileToBase64(attachment.file)
+    const payload = await client.uploadChatAttachment(questId, {
+      draft_id: attachment.draftId,
+      file_name: attachment.name,
+      mime_type: attachment.contentType || undefined,
+      content_base64: contentBase64,
+    })
+    if (payload.ok && payload.draft_id) {
+      draftIds.push(String(payload.draft_id))
+    }
+  }
+  return draftIds
+}
+
+async function importSetupAttachmentsToQuest(
+  questId: string,
+  sourceQuestId?: string | null,
+  attachments: Array<Record<string, unknown>> = []
+) {
+  const normalizedAttachments = attachments.filter((item) => {
+    const questRelativePath = String(item.questRelativePath || item.quest_relative_path || '').trim()
+    const path = String(item.path || '').trim()
+    return Boolean(questRelativePath || path)
+  })
+  if (!sourceQuestId || normalizedAttachments.length === 0) return []
+  const payload = await client.importQuestChatAttachments(questId, {
+    source_quest_id: sourceQuestId,
+    attachments: normalizedAttachments.map((item) => ({
+      name: item.label || item.name || item.file_name,
+      file_name: item.label || item.file_name || item.name,
+      content_type: item.contentType || item.content_type || item.mime_type || null,
+      quest_relative_path: item.questRelativePath || item.quest_relative_path || null,
+      path: item.path || null,
+    })),
+  })
+  if (!payload.ok) {
+    throw new Error(payload.message || 'Failed to import launch attachments.')
+  }
+  return (payload.attachments || [])
+    .map((item) => String(item.draft_id || '').trim())
+    .filter(Boolean)
+}
+
 export default function Hero(props: {
   dialogRequest?: LandingDialogRequest | null
   onDialogRequestConsumed?: () => void
@@ -174,6 +221,13 @@ export default function Hero(props: {
   const [activeRunnerName, setActiveRunnerName] = useState(() => normalizeBuiltinRunnerName("codex"))
   const [setupQuestId, setSetupQuestId] = useState<string | null>(null)
   const [setupQuestCreating, setSetupQuestCreating] = useState(false)
+  const [copilotSeed, setCopilotSeed] = useState<{
+    title?: string
+    message?: string
+    setupQuestId?: string | null
+    setupAttachments?: Array<Record<string, unknown>>
+    localAttachments?: QuestMessageAttachmentDraft[]
+  } | null>(null)
   const currentVersion = useMemo(() => runtimeVersion(), [])
   const landingModalOpen = activeDialog !== null
 
@@ -364,7 +418,8 @@ export default function Hero(props: {
           title: `SetupAgent · ${titleBase}`,
           quest_id: setupQuestIdValue,
           source: 'web-react',
-          auto_start: false,
+          auto_start: !args.createOnly && pendingAttachments.length === 0 && Boolean(normalizedMessage),
+          initial_message: !args.createOnly && pendingAttachments.length === 0 ? normalizedMessage : undefined,
           auto_bind_latest_connectors: false,
           startup_contract: {
             schema_version: 1,
@@ -385,15 +440,17 @@ export default function Hero(props: {
           },
         })
         setSetupQuestId(result.snapshot.quest_id)
-        if (!args.createOnly) {
+        if (!args.createOnly && pendingAttachments.length > 0) {
           const attachmentDraftIds = await uploadAttachmentDrafts(result.snapshot.quest_id)
-          await client.sendChat(
-            result.snapshot.quest_id,
-            normalizedMessage,
-            undefined,
-            undefined,
-            attachmentDraftIds
-          )
+          if (attachmentDraftIds.length > 0) {
+            await client.sendChat(
+              result.snapshot.quest_id,
+              normalizedMessage || (locale === 'zh' ? '请结合这些附件整理启动规划。' : 'Please prepare the launch plan from these attachments.'),
+              undefined,
+              undefined,
+              attachmentDraftIds
+            )
+          }
         }
         return result.snapshot.quest_id
       } finally {
@@ -545,7 +602,7 @@ export default function Hero(props: {
                           className="h-12 rounded-full bg-[#C7AD96] px-7 text-[#2D2A26] shadow-[0_12px_28px_-14px_rgba(45,42,38,0.55)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#D7C6AE]"
                           onClick={() => {
                             window.setTimeout(() => {
-                              setActiveDialog('launch')
+                              setActiveDialog('autonomous')
                             }, 120)
                           }}
                           data-onboarding-id="landing-start-research"
@@ -677,10 +734,28 @@ export default function Hero(props: {
       />
       <CreateCopilotProjectDialog
         open={activeDialog === 'copilot'}
-        onClose={() => setActiveDialog(null)}
-        onBack={() => setActiveDialog('launch')}
-        onCreated={(questId) => {
+        onClose={() => {
+          setCopilotSeed(null)
+          setBenchSetupPacket(null)
           setActiveDialog(null)
+          void cleanupSetupQuest()
+        }}
+        onBack={() => {
+          setCopilotSeed(null)
+          setBenchSetupPacket(null)
+          setActiveDialog('autonomous')
+          void cleanupSetupQuest()
+        }}
+        initialTitle={copilotSeed?.title || ''}
+        initialMessage={copilotSeed?.message || ''}
+        initialSetupQuestId={copilotSeed?.setupQuestId || null}
+        initialSetupAttachments={copilotSeed?.setupAttachments || []}
+        initialLocalAttachments={copilotSeed?.localAttachments || []}
+        onCreated={(questId) => {
+          setCopilotSeed(null)
+          setActiveDialog(null)
+          setBenchSetupPacket(null)
+          void cleanupSetupQuest()
           navigate(`/projects/${questId}`)
         }}
       />
@@ -711,6 +786,17 @@ export default function Hero(props: {
             createOnly,
           })
         }}
+        onSwitchToCopilot={async ({ title, message, setupQuestId, setupAttachments, localAttachments }) => {
+          setCopilotSeed({
+            title,
+            message,
+            setupQuestId,
+            setupAttachments: (setupAttachments || []).map((item) => ({ ...item })),
+            localAttachments: [...(localAttachments || [])],
+          })
+          setActiveDialog('copilot')
+        }}
+        onOpenBenchStore={openBenchStoreDialog}
         onCreate={async (payload) => {
           if (!payload.goal.trim()) {
             return
@@ -723,15 +809,31 @@ export default function Hero(props: {
               title: payload.title.trim() || undefined,
               quest_id: payload.quest_id?.trim() || undefined,
               source: 'web-react',
-              auto_start: true,
-              initial_message: payload.goal.trim(),
+              auto_start: false,
               auto_bind_latest_connectors: false,
               requested_connector_bindings: payload.requested_connector_bindings,
               requested_baseline_ref: payload.requested_baseline_ref ?? undefined,
               startup_contract: payload.startup_contract ?? undefined,
             })
+            const importedDraftIds = await importSetupAttachmentsToQuest(
+              result.snapshot.quest_id,
+              payload.launch_materials?.setup_quest_id || null,
+              (payload.launch_materials?.setup_attachments || []).map((item) => ({ ...item }))
+            )
+            const localDraftIds = await uploadLocalAttachmentsToQuest(
+              result.snapshot.quest_id,
+              payload.launch_materials?.local_attachments || []
+            )
+            await client.sendChat(
+              result.snapshot.quest_id,
+              payload.goal.trim(),
+              undefined,
+              undefined,
+              [...importedDraftIds, ...localDraftIds]
+            )
             setActiveDialog(null)
             setBenchSetupPacket(null)
+            setCopilotSeed(null)
             await cleanupSetupQuest()
             navigate(`/projects/${result.snapshot.quest_id}`)
           } catch (caught) {

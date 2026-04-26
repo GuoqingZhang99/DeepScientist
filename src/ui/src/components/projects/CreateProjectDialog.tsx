@@ -1,10 +1,13 @@
-import { ArrowLeft, ArrowUpRight, BookmarkPlus, CircleHelp, Lock, RotateCcw, Sparkles } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, BookmarkPlus, CheckCircle2, CircleHelp, Lock, MessageSquareText, RotateCcw, Sparkles, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 
+import { AutonomousSetupIntakeSurface } from '@/components/projects/AutonomousSetupIntakeSurface'
 import { ConnectorTargetRadioGroup, type ConnectorTargetRadioItem } from '@/components/connectors/ConnectorTargetRadioGroup'
 import { OverlayDialog } from '@/components/home/OverlayDialog'
 import { LAUNCH_DIALOG_SHELL_CLASS } from '@/components/projects/LaunchModeVisuals'
+import { AnimatedMarkdownPlan } from '@/components/projects/AnimatedMarkdownPlan'
+import { PlanningStepsPulse } from '@/components/projects/PlanningStepsPulse'
 import { SetupAgentRail } from '@/components/projects/SetupAgentRail'
 import { SetupAgentQuestPanel } from '@/components/projects/SetupAgentQuestPanel'
 import { connectorCatalog } from '@/components/settings/connectorCatalog'
@@ -24,6 +27,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { useQuestWorkspace } from '@/lib/acp'
 import { client } from '@/lib/api'
+import { assetUrl } from '@/lib/assets'
 import { connectorInstanceMode, connectorTargetLabel, normalizeConnectorTargets, parseConversationId, recentConversationLabel } from '@/lib/connectors'
 import { useI18n } from '@/lib/i18n'
 import { normalizeZhUiCopy } from '@/lib/i18n/normalizeZhUiCopy'
@@ -879,9 +883,126 @@ type StartConnectorChoice = {
   }>
 }
 
+type StartSetupFitAssessment = {
+  verdict?: string | null
+  summary?: string | null
+  reason?: string | null
+  confidence?: string | null
+  is_autonomous_fit?: boolean | null
+  reasons?: string[]
+  risk_notes?: string[]
+}
+
+type StartSetupPreviewPlanStage = {
+  title?: string | null
+  goal?: string | null
+  deliverable?: string | null
+  depends_on?: string | null
+  switch_condition?: string | null
+}
+
+type StartSetupPreviewPlan = {
+  summary?: string | null
+  stages?: StartSetupPreviewPlanStage[]
+  markdown?: string | null
+  phases?: StartSetupPreviewPlanStage[]
+  risks?: string[]
+}
+
+type StartSetupSessionState = {
+  suggestedForm: Partial<StartResearchTemplate> | null
+  fitAssessment: StartSetupFitAssessment | null
+  recommendedWorkspaceMode?: string | null
+  launchReadiness?: string | null
+  missingConfirmations: string[]
+  previewPlan: StartSetupPreviewPlan | null
+}
+
+type StartSetupSessionPatch = {
+  suggested_form?: Partial<StartResearchTemplate> | null
+  fit_assessment?: StartSetupFitAssessment | null
+  recommended_workspace_mode?: string | null
+  launch_readiness?: string | null
+  missing_confirmations?: string[] | null
+  preview_plan?: StartSetupPreviewPlan | null
+}
+
+const START_SETUP_FORM_META_KEYS = new Set(['form_patch', 'session_patch'])
+
+function cleanStartSetupSuggestedForm(value: unknown): Partial<StartResearchTemplate> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const nestedFormPatch = raw.form_patch && typeof raw.form_patch === 'object' && !Array.isArray(raw.form_patch)
+    ? (raw.form_patch as Record<string, unknown>)
+    : null
+  const source = nestedFormPatch || raw
+  const cleaned = Object.fromEntries(
+    Object.entries(source).filter(([key]) => !START_SETUP_FORM_META_KEYS.has(key))
+  ) as Partial<StartResearchTemplate>
+  return Object.keys(cleaned).length > 0 ? cleaned : null
+}
+
+function nestedStartSetupSessionPatch(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  if (raw.session_patch && typeof raw.session_patch === 'object' && !Array.isArray(raw.session_patch)) {
+    return raw.session_patch as Record<string, unknown>
+  }
+  if (raw.suggested_form && typeof raw.suggested_form === 'object' && !Array.isArray(raw.suggested_form)) {
+    const suggested = raw.suggested_form as Record<string, unknown>
+    if (suggested.session_patch && typeof suggested.session_patch === 'object' && !Array.isArray(suggested.session_patch)) {
+      return suggested.session_patch as Record<string, unknown>
+    }
+  }
+  return null
+}
+
+type SetupPlanDecision = 'autonomous' | 'copilot' | 'provisional'
+
+type LaunchMaterialAttachment = {
+  id: string
+  label: string
+  contentType?: string | null
+  kind?: string | null
+  location?: string | null
+  questRelativePath?: string | null
+  path?: string | null
+  extractedTextPath?: string | null
+  status?: string | null
+  source: 'setup' | 'manual'
+}
+
+const START_RESEARCH_MAX_ATTACHMENTS = 10
+const START_RESEARCH_MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
+const SETUP_PLANNING_NOTICE_TOTAL_MS = 28_000
+const SETUP_PLANNING_NOTICE_SETTLED_MS = 23_000
+
+function makeLocalAttachmentDraftId() {
+  return `launch-draft-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function isImageAttachmentMime(value?: string | null) {
+  return String(value || '').trim().toLowerCase().startsWith('image/')
+}
+
 const normalizedCopy = {
   en: copy.en,
   zh: normalizeZhUiCopy(copy.zh),
+} as const
+
+const deepxivCopy = {
+  en: {
+    title: 'DeepXiv literature',
+    body: 'If configured, `idea` and `scout` can use DeepXiv-first paper discovery and paper triage. Without a token, the prompt should stay on the legacy route.',
+    openSetup: 'Open setup',
+    openSettings: 'Settings',
+  },
+  zh: {
+    title: 'DeepXiv 文献能力',
+    body: '如果已配置 token，`idea` 和 `scout` 可以优先走 DeepXiv 的论文发现与速读路径；如果没有 token，系统提示词应继续使用旧路线。',
+    openSetup: '打开配置引导',
+    openSettings: '前往设置',
+  },
 } as const
 
 function buildBenchstoreAutoAssistMessage(setupPacket: BenchSetupPacket, locale: 'en' | 'zh') {
@@ -1363,6 +1484,507 @@ function SectionCard({
   )
 }
 
+function StartSetupPlanningReviewDialog({
+  open,
+  locale,
+  session,
+  hasSuggestedForm = false,
+  loading = false,
+  onClose,
+  onAcceptAutonomous,
+  onReviewForm,
+  onSwitchToCopilot,
+}: {
+  open: boolean
+  locale: 'en' | 'zh'
+  session: StartSetupSessionState
+  hasSuggestedForm?: boolean
+  loading?: boolean
+  onClose: () => void
+  onAcceptAutonomous?: (() => void) | undefined
+  onReviewForm?: (() => void) | undefined
+  onSwitchToCopilot?: (() => void) | undefined
+}) {
+  if (!open) return null
+
+  const decision = resolveSetupPlanDecision(session)
+  const showCopilotAction = decision === 'copilot' && Boolean(onSwitchToCopilot)
+  const fitSummary = String(session.fitAssessment?.summary || session.fitAssessment?.reason || '').trim()
+  const planSummary = String(session.previewPlan?.summary || '').trim()
+  const planMarkdown = String(session.previewPlan?.markdown || '').replace(/\\n/g, '\n').trim()
+  const launchReadiness = String(session.launchReadiness || '').trim()
+  const recommendedMode = String(session.recommendedWorkspaceMode || session.fitAssessment?.verdict || '').trim()
+  const modeLabel = decision === 'copilot'
+    ? locale === 'zh' ? '建议协作模式' : 'Copilot recommended'
+    : decision === 'provisional'
+      ? locale === 'zh' ? '暂可全自动，需确认' : 'Autonomous with confirmations'
+      : locale === 'zh' ? '建议全自动' : 'Autonomous recommended'
+  const readinessLabel = launchReadiness
+    ? launchReadiness.replace(/_/g, ' ')
+    : decision === 'autonomous'
+      ? 'ready'
+      : decision === 'copilot'
+        ? 'recommend_copilot'
+        : 'needs_confirmation'
+
+  return (
+    <div
+      className="absolute inset-0 z-[80] flex items-center justify-center bg-black/18 p-[3%] backdrop-blur-[3px]"
+      data-onboarding-id="start-research-planning-review-dialog"
+    >
+      <div className="flex h-[92%] w-[92%] max-w-[1120px] flex-col overflow-hidden rounded-[32px] border border-[rgba(45,42,38,0.10)] bg-[linear-gradient(180deg,rgba(255,252,247,0.98),rgba(248,243,236,0.98))] shadow-[0_44px_140px_-58px_rgba(15,23,42,0.68)] backdrop-blur-2xl">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[rgba(45,42,38,0.08)] px-5 py-4 sm:px-6">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="text-lg font-semibold tracking-[-0.03em] text-[rgba(38,36,33,0.96)]">
+                {locale === 'zh' ? '启动规划' : 'Launch plan'}
+              </div>
+              <span className={cn(
+                'rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em]',
+                decision === 'copilot'
+                  ? 'border-[rgba(154,96,68,0.20)] bg-[rgba(252,244,239,0.9)] text-[rgba(126,77,42,0.95)]'
+                  : decision === 'provisional'
+                    ? 'border-[rgba(122,148,159,0.22)] bg-[rgba(236,242,245,0.95)] text-[rgba(73,103,117,0.95)]'
+                    : 'border-[rgba(88,122,94,0.18)] bg-[rgba(88,122,94,0.10)] text-[rgba(57,96,65,0.95)]'
+              )}>
+                {modeLabel}
+              </span>
+            </div>
+            <div className="mt-1 text-sm leading-6 text-[rgba(86,82,77,0.78)]">
+              {locale === 'zh'
+                ? 'SetupAgent 已整理出一份可审阅的启动方案。你可以继续商讨、切到协作模式，或确认直接开始。'
+                : 'SetupAgent prepared a reviewable launch plan. You can keep discussing, switch to Copilot, or start directly.'}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[rgba(107,103,97,0.72)] transition hover:bg-black/[0.05] hover:text-[rgba(45,42,38,0.94)]"
+            onClick={onClose}
+            aria-label={locale === 'zh' ? '关闭启动规划' : 'Close launch plan'}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="grid shrink-0 gap-2 border-b border-[rgba(45,42,38,0.08)] px-5 py-3 sm:grid-cols-3 sm:px-6">
+          <div className="rounded-[16px] border border-[rgba(45,42,38,0.08)] bg-white/72 px-3.5 py-3">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[rgba(107,103,97,0.70)]">{locale === 'zh' ? '推荐模式' : 'Mode'}</div>
+            <div className="mt-1 text-sm font-semibold text-[rgba(45,42,38,0.92)]">{recommendedMode || modeLabel}</div>
+          </div>
+          <div className="rounded-[16px] border border-[rgba(45,42,38,0.08)] bg-white/72 px-3.5 py-3">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[rgba(107,103,97,0.70)]">{locale === 'zh' ? '启动状态' : 'Readiness'}</div>
+            <div className="mt-1 text-sm font-semibold text-[rgba(45,42,38,0.92)]">{readinessLabel}</div>
+          </div>
+          <div className="rounded-[16px] border border-[rgba(45,42,38,0.08)] bg-white/72 px-3.5 py-3">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[rgba(107,103,97,0.70)]">{locale === 'zh' ? '待确认' : 'Confirmations'}</div>
+            <div className="mt-1 text-sm font-semibold text-[rgba(45,42,38,0.92)]">
+              {session.missingConfirmations.length > 0
+                ? locale === 'zh' ? `${session.missingConfirmations.length} 项` : `${session.missingConfirmations.length} item(s)`
+                : locale === 'zh' ? '暂无' : 'None'}
+            </div>
+          </div>
+        </div>
+
+        <div className="feed-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-6">
+          {fitSummary || planSummary || session.missingConfirmations.length > 0 ? (
+            <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(260px,0.8fr)]">
+              {(fitSummary || planSummary) ? (
+                <div className="rounded-[20px] border border-[rgba(45,42,38,0.08)] bg-white/72 px-4 py-3 text-sm leading-6 text-[rgba(56,52,47,0.88)]">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[rgba(107,103,97,0.72)]">
+                    {locale === 'zh' ? '判断摘要' : 'Assessment'}
+                  </div>
+                  <div className="mt-2">{fitSummary || planSummary}</div>
+                </div>
+              ) : null}
+              {session.missingConfirmations.length > 0 ? (
+                <div className="rounded-[20px] border border-[rgba(154,96,68,0.16)] bg-[rgba(252,244,239,0.72)] px-4 py-3 text-sm leading-6 text-[rgba(86,82,77,0.9)]">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[rgba(126,77,42,0.82)]">
+                    {locale === 'zh' ? '仍需确认' : 'Still missing'}
+                  </div>
+                  <ul className="mt-2 list-disc space-y-1 pl-4">
+                    {session.missingConfirmations.slice(0, 5).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="rounded-[22px] border border-[rgba(45,42,38,0.08)] bg-white/78 px-4 py-4 shadow-[0_18px_52px_-44px_rgba(45,42,38,0.34)]">
+            {planMarkdown ? (
+              <AnimatedMarkdownPlan
+                content={planMarkdown}
+                animateKey={`review:${recommendedMode}:${launchReadiness}`}
+                lineDelayMs={60}
+                maxAnimatedLines={18}
+              />
+            ) : (
+              <div className="text-sm leading-6 text-[rgba(86,82,77,0.78)]">
+                {locale === 'zh' ? 'SetupAgent 已提交判断，但还没有写入可展示的 Markdown 规划。你可以继续商讨，让它补全启动规划。' : 'SetupAgent submitted an assessment but did not provide a displayable Markdown plan yet. Keep discussing to ask for a complete launch plan.'}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex shrink-0 flex-col gap-2 border-t border-[rgba(45,42,38,0.08)] px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <div className="text-xs leading-5 text-[rgba(107,103,97,0.76)]">
+            {locale === 'zh' ? '关闭后可继续在 SetupAgent 对话中补充要求。' : 'Close this to keep discussing with SetupAgent.'}
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" variant="outline" className="rounded-full" onClick={onClose} disabled={loading}>
+              <MessageSquareText className="mr-1.5 h-4 w-4" />
+              {locale === 'zh' ? '还需要商讨' : 'Keep discussing'}
+            </Button>
+            {hasSuggestedForm && onReviewForm ? (
+              <Button type="button" variant="outline" className="rounded-full" onClick={onReviewForm} disabled={loading}>
+                {locale === 'zh' ? '查看/编辑表单' : 'Review form'}
+              </Button>
+            ) : null}
+            {showCopilotAction ? (
+              <Button type="button" variant="outline" className="rounded-full" onClick={onSwitchToCopilot} disabled={loading}>
+                <ArrowUpRight className="mr-1.5 h-4 w-4" />
+                {locale === 'zh' ? '转到协作模式' : 'Switch to Copilot'}
+              </Button>
+            ) : null}
+            {hasSuggestedForm && onAcceptAutonomous ? (
+              <Button type="button" className="rounded-full bg-[#2D2A26] text-white hover:bg-[#3B3731]" onClick={onAcceptAutonomous} disabled={loading}>
+                {decision === 'provisional'
+                  ? locale === 'zh' ? '确认风险并启动' : 'Start with confirmations'
+                  : locale === 'zh' ? '确认并启动全自动' : 'Start autonomous'}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function StartSetupAssessmentCard({
+  locale,
+  session,
+  hasSuggestedForm = false,
+  loading = false,
+  onAcceptAutonomous,
+  onReviewForm,
+  onSwitchToCopilot,
+  onContinueDiscuss,
+  onDismiss,
+}: {
+  locale: 'en' | 'zh'
+  session: StartSetupSessionState
+  hasSuggestedForm?: boolean
+  loading?: boolean
+  onAcceptAutonomous?: (() => void) | undefined
+  onReviewForm?: (() => void) | undefined
+  onSwitchToCopilot?: (() => void) | undefined
+  onContinueDiscuss?: (() => void) | undefined
+  onDismiss?: (() => void) | undefined
+}) {
+  const [planCompletePulseKey, setPlanCompletePulseKey] = useState(0)
+  const fitSummary = String(session.fitAssessment?.summary || session.fitAssessment?.reason || '').trim()
+  const fitVerdict = String(session.fitAssessment?.verdict || '').trim()
+  const planSummary = String(session.previewPlan?.summary || '').trim()
+  const planMarkdown = String(session.previewPlan?.markdown || '').replace(/\\n/g, '\n').trim()
+  const stages = (Array.isArray(session.previewPlan?.phases)
+    ? session.previewPlan?.phases
+    : Array.isArray(session.previewPlan?.stages)
+      ? session.previewPlan?.stages
+      : []
+  ).slice(0, 4)
+  const launchReadiness = String(session.launchReadiness || '').trim()
+  const hasContent =
+    Boolean(fitSummary) ||
+    Boolean(planSummary) ||
+    Boolean(planMarkdown) ||
+    Boolean(launchReadiness) ||
+    session.missingConfirmations.length > 0 ||
+    stages.length > 0
+  if (!hasContent) return null
+
+  const decision = resolveSetupPlanDecision(session)
+  const tone = decision === 'copilot' ? 'warning' : decision === 'provisional' ? 'soft' : fitAssessmentTone(session.recommendedWorkspaceMode || fitVerdict)
+  const toneClassName =
+    tone === 'warning'
+      ? 'border-[rgba(154,96,68,0.18)] bg-[linear-gradient(145deg,rgba(252,244,239,0.96),rgba(244,233,225,0.94))]'
+      : tone === 'soft'
+        ? 'border-[rgba(122,148,159,0.18)] bg-[linear-gradient(145deg,rgba(248,250,251,0.96),rgba(236,242,245,0.94))]'
+        : 'border-[rgba(126,77,42,0.16)] bg-[linear-gradient(145deg,rgba(251,247,241,0.96),rgba(241,233,223,0.94))]'
+  const badgeText =
+    decision === 'copilot'
+      ? locale === 'zh'
+        ? 'Recommended mode · 协作模式'
+        : 'Copilot recommended'
+      : decision === 'provisional'
+        ? locale === 'zh'
+          ? 'Recommended mode · 需确认'
+          : 'Launchable with confirmation'
+        : locale === 'zh'
+          ? 'Recommended mode · 全自动'
+          : 'Good autonomous fit'
+  const statusBody =
+    decision === 'copilot'
+      ? locale === 'zh'
+        ? 'SetupAgent 判断这个任务更适合多轮协作。你仍然可以继续全自动，但建议先进入协作模式。'
+        : 'SetupAgent thinks this is better handled in Copilot. You can still continue autonomously if you prefer.'
+      : decision === 'provisional'
+        ? locale === 'zh'
+          ? 'SetupAgent 已经准备了规划，但还有少量关键确认项会影响启动路线。'
+          : 'SetupAgent prepared a plan, but a few confirmations may still affect launch.'
+        : locale === 'zh'
+          ? 'SetupAgent 判断这个任务适合在计算机内长时间闭环推进。确认后会把建议表单用于启动。'
+          : 'SetupAgent thinks this fits long-running autonomous computer-side work. Confirm to use the proposed form.'
+
+  return (
+    <div className={cn('mb-3 flex max-h-[min(74svh,820px)] min-h-0 flex-col overflow-hidden rounded-[24px] border px-4 py-4 shadow-[0_18px_52px_-38px_rgba(45,42,38,0.32)] backdrop-blur-xl', toneClassName)}>
+      <div
+        key={`setup-mode-bar-${planCompletePulseKey}`}
+        className={cn(
+          'rounded-[20px] border border-[rgba(45,42,38,0.08)] bg-white/72 px-3.5 py-3',
+          planCompletePulseKey > 0 && 'motion-safe:animate-[setup-mode-ready_900ms_cubic-bezier(0.22,1,0.36,1)]'
+        )}
+      >
+        <div className="flex min-w-0 flex-col gap-3">
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-[rgba(45,42,38,0.08)] bg-white/82 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[rgba(45,42,38,0.82)]">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 truncate">{badgeText}</span>
+              </div>
+            </div>
+            {onDismiss ? (
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[rgba(107,103,97,0.72)] transition hover:bg-black/[0.04] hover:text-[rgba(45,42,38,0.94)]"
+                onClick={onDismiss}
+                aria-label={locale === 'zh' ? '关闭建议卡' : 'Dismiss recommendation'}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            ) : null}
+          </div>
+          <div className="min-w-0">
+            <div className="text-[12px] leading-6 text-[rgba(86,82,77,0.82)]">{statusBody}</div>
+          </div>
+          <div className="flex min-w-0 flex-wrap gap-2">
+            {onContinueDiscuss ? (
+              <Button type="button" variant="outline" className="rounded-full" onClick={onContinueDiscuss} disabled={loading}>
+                <MessageSquareText className="mr-1.5 h-4 w-4" />
+                {locale === 'zh' ? '继续询问 SetupAgent' : 'Keep discussing'}
+              </Button>
+            ) : null}
+            {decision === 'copilot' && onSwitchToCopilot ? (
+              <Button type="button" className="rounded-full bg-[#2D2A26] text-white hover:bg-[#3B3731]" onClick={onSwitchToCopilot} disabled={loading}>
+                <ArrowUpRight className="mr-1.5 h-4 w-4" />
+                {locale === 'zh' ? '按建议创建协作模式' : 'Create Copilot'}
+              </Button>
+            ) : null}
+            {hasSuggestedForm && onAcceptAutonomous ? (
+              <Button type="button" variant={decision === 'copilot' ? 'outline' : 'default'} className="rounded-full" onClick={onAcceptAutonomous} disabled={loading}>
+                {decision === 'copilot'
+                  ? locale === 'zh'
+                    ? '仍继续全自动'
+                    : 'Continue autonomous'
+                  : locale === 'zh'
+                    ? '确认并启动全自动'
+                    : 'Confirm autonomous'}
+              </Button>
+            ) : null}
+            {hasSuggestedForm && onReviewForm ? (
+              <Button type="button" variant="outline" className="rounded-full" onClick={onReviewForm} disabled={loading}>
+                {locale === 'zh' ? '查看/编辑表单' : 'Review form'}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      <div className="feed-scrollbar mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          {(fitSummary || launchReadiness) ? (
+            <div className="mt-3 text-sm leading-6 text-[rgba(56,52,47,0.92)]">
+              {fitSummary || launchReadiness}
+            </div>
+          ) : null}
+          {session.missingConfirmations.length > 0 ? (
+            <div className="mt-3 text-[12px] leading-6 text-[rgba(86,82,77,0.82)]">
+              <span className="font-semibold">
+                {locale === 'zh' ? '仍待确认' : 'Still missing'}:
+              </span>{' '}
+              {session.missingConfirmations.slice(0, 3).join(locale === 'zh' ? '；' : '; ')}
+            </div>
+          ) : null}
+        </div>
+        {tone === 'warning' && onSwitchToCopilot && decision !== 'copilot' ? (
+          <Button type="button" variant="outline" className="rounded-full" onClick={onSwitchToCopilot}>
+            <ArrowUpRight className="mr-1.5 h-4 w-4" />
+            {locale === 'zh' ? '改走协作模式' : 'Switch to Copilot'}
+          </Button>
+        ) : null}
+      </div>
+
+      {planSummary ? (
+        <div className="mt-4 rounded-[18px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3.5 py-3 text-[12px] leading-6 text-[rgba(75,73,69,0.84)]">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[rgba(107,103,97,0.72)]">
+            {locale === 'zh' ? '启动预览规划' : 'Launch preview'}
+          </div>
+          <div className="mt-1.5">{planSummary}</div>
+        </div>
+      ) : null}
+
+      {planMarkdown ? (
+        <div className="mt-4 rounded-[18px] border border-[rgba(45,42,38,0.08)] bg-white/76 px-4 py-3 text-[12px] leading-6 text-[rgba(75,73,69,0.86)]">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[rgba(107,103,97,0.72)]">
+            {locale === 'zh' ? '启动规划' : 'Launch plan'}
+          </div>
+          <div className="feed-scrollbar max-h-[min(54svh,620px)] overflow-y-auto rounded-[14px] bg-[rgba(248,245,240,0.74)] px-3 py-3">
+            <AnimatedMarkdownPlan
+              content={planMarkdown}
+              animateKey={`${session.recommendedWorkspaceMode || ''}:${session.launchReadiness || ''}`}
+              lineDelayMs={90}
+              onComplete={() => setPlanCompletePulseKey((current) => current + 1)}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {stages.length > 0 ? (
+        <div className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
+          {stages.map((stage, index) => {
+            const title = String(stage.title || '').trim() || (locale === 'zh' ? `阶段 ${index + 1}` : `Stage ${index + 1}`)
+            const goal = String(stage.goal || '').trim()
+            const deliverable = String(stage.deliverable || '').trim()
+            const dependsOn = String(stage.depends_on || '').trim()
+            const switchCondition = String(stage.switch_condition || '').trim()
+            return (
+              <div
+                key={`${title}-${index}`}
+                className="rounded-[18px] border border-[rgba(45,42,38,0.08)] bg-white/74 px-3.5 py-3 text-[12px] leading-6 text-[rgba(75,73,69,0.84)]"
+              >
+                <div className="text-sm font-semibold text-[rgba(38,36,33,0.94)]">{title}</div>
+                {goal ? <div className="mt-1">{goal}</div> : null}
+                {deliverable ? (
+                  <div className="mt-2 text-[11px] text-[rgba(107,103,97,0.78)]">
+                    {locale === 'zh' ? '预期产出' : 'Deliverable'}: {deliverable}
+                  </div>
+                ) : null}
+                {dependsOn ? (
+                  <div className="text-[11px] text-[rgba(107,103,97,0.78)]">
+                    {locale === 'zh' ? '依赖' : 'Depends on'}: {dependsOn}
+                  </div>
+                ) : null}
+                {switchCondition ? (
+                  <div className="text-[11px] text-[rgba(107,103,97,0.78)]">
+                    {locale === 'zh' ? '切换条件' : 'Switch condition'}: {switchCondition}
+                  </div>
+                ) : null}
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
+      </div>
+    </div>
+  )
+}
+
+function LaunchMaterialsCard({
+  locale,
+  setupAttachments,
+  localAttachments,
+  onQueueFiles,
+  onRemoveAttachment,
+}: {
+  locale: 'en' | 'zh'
+  setupAttachments: LaunchMaterialAttachment[]
+  localAttachments: QuestMessageAttachmentDraft[]
+  onQueueFiles: (files: File[]) => void
+  onRemoveAttachment: (draftId: string) => void
+}) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  return (
+    <SectionCard title={locale === 'zh' ? '启动材料 / 附件' : 'Launch materials / attachments'}>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(event) => {
+          const files = Array.from(event.target.files || [])
+          if (files.length > 0) {
+            onQueueFiles(files)
+          }
+          event.target.value = ''
+        }}
+      />
+      <div className="text-[11px] leading-5 text-[rgba(107,103,97,0.72)]">
+        {locale === 'zh'
+          ? '这里的文件会一起进入最终启动 prompt，并在创建 quest 时自动复制到新 quest 的默认附件目录。'
+          : 'These files are injected into the final launch prompt and copied into the new quest when it is created.'}
+      </div>
+
+      {setupAttachments.length > 0 ? (
+        <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[rgba(107,103,97,0.72)]">
+            {locale === 'zh' ? '已从 SetupAgent 会话继承' : 'Inherited from SetupAgent'}
+          </div>
+          <div className="mt-2 space-y-2">
+            {setupAttachments.map((attachment) => (
+              <div key={attachment.id} className="rounded-[12px] border border-[rgba(45,42,38,0.08)] bg-[rgba(252,250,246,0.92)] px-3 py-2">
+                <div className="truncate text-[12px] font-medium text-[rgba(38,36,33,0.94)]">{attachment.label}</div>
+                <div className="mt-0.5 truncate text-[11px] text-[rgba(107,103,97,0.76)]">
+                  {attachment.location || (locale === 'zh' ? '位置将在创建时解析' : 'Location will be resolved at launch')}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="rounded-[14px] border border-[rgba(45,42,38,0.08)] bg-white/70 px-3 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[rgba(107,103,97,0.72)]">
+              {locale === 'zh' ? '在表单页补充' : 'Add from this form'}
+            </div>
+            <div className="mt-1 text-[11px] leading-5 text-[rgba(107,103,97,0.76)]">
+              {locale === 'zh'
+                ? '适合补充数据文件、PDF、说明文档或本地参考材料。'
+                : 'Useful for extra datasets, PDFs, notes, or local reference materials.'}
+            </div>
+          </div>
+          <Button type="button" variant="outline" className="rounded-full" onClick={() => fileInputRef.current?.click()}>
+            {locale === 'zh' ? '上传附件' : 'Upload files'}
+          </Button>
+        </div>
+
+        {localAttachments.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {localAttachments.map((attachment) => (
+              <div
+                key={attachment.draftId}
+                className="inline-flex max-w-full items-center gap-2 rounded-full border border-[rgba(45,42,38,0.08)] bg-[rgba(252,250,246,0.92)] px-3 py-1.5 text-[12px] text-[rgba(56,52,47,0.9)]"
+              >
+                <span className="truncate">{attachment.name}</span>
+                <button
+                  type="button"
+                  className="text-[rgba(107,103,97,0.72)] transition hover:text-[rgba(45,42,38,0.94)]"
+                  onClick={() => onRemoveAttachment(attachment.draftId)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </SectionCard>
+  )
+}
+
 function compactTemplateLabel(item: StartResearchTemplateEntry, locale: 'en' | 'zh') {
   const goal = item.goal || (locale === 'zh' ? '未命名模板' : 'Untitled template')
   const title = item.title ? `${item.title} · ` : ''
@@ -1393,7 +2015,7 @@ function buildTutorialStartResearchExample(language: 'en' | 'zh'): Partial<Start
         '请先复现目标 baseline，确认主指标和运行脚本稳定可用；然后基于误差分析提出一个更高效的改进方向，并执行一轮可比较实验。',
         '',
         '成功标准是 baseline 可信、至少有一组可比较 metric，并形成简短结论与下一步建议。',
-      ].join('\n'),
+      ].join('\\n'),
       baseline_id: '',
       baseline_variant_id: '',
       baseline_source_mode: 'reproduce_from_source',
@@ -1405,12 +2027,12 @@ function buildTutorialStartResearchExample(language: 'en' | 'zh'): Partial<Start
         '- 优先控制计算成本。',
         '- 保留日志和关键中间结果。',
         '- 如果证据不足，不要提前下结论。',
-      ].join('\n'),
+      ].join('\\n'),
       objectives: [
         '1. 建立可信 baseline。',
         '2. 跑通一个改进分支。',
         '3. 输出 metric、日志和简短分析。',
-      ].join('\n'),
+      ].join('\\n'),
       need_research_paper: true,
       research_intensity: 'balanced',
       decision_policy: 'autonomous',
@@ -1434,7 +2056,7 @@ function buildTutorialStartResearchExample(language: 'en' | 'zh'): Partial<Start
       'First reproduce the target baseline and verify that the main metric and scripts run reliably. Then propose one efficiency-oriented improvement based on error analysis and run one comparable experiment.',
       '',
       'Success means the baseline is trustworthy, at least one branch produces a clear metric comparison, and the project leaves a concise conclusion with next-step advice.',
-    ].join('\n'),
+    ].join('\\n'),
     baseline_id: '',
     baseline_variant_id: '',
     baseline_source_mode: 'reproduce_from_source',
@@ -1446,12 +2068,12 @@ function buildTutorialStartResearchExample(language: 'en' | 'zh'): Partial<Start
       '- Control cost.',
       '- Preserve logs and key intermediate results.',
       '- Do not make claims before evidence is sufficient.',
-    ].join('\n'),
+    ].join('\\n'),
     objectives: [
       '1. Establish a trustworthy baseline.',
       '2. Run one improvement branch.',
       '3. Produce metrics, logs, and a short analysis.',
-    ].join('\n'),
+    ].join('\\n'),
     need_research_paper: true,
     research_intensity: 'balanced',
     decision_policy: 'autonomous',
@@ -1543,6 +2165,252 @@ function resolveStartSetupSuggestedFormFromSnapshot(snapshot: unknown): Partial<
   return suggestedForm && Object.keys(suggestedForm).length > 0 ? suggestedForm : null
 }
 
+function resolveStartSetupSessionFromSnapshot(snapshot: unknown): StartSetupSessionState {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    return {
+      suggestedForm: null,
+      fitAssessment: null,
+      recommendedWorkspaceMode: null,
+      launchReadiness: null,
+      missingConfirmations: [],
+      previewPlan: null,
+    }
+  }
+  const startupContract =
+    'startup_contract' in snapshot &&
+    snapshot.startup_contract &&
+    typeof snapshot.startup_contract === 'object' &&
+    !Array.isArray(snapshot.startup_contract)
+      ? (snapshot.startup_contract as Record<string, unknown>)
+      : null
+  const startSetupSession =
+    startupContract &&
+    startupContract.start_setup_session &&
+    typeof startupContract.start_setup_session === 'object' &&
+    !Array.isArray(startupContract.start_setup_session)
+      ? (startupContract.start_setup_session as Record<string, unknown>)
+      : null
+  const suggestedForm = cleanStartSetupSuggestedForm(startSetupSession?.suggested_form)
+  const nestedSessionPatch = nestedStartSetupSessionPatch(startSetupSession)
+  const sessionSource = nestedSessionPatch ? { ...startSetupSession, ...nestedSessionPatch } : startSetupSession
+  const fitAssessment =
+    sessionSource &&
+    sessionSource.fit_assessment &&
+    typeof sessionSource.fit_assessment === 'object' &&
+    !Array.isArray(sessionSource.fit_assessment)
+      ? (sessionSource.fit_assessment as StartSetupFitAssessment)
+      : null
+  const launchReadiness = String(sessionSource?.launch_readiness || '').trim() || null
+  const rawPreviewPlan =
+    sessionSource &&
+    sessionSource.preview_plan &&
+    typeof sessionSource.preview_plan === 'object' &&
+    !Array.isArray(sessionSource.preview_plan)
+      ? (sessionSource.preview_plan as StartSetupPreviewPlan)
+      : null
+  const missingConfirmations = Array.isArray(sessionSource?.missing_confirmations)
+    ? sessionSource.missing_confirmations
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    : []
+  return {
+    suggestedForm,
+    fitAssessment,
+    recommendedWorkspaceMode: String(sessionSource?.recommended_workspace_mode || '').trim() || null,
+    launchReadiness,
+    missingConfirmations,
+    previewPlan: launchReadiness === 'ready' && missingConfirmations.length === 0 ? rawPreviewPlan : null,
+  }
+}
+
+function normalizeStartSetupSessionPatch(value: unknown): StartSetupSessionPatch | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const patch: StartSetupSessionPatch = {}
+  const nestedPatch = nestedStartSetupSessionPatch(raw)
+  const sessionRaw = nestedPatch ? { ...raw, ...nestedPatch } : raw
+  const suggestedForm = cleanStartSetupSuggestedForm(raw.suggested_form)
+  if (suggestedForm) {
+    patch.suggested_form = suggestedForm
+  }
+  if (sessionRaw.fit_assessment && typeof sessionRaw.fit_assessment === 'object' && !Array.isArray(sessionRaw.fit_assessment)) {
+    patch.fit_assessment = sessionRaw.fit_assessment as StartSetupFitAssessment
+  }
+  if ('recommended_workspace_mode' in sessionRaw) {
+    patch.recommended_workspace_mode = String(sessionRaw.recommended_workspace_mode || '').trim() || null
+  }
+  if ('launch_readiness' in sessionRaw) {
+    patch.launch_readiness = String(sessionRaw.launch_readiness || '').trim() || null
+  }
+  if (sessionRaw.preview_plan && typeof sessionRaw.preview_plan === 'object' && !Array.isArray(sessionRaw.preview_plan)) {
+    const readiness = String(patch.launch_readiness || sessionRaw.launch_readiness || '').trim().toLowerCase()
+    if (readiness === 'ready') {
+      patch.preview_plan = sessionRaw.preview_plan as StartSetupPreviewPlan
+    }
+  }
+  if (Array.isArray(sessionRaw.missing_confirmations)) {
+    patch.missing_confirmations = sessionRaw.missing_confirmations
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+  }
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
+function mergeStartSetupSessionState(
+  base: StartSetupSessionState,
+  patch: StartSetupSessionPatch | null
+): StartSetupSessionState {
+  if (!patch) return base
+  return {
+    suggestedForm: patch.suggested_form && Object.keys(patch.suggested_form).length > 0
+      ? { ...(base.suggestedForm || {}), ...patch.suggested_form }
+      : base.suggestedForm,
+    fitAssessment: patch.fit_assessment
+      ? { ...(base.fitAssessment || {}), ...patch.fit_assessment }
+      : base.fitAssessment,
+    recommendedWorkspaceMode: patch.recommended_workspace_mode ?? base.recommendedWorkspaceMode,
+    launchReadiness: patch.launch_readiness ?? base.launchReadiness,
+    missingConfirmations: patch.missing_confirmations ?? base.missingConfirmations,
+    previewPlan: patch.preview_plan
+      ? { ...(base.previewPlan || {}), ...patch.preview_plan }
+      : String(patch.launch_readiness || '').trim().toLowerCase() && String(patch.launch_readiness || '').trim().toLowerCase() !== 'ready'
+        ? null
+        : base.previewPlan,
+  }
+}
+
+function normalizeLaunchMaterialAttachment(
+  value: unknown,
+  source: LaunchMaterialAttachment['source']
+): LaunchMaterialAttachment | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const item = value as Record<string, unknown>
+  const questRelativePath = String(item.quest_relative_path || '').trim() || null
+  const path = String(item.path || '').trim() || null
+  const location =
+    String(item.extracted_text_path || '').trim() ||
+    questRelativePath ||
+    path ||
+    String(item.asset_url || '').trim() ||
+    null
+  const id =
+    questRelativePath ||
+    path ||
+    String(item.draft_id || '').trim() ||
+    String(item.asset_url || '').trim() ||
+    String(item.file_name || '').trim() ||
+    String(item.name || '').trim()
+  if (!id) return null
+  const label =
+    String(item.name || '').trim() ||
+    String(item.file_name || '').trim() ||
+    questRelativePath ||
+    path ||
+    id
+  return {
+    id,
+    label,
+    contentType: String(item.content_type || item.mime_type || '').trim() || null,
+    kind: String(item.kind || '').trim() || null,
+    location,
+    questRelativePath,
+    path,
+    extractedTextPath: String(item.extracted_text_path || '').trim() || null,
+    status: String(item.status || '').trim() || null,
+    source,
+  }
+}
+
+function collectSetupLaunchAttachments(feed: unknown[]): LaunchMaterialAttachment[] {
+  const deduped = new Map<string, LaunchMaterialAttachment>()
+  for (const value of feed) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const item = value as Record<string, unknown>
+    if (String(item.type || '').trim() !== 'message' || String(item.role || '').trim() !== 'user') continue
+    const attachments = Array.isArray(item.attachments) ? item.attachments : []
+    for (const attachment of attachments) {
+      const normalized = normalizeLaunchMaterialAttachment(attachment, 'setup')
+      if (!normalized) continue
+      deduped.set(normalized.id, normalized)
+    }
+  }
+  return Array.from(deduped.values())
+}
+
+function mergeLaunchMaterialAttachments(
+  setupAttachments: LaunchMaterialAttachment[],
+  localAttachments: QuestMessageAttachmentDraft[]
+) {
+  const deduped = new Map<string, LaunchMaterialAttachment>()
+  for (const attachment of setupAttachments) {
+    deduped.set(attachment.id, attachment)
+  }
+  for (const draft of localAttachments) {
+    const normalized = normalizeLaunchMaterialAttachment(
+      {
+        draft_id: draft.draftId,
+        name: draft.name,
+        file_name: draft.name,
+        content_type: draft.contentType,
+        kind: draft.kind,
+        quest_relative_path: draft.questRelativePath,
+        path: draft.path,
+        extracted_text_path: draft.extractedTextPath,
+        status: draft.status,
+      },
+      'manual'
+    )
+    if (!normalized) continue
+    deduped.set(`manual:${normalized.id}`, { ...normalized, id: `manual:${normalized.id}` })
+  }
+  return Array.from(deduped.values())
+}
+
+function fitAssessmentTone(value: string | null | undefined) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized.includes('copilot') || normalized.includes('collab')) return 'warning'
+  if (normalized.includes('possible') || normalized.includes('provisional')) return 'soft'
+  return 'good'
+}
+
+function resolveSetupPlanDecision(session: StartSetupSessionState): SetupPlanDecision {
+  if (session.fitAssessment?.is_autonomous_fit === false) return 'copilot'
+  if (session.fitAssessment?.is_autonomous_fit === true) return 'autonomous'
+  const combined = [
+    session.recommendedWorkspaceMode,
+    session.launchReadiness,
+    session.fitAssessment?.verdict,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  if (combined.includes('copilot') || combined.includes('collab')) return 'copilot'
+  if (combined.includes('provisional') || combined.includes('confirm') || combined.includes('needs')) return 'provisional'
+  return 'autonomous'
+}
+
+function isSetupPlanningLaunchReady(
+  session: StartSetupSessionState,
+  form?: Partial<StartResearchTemplate> | null
+): boolean {
+  const readiness = String(session.launchReadiness || '').trim().toLowerCase()
+  if (readiness !== 'ready') return false
+  if (session.missingConfirmations.length > 0) return false
+  const mergedForm = { ...(form || {}), ...(session.suggestedForm || {}) }
+  const goal = String(mergedForm.goal || '').trim()
+  const objectives = String(mergedForm.objectives || '').trim()
+  const runtimeConstraints = String(mergedForm.runtime_constraints || '').trim()
+  if (!goal || !objectives || !runtimeConstraints) return false
+  const markdown = String(session.previewPlan?.markdown || '').trim()
+  const summary = String(session.previewPlan?.summary || '').trim()
+  const stages = Array.isArray(session.previewPlan?.phases)
+    ? session.previewPlan?.phases
+    : Array.isArray(session.previewPlan?.stages)
+      ? session.previewPlan?.stages
+      : []
+  return Boolean(markdown || summary || (stages && stages.length > 0))
+}
+
 const START_SETUP_STALE_RUNNING_TIMEOUT_MS = 90_000
 
 function isSetupQuestActivelyRunning(snapshot: unknown, options?: { hasLiveRun?: boolean; activeToolCount?: number; streaming?: boolean }) {
@@ -1579,21 +2447,6 @@ function isSetupQuestActivelyRunning(snapshot: unknown, options?: { hasLiveRun?:
   return false
 }
 
-const deepxivCopy = {
-  en: {
-    title: 'DeepXiv literature',
-    body: 'If configured, `idea` and `scout` can use DeepXiv-first paper discovery and paper triage. Without a token, the prompt should stay on the legacy route.',
-    openSetup: 'Open setup',
-    openSettings: 'Settings',
-  },
-  zh: {
-    title: 'DeepXiv 文献能力',
-    body: '如果已配置 token，`idea` 和 `scout` 可以优先走 DeepXiv 的论文发现与速读路径；如果没有 token，系统提示词应继续使用旧路线。',
-    openSetup: '打开配置引导',
-    openSettings: '前往设置',
-  },
-} as const
-
 export function CreateProjectDialog({
   open,
   loading,
@@ -1605,6 +2458,8 @@ export function CreateProjectDialog({
   onBack,
   onClose,
   onRequestSetupAgent,
+  onSwitchToCopilot,
+  onOpenBenchStore,
   onCreate,
 }: {
   open: boolean
@@ -1623,6 +2478,14 @@ export function CreateProjectDialog({
     attachments?: QuestMessageAttachmentDraft[]
     createOnly?: boolean
   }) => Promise<void>
+  onSwitchToCopilot?: (payload: {
+    title: string
+    message: string
+    setupQuestId?: string | null
+    setupAttachments?: LaunchMaterialAttachment[]
+    localAttachments?: QuestMessageAttachmentDraft[]
+  }) => Promise<void> | void
+  onOpenBenchStore?: () => void
   onCreate: (payload: {
     title: string
     goal: string
@@ -1630,6 +2493,11 @@ export function CreateProjectDialog({
     requested_connector_bindings?: Array<{ connector: string; conversation_id?: string | null }>
     requested_baseline_ref?: { baseline_id: string; variant_id?: string | null } | null
     startup_contract?: Record<string, unknown> | null
+    launch_materials?: {
+      setup_quest_id?: string | null
+      setup_attachments?: LaunchMaterialAttachment[]
+      local_attachments?: QuestMessageAttachmentDraft[]
+    } | null
   }) => Promise<void>
 }) {
   const navigate = useNavigate()
@@ -1638,16 +2506,19 @@ export function CreateProjectDialog({
   const t = normalizedCopy[locale]
   const deepxivT = deepxivCopy[locale]
   const backLabel = locale === 'zh' ? '返回' : 'Back'
+  const [entryMode, setEntryMode] = useState<'intake' | 'form'>(setupPacket ? 'form' : 'intake')
   const [rightPaneMode, setRightPaneMode] = useState<StartResearchRightPaneMode>('assistant')
   const [showAdvanced, setShowAdvanced] = useState(true)
   const [form, setForm] = useState<StartResearchTemplate>(defaultStartResearchTemplate(locale))
+  const [intakeMessage, setIntakeMessage] = useState(initialGoal)
+  const [localSetupSessionPatch, setLocalSetupSessionPatch] = useState<StartSetupSessionPatch | null>(null)
   const [promptDraft, setPromptDraft] = useState('')
   const [manualOverride, setManualOverride] = useState(false)
   const [questIdManualOverride, setQuestIdManualOverride] = useState(false)
   const [suggestedQuestId, setSuggestedQuestId] = useState('')
   const [suggestedQuestIdLoading, setSuggestedQuestIdLoading] = useState(false)
   const [templates, setTemplates] = useState<StartResearchTemplateEntry[]>([])
-  const [selectedTemplateId, setSelectedTemplateId] = useState('__latest__')
+  const [selectedTemplateId, setSelectedTemplateId] = useState('__new__')
   const [baselineEntries, setBaselineEntries] = useState<BaselineRegistryEntry[]>([])
   const [baselineEntriesLoading, setBaselineEntriesLoading] = useState(false)
   const [baselineEntriesError, setBaselineEntriesError] = useState<string | null>(null)
@@ -1663,11 +2534,18 @@ export function CreateProjectDialog({
   const [activeRunnerName, setActiveRunnerName] = useState(() => normalizeBuiltinRunnerName("codex"))
   const [selectedConnectorBindings, setSelectedConnectorBindings] = useState<Record<string, string | null>>({})
   const [agentManagedValues, setAgentManagedValues] = useState<Partial<StartResearchTemplate>>({})
+  const [localLaunchAttachments, setLocalLaunchAttachments] = useState<QuestMessageAttachmentDraft[]>([])
+  const [setupPlanningNoticeDismissed, setSetupPlanningNoticeDismissed] = useState(false)
+  const [setupPlanningNoticeOpen, setSetupPlanningNoticeOpen] = useState(false)
+  const [setupPlanningNoticeClosing, setSetupPlanningNoticeClosing] = useState(false)
+  const [setupPlanningNoticeElapsedMs, setSetupPlanningNoticeElapsedMs] = useState(0)
+  const [planningReviewDismissedKey, setPlanningReviewDismissedKey] = useState<string | null>(null)
   const [benchAutoAssistReady, setBenchAutoAssistReady] = useState(() => !setupPacket)
   const referenceTemplates = useMemo(() => listReferenceStartResearchTemplates(), [])
   const setupWorkspace = useQuestWorkspace(setupQuestId)
-  const processedPatchMessageIdsRef = useRef<Set<string>>(new Set())
   const autoBenchAssistStartedRef = useRef<string | null>(null)
+  const setupPlanningNoticeStartedAtRef = useRef<number | null>(null)
+  const setupPlanningPollStartedAtRef = useRef<number | null>(null)
   const latestFormRef = useRef(form)
   const latestAgentManagedValuesRef = useRef(agentManagedValues)
 
@@ -1887,9 +2765,23 @@ export function CreateProjectDialog({
     if (!open) {
       return
     }
+    setEntryMode(setupPacket ? 'form' : 'intake')
     setRightPaneMode('assistant')
     setBenchAutoAssistReady(!(setupPacket && onRequestSetupAgent))
     autoBenchAssistStartedRef.current = null
+    setIntakeMessage(initialGoal || '')
+    setLocalLaunchAttachments((current) => {
+      current.forEach((item) => {
+        if (item.previewUrl?.startsWith('blob:')) {
+          URL.revokeObjectURL(item.previewUrl)
+        }
+      })
+      return []
+    })
+    setSetupPlanningNoticeDismissed(false)
+    setSetupPlanningNoticeElapsedMs(0)
+    setupPlanningNoticeStartedAtRef.current = null
+    setupPlanningPollStartedAtRef.current = null
     if (setupPacket && setupPacket.suggested_form && typeof setupPacket.suggested_form === 'object') {
       const suggested = setupPacket.suggested_form as Partial<StartResearchTemplate>
       const next = {
@@ -1907,10 +2799,9 @@ export function CreateProjectDialog({
       setSelectedConnectorBindings({})
       setShowAdvanced(true)
       setAgentManagedValues(suggested)
-      processedPatchMessageIdsRef.current = new Set()
       return
     }
-    const next = loadStartResearchTemplate(locale)
+    const next = defaultStartResearchTemplate(locale)
     const tutorialSeed = onboardingStatus === 'running' ? buildTutorialStartResearchExample(locale) : null
     const withSeed = {
       ...next,
@@ -1923,15 +2814,15 @@ export function CreateProjectDialog({
       quest_id: '',
     })
     setTemplates(loadStartResearchHistory())
-    setSelectedTemplateId('__latest__')
+    setSelectedTemplateId('__new__')
     setManualOverride(false)
     setQuestIdManualOverride(false)
     setSuggestedQuestId('')
     setSelectedConnectorBindings({})
     setShowAdvanced(true)
     setAgentManagedValues({})
-    processedPatchMessageIdsRef.current = new Set()
-  }, [initialGoal, locale, onboardingStatus, onRequestSetupAgent, open, setupPacket])
+    setLocalSetupSessionPatch(null)
+  }, [initialGoal, locale, onboardingStatus, open, setupPacket])
 
   useEffect(() => {
     if (open) return
@@ -1939,9 +2830,46 @@ export function CreateProjectDialog({
     autoBenchAssistStartedRef.current = null
   }, [open])
 
-  const durableSetupSuggestedForm = useMemo(
-    () => resolveStartSetupSuggestedFormFromSnapshot(setupWorkspace.snapshot),
+  const durableSetupSessionBase = useMemo(
+    () => resolveStartSetupSessionFromSnapshot(setupWorkspace.snapshot),
     [setupWorkspace.snapshot]
+  )
+
+  const durableSetupSession = useMemo(
+    () => mergeStartSetupSessionState(durableSetupSessionBase, localSetupSessionPatch),
+    [durableSetupSessionBase, localSetupSessionPatch]
+  )
+
+  const durableSetupSuggestedForm = useMemo(
+    () => durableSetupSession.suggestedForm || resolveStartSetupSuggestedFormFromSnapshot(setupWorkspace.snapshot),
+    [durableSetupSession.suggestedForm, setupWorkspace.snapshot]
+  )
+
+  const setupAssessmentKey = useMemo(
+    () => [
+      durableSetupSession.recommendedWorkspaceMode || '',
+      durableSetupSession.launchReadiness || '',
+      String(durableSetupSession.previewPlan?.markdown || '').slice(0, 96),
+      JSON.stringify(durableSetupSuggestedForm || {}),
+    ].join('|'),
+    [durableSetupSession.launchReadiness, durableSetupSession.previewPlan?.markdown, durableSetupSession.recommendedWorkspaceMode, durableSetupSuggestedForm]
+  )
+
+  const transformSetupAgentSubmitMessage = useCallback(
+    (message: string) => {
+      return message
+    },
+    []
+  )
+
+  const setupLaunchAttachments = useMemo(
+    () => collectSetupLaunchAttachments(setupWorkspace.feed),
+    [setupWorkspace.feed]
+  )
+
+  const launchMaterialAttachments = useMemo(
+    () => mergeLaunchMaterialAttachments(setupLaunchAttachments, localLaunchAttachments),
+    [localLaunchAttachments, setupLaunchAttachments]
   )
 
   const setupQuestStillRunning = useMemo(
@@ -1959,12 +2887,209 @@ export function CreateProjectDialog({
     ]
   )
 
+  const durableSetupHasPlanningContent = useMemo(
+    () => isSetupPlanningLaunchReady(
+      durableSetupSession.suggestedForm ? durableSetupSession : { ...durableSetupSession, suggestedForm: durableSetupSuggestedForm },
+      form
+    ),
+    [durableSetupSession, durableSetupSuggestedForm, form]
+  )
+
+  const visibleSetupSession = durableSetupSession
+  const planningPreviewVisible = durableSetupHasPlanningContent
+  const planningReviewOpen = Boolean(
+    planningPreviewVisible &&
+    setupAssessmentKey &&
+    planningReviewDismissedKey !== setupAssessmentKey
+  )
+
+  const closePlanningReview = useCallback(() => {
+    if (setupAssessmentKey) {
+      setPlanningReviewDismissedKey(setupAssessmentKey)
+    }
+    setRightPaneMode('assistant')
+  }, [setupAssessmentKey])
+
+  const setupPlanningNoticeSettled = setupPlanningNoticeElapsedMs >= SETUP_PLANNING_NOTICE_SETTLED_MS
+  const setupPlanningNoticePhaseIndex =
+    setupPlanningNoticeElapsedMs >= 12_000 ? 2 :
+    setupPlanningNoticeElapsedMs >= 5_000 ? 1 : 0
+  const setupPlanningNoticeCardRevealCount = setupPlanningNoticeElapsedMs >= 17_000 ? 4 : setupPlanningNoticeElapsedMs >= 11_000 ? 3 : setupPlanningNoticeElapsedMs >= 5_000 ? 2 : 1
+  const setupPlanningNoticeProgress = setupPlanningNoticeSettled
+    ? 0.96
+    : Math.min(0.96, 0.18 + (setupPlanningNoticeElapsedMs / SETUP_PLANNING_NOTICE_SETTLED_MS) * 0.78)
+  const setupPlanningNoticeLiveIndex =
+    setupPlanningNoticeElapsedMs >= 19_000 ? 4 :
+    setupPlanningNoticeElapsedMs >= 14_000 ? 3 :
+    setupPlanningNoticeElapsedMs >= 9_000 ? 2 :
+    setupPlanningNoticeElapsedMs >= 4_000 ? 1 : 0
+  const setupPlanningNoticeStageLabel = locale === 'zh'
+    ? [
+        '已收到任务，正在理解目标和边界。',
+        '正在整理材料、约束和已有上下文。',
+        '正在生成研究分析设计计划。',
+      ][setupPlanningNoticePhaseIndex]
+    : [
+        'Task received. Understanding the goal and boundaries.',
+        'Organizing materials, constraints, and current context.',
+        'Drafting the research analysis and design plan.',
+      ][setupPlanningNoticePhaseIndex]
+  const setupPlanningNoticeCards = locale === 'zh'
+    ? [
+        {
+          title: '任务定义',
+          body: '明确目标、成功指标和最终交付物。',
+          activeBody: '正在识别你真正想完成的研究目标。',
+        },
+        {
+          title: '材料与资源',
+          body: '检查论文、代码、数据、附件和可用算力。',
+          activeBody: '正在整理已有材料和运行边界。',
+        },
+        {
+          title: '全自动适配',
+          body: '判断是否适合自主推进，或需要先协作确认。',
+          activeBody: '正在评估任务能否在电脑内闭环完成。',
+        },
+        {
+          title: '启动计划',
+          body: '组织 baseline、优化、分析和风险确认步骤。',
+          activeBody: '正在生成可审阅的启动规划。',
+        },
+      ]
+    : [
+        {
+          title: 'Task definition',
+          body: 'Clarifying the goal, success metrics, and final deliverables.',
+          activeBody: 'Identifying the real research objective.',
+        },
+        {
+          title: 'Materials & resources',
+          body: 'Checking papers, code, data, attachments, and compute.',
+          activeBody: 'Organizing available materials and runtime boundaries.',
+        },
+        {
+          title: 'Autonomy fit',
+          body: 'Deciding whether autonomous work is safe or confirmation is needed.',
+          activeBody: 'Evaluating whether the task can run in a closed computer-side loop.',
+        },
+        {
+          title: 'Launch plan',
+          body: 'Structuring baseline, optimization, analysis, and risk gates.',
+          activeBody: 'Drafting a reviewable launch plan.',
+        },
+      ]
+  const setupPlanningNoticeLiveLines = locale === 'zh'
+    ? [
+        '正在识别研究目标、成功标准和最终交付物…',
+        '正在整理已有材料、附件和参考来源…',
+        '正在确认算力、网络、凭据和隐私边界…',
+        '正在判断是否适合全自动模式…',
+        '正在生成可审阅的启动规划…',
+      ]
+    : [
+        'Identifying the research goal, success criteria, and deliverables…',
+        'Organizing existing materials, attachments, and references…',
+        'Checking compute, network, credentials, and privacy boundaries…',
+        'Deciding whether autonomous mode is a good fit…',
+        'Drafting a reviewable launch plan…',
+      ]
+  const setupPlanningNoticeVisibleSectionCount = Math.min(setupPlanningNoticeCards.length, setupPlanningNoticeCardRevealCount)
+  const setupPlanningNoticeLiveLine = setupPlanningNoticeLiveLines[Math.min(setupPlanningNoticeLiveIndex, setupPlanningNoticeLiveLines.length - 1)]
+
+  const closeSetupPlanningNotice = useCallback(() => {
+    if (!setupPlanningNoticeOpen || setupPlanningNoticeClosing) return
+    setSetupPlanningNoticeClosing(true)
+    window.setTimeout(() => {
+      setSetupPlanningNoticeOpen(false)
+      setSetupPlanningNoticeClosing(false)
+      setSetupPlanningNoticeDismissed(true)
+      setSetupPlanningNoticeElapsedMs(0)
+      setupPlanningNoticeStartedAtRef.current = null
+      setRightPaneMode('assistant')
+    }, 1800)
+  }, [setupPlanningNoticeClosing, setupPlanningNoticeOpen])
+
+  const startSetupPlanningNotice = useCallback(() => {
+    setSetupPlanningNoticeDismissed(false)
+    setSetupPlanningNoticeClosing(false)
+    setSetupPlanningNoticeElapsedMs(0)
+    setupPlanningNoticeStartedAtRef.current = Date.now()
+    setSetupPlanningNoticeOpen(true)
+  }, [])
+
+  useEffect(() => {
+    if (!setupQuestStillRunning || planningPreviewVisible) return
+    if (setupPlanningNoticeDismissed) return
+    if (setupPlanningNoticeOpen) return
+    setSetupPlanningNoticeOpen(true)
+    setSetupPlanningNoticeClosing(false)
+    if (setupPlanningNoticeStartedAtRef.current == null) {
+      setupPlanningNoticeStartedAtRef.current = Date.now()
+    }
+  }, [planningPreviewVisible, setupPlanningNoticeDismissed, setupPlanningNoticeOpen, setupQuestStillRunning])
+
+  useEffect(() => {
+    if (!setupPlanningNoticeOpen || setupPlanningNoticeClosing) return
+    if (setupPlanningNoticeStartedAtRef.current == null) {
+      setupPlanningNoticeStartedAtRef.current = Date.now()
+    }
+    const tick = () => {
+      const startedAt = setupPlanningNoticeStartedAtRef.current ?? Date.now()
+      const nextElapsed = Math.max(0, Math.min(Date.now() - startedAt, SETUP_PLANNING_NOTICE_TOTAL_MS))
+      setSetupPlanningNoticeElapsedMs(nextElapsed)
+      if (nextElapsed >= SETUP_PLANNING_NOTICE_TOTAL_MS) {
+        closeSetupPlanningNotice()
+      }
+    }
+    tick()
+    const timer = window.setInterval(tick, 250)
+    return () => window.clearInterval(timer)
+  }, [closeSetupPlanningNotice, setupPlanningNoticeClosing, setupPlanningNoticeOpen])
+
+  useEffect(() => {
+    if (!durableSetupHasPlanningContent) return
+    setupPlanningPollStartedAtRef.current = null
+    closeSetupPlanningNotice()
+  }, [closeSetupPlanningNotice, durableSetupHasPlanningContent])
+
+  useEffect(() => {
+    if (!open || !setupQuestId) {
+      setupPlanningPollStartedAtRef.current = null
+      return
+    }
+    if (durableSetupHasPlanningContent) {
+      setupPlanningPollStartedAtRef.current = null
+      return
+    }
+    if (setupPlanningPollStartedAtRef.current == null) {
+      setupPlanningPollStartedAtRef.current = Date.now()
+    }
+    let cancelled = false
+    const tick = () => {
+      if (cancelled) return
+      const startedAt = setupPlanningPollStartedAtRef.current ?? Date.now()
+      if (Date.now() - startedAt > 90_000) {
+        return
+      }
+      void setupWorkspace.refresh(false).catch(() => {})
+    }
+    const initialTimer = window.setTimeout(tick, 1200)
+    const interval = window.setInterval(tick, 2000)
+    return () => {
+      cancelled = true
+      window.clearTimeout(initialTimer)
+      window.clearInterval(interval)
+    }
+  }, [durableSetupHasPlanningContent, open, setupQuestId, setupWorkspace.refresh])
+
   const benchAutoAssistWaitingForPatch = Boolean(
     setupPacket && onRequestSetupAgent && setupQuestCreating
   )
 
   useEffect(() => {
     if (!setupQuestId) return
+    setEntryMode('form')
     setRightPaneMode('assistant')
   }, [setupQuestId])
 
@@ -1978,6 +3103,53 @@ export function CreateProjectDialog({
       return next
     })
   }
+
+  const queueLocalLaunchAttachments = useCallback((files: File[]) => {
+    if (!files.length) return
+    setLocalLaunchAttachments((current) => {
+      const availableSlots = Math.max(0, START_RESEARCH_MAX_ATTACHMENTS - current.length)
+      const nextFiles = files.slice(0, availableSlots)
+      const nextDrafts: QuestMessageAttachmentDraft[] = []
+      for (const file of nextFiles) {
+        if (file.size > START_RESEARCH_MAX_ATTACHMENT_SIZE_BYTES) {
+          continue
+        }
+        nextDrafts.push({
+          draftId: makeLocalAttachmentDraftId(),
+          name: file.name,
+          contentType: file.type || undefined,
+          sizeBytes: file.size,
+          status: 'success',
+          progress: 100,
+          kind: isImageAttachmentMime(file.type) ? 'image' : 'path',
+          previewUrl: isImageAttachmentMime(file.type) ? URL.createObjectURL(file) : null,
+          file,
+        })
+      }
+      return [...current, ...nextDrafts]
+    })
+  }, [])
+
+  const removeLocalLaunchAttachment = useCallback((draftId: string) => {
+    setLocalLaunchAttachments((current) => {
+      const target = current.find((item) => item.draftId === draftId)
+      if (target?.previewUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(target.previewUrl)
+      }
+      return current.filter((item) => item.draftId !== draftId)
+    })
+  }, [])
+
+  const clearLocalLaunchAttachments = useCallback(() => {
+    setLocalLaunchAttachments((current) => {
+      current.forEach((item) => {
+        if (item.previewUrl?.startsWith('blob:')) {
+          URL.revokeObjectURL(item.previewUrl)
+        }
+      })
+      return []
+    })
+  }, [])
 
   const applyFormPatch = useCallback((patch: Partial<StartResearchTemplate>) => {
     setForm((current) => {
@@ -2063,43 +3235,30 @@ export function CreateProjectDialog({
 
   useEffect(() => {
     if (!setupQuestId) return
-    for (const item of setupWorkspace.feed) {
-      if (item.type !== 'message' || item.role !== 'assistant' || item.stream) continue
-      if (processedPatchMessageIdsRef.current.has(item.id)) continue
-      processedPatchMessageIdsRef.current.add(item.id)
-      const match = item.content.match(/```start_setup_patch\s*([\s\S]*?)```/i)
-      if (!match) continue
-      try {
-        const parsed = JSON.parse(match[1].trim())
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          applyAgentPatch(parsed as Partial<StartResearchTemplate>)
-        }
-      } catch {
-        continue
-      }
-    }
-  }, [applyAgentPatch, setupQuestId, setupWorkspace.feed])
-
-  useEffect(() => {
-    if (!setupQuestId) return
     const handleStartSetupPatch = (event: Event) => {
-      const detail = (event as CustomEvent<{ patch?: Partial<StartResearchTemplate> }>).detail
+      const detail = (event as CustomEvent<{
+        patch?: Partial<StartResearchTemplate>
+        session_patch?: Record<string, unknown>
+      }>).detail
       const patch =
         detail?.patch && typeof detail.patch === 'object' && !Array.isArray(detail.patch)
           ? (detail.patch as Partial<StartResearchTemplate>)
           : null
-      if (!patch) return
-      applyAgentPatch(patch)
+      const sessionPatch = normalizeStartSetupSessionPatch(detail?.session_patch)
+      if (patch && Object.keys(patch).length > 0) {
+        applyAgentPatch(patch)
+      }
+      if (sessionPatch) {
+        setLocalSetupSessionPatch((current) => ({ ...(current || {}), ...sessionPatch }))
+      }
+      if (patch || sessionPatch) {
+        setBenchAutoAssistReady(true)
+      }
     }
     window.addEventListener('ds:start-setup:patch', handleStartSetupPatch as EventListener)
     return () =>
       window.removeEventListener('ds:start-setup:patch', handleStartSetupPatch as EventListener)
   }, [applyAgentPatch, setupQuestId])
-
-  useEffect(() => {
-    if (!setupQuestId || !durableSetupSuggestedForm) return
-    applyAgentPatch(durableSetupSuggestedForm)
-  }, [applyAgentPatch, durableSetupSuggestedForm, setupQuestId])
 
   useEffect(() => {
     if (!setupPacket || !onRequestSetupAgent) return
@@ -2325,7 +3484,18 @@ export function CreateProjectDialog({
     open,
   ])
 
-  const compiledPromptPreview = useMemo(() => compileStartResearchPrompt(form), [form])
+  const compiledPromptPreview = useMemo(
+    () =>
+      compileStartResearchPrompt(form, {
+        attachments: launchMaterialAttachments.map((item) => ({
+          label: item.label,
+          location: item.location || item.questRelativePath || item.path || null,
+          contentType: item.contentType || null,
+          source: item.source,
+        })),
+      }),
+    [form, launchMaterialAttachments]
+  )
 
   useEffect(() => {
     if (!open || manualOverride) {
@@ -2361,9 +3531,9 @@ export function CreateProjectDialog({
     []
   )
 
-  const validateBeforeCreate = useCallback(() => {
-    const titleTrimmed = String(form.title || '').trim()
-    const goalTrimmed = String(form.goal || '').trim()
+  const validateBeforeCreate = useCallback((candidateForm: StartResearchTemplate = form, candidatePrompt: string = finalPrompt) => {
+    const titleTrimmed = String(candidateForm.title || '').trim()
+    const goalTrimmed = String(candidateForm.goal || '').trim()
     if (!titleTrimmed) {
       setValidationMessage(locale === 'zh' ? '请先填写课题标题。' : 'Please fill in the project title first.')
       setValidationTarget('title')
@@ -2378,7 +3548,7 @@ export function CreateProjectDialog({
       focusCreateValidationTarget('goal')
       return false
     }
-    if (!finalPrompt) {
+    if (!candidatePrompt.trim()) {
       setValidationMessage(t.promptRequired)
       setValidationTarget('goal')
       setValidationDialogOpen(true)
@@ -2386,7 +3556,7 @@ export function CreateProjectDialog({
       return false
     }
     return true
-  }, [finalPrompt, focusCreateValidationTarget, form.goal, form.title, locale, manualOverride, t.goalRequired, t.promptRequired])
+  }, [finalPrompt, focusCreateValidationTarget, form, locale, manualOverride, t.goalRequired, t.promptRequired])
 
   const handleValidationDialogChange = useCallback(
     (nextOpen: boolean) => {
@@ -2492,7 +3662,71 @@ export function CreateProjectDialog({
     navigate('/projects/demo-memory')
   }, [navigate, onClose])
 
-  const handleCreate = async () => {
+  const handleSwitchToCopilot = useCallback(async () => {
+    const suggestedTitle = String(durableSetupSuggestedForm?.title || '').trim()
+    const suggestedGoal = String(durableSetupSuggestedForm?.goal || '').trim()
+    const planMarkdown = String(durableSetupSession.previewPlan?.markdown || '').trim()
+    const message = [
+      intakeMessage.trim() || suggestedGoal || form.goal.trim() || compiledPromptPreview.trim(),
+      planMarkdown ? `\n\nSetupAgent launch plan:\n${planMarkdown}` : '',
+    ].filter(Boolean).join('')
+    await onSwitchToCopilot?.({
+      title: suggestedTitle || form.title.trim() || intakeMessage.trim() || form.goal.trim() || '',
+      message,
+      setupQuestId,
+      setupAttachments: setupLaunchAttachments,
+      localAttachments: localLaunchAttachments,
+    })
+  }, [
+    compiledPromptPreview,
+    durableSetupSession.previewPlan,
+    durableSetupSuggestedForm,
+    form.goal,
+    form.title,
+    intakeMessage,
+    localLaunchAttachments,
+    onSwitchToCopilot,
+    setupLaunchAttachments,
+    setupQuestId,
+  ])
+
+  const handleReviewSuggestedForm = useCallback(() => {
+    if (durableSetupSuggestedForm) {
+      applyAgentPatch(durableSetupSuggestedForm)
+    }
+    setEntryMode('form')
+    setRightPaneMode('preview')
+  }, [applyAgentPatch, durableSetupSuggestedForm])
+
+  const handleStartSetupFromIntake = useCallback(async () => {
+    if (!onRequestSetupAgent) {
+      setEntryMode('form')
+      return
+    }
+    const nextMessage = intakeMessage.trim()
+    if (!nextMessage && localLaunchAttachments.length === 0) {
+      setEntryMode('form')
+      return
+    }
+    setEntryMode('form')
+    setRightPaneMode('assistant')
+    startSetupPlanningNotice()
+    void onRequestSetupAgent({
+      message: nextMessage,
+      form,
+      setupPacket,
+      attachments: localLaunchAttachments,
+    })
+  }, [
+    form,
+    intakeMessage,
+    localLaunchAttachments,
+    onRequestSetupAgent,
+    setupPacket,
+    startSetupPlanningNotice,
+  ])
+
+  const handleCreate = async (formOverride?: StartResearchTemplate) => {
     if (onboardingStatus === 'running') {
       handleLaunchTutorialDemo()
       return
@@ -2500,10 +3734,19 @@ export function CreateProjectDialog({
     if (benchAutoAssistLocked) {
       return
     }
-    if (!validateBeforeCreate()) {
+    const workingForm = formOverride || form
+    const launchPrompt = compileStartResearchPrompt(workingForm, {
+      attachments: launchMaterialAttachments.map((item) => ({
+        label: item.label,
+        location: item.location || item.questRelativePath || item.path || null,
+        contentType: item.contentType || null,
+        source: item.source,
+      })),
+    }).trim()
+    if (!validateBeforeCreate(workingForm, launchPrompt)) {
       return
     }
-    const saved = saveStartResearchTemplate(form)
+    const saved = saveStartResearchTemplate(workingForm)
     const baselineId = saved.baseline_id.trim()
     const baselineVariantId = saved.baseline_variant_id.trim()
     const requestedBaselineRef = baselineId
@@ -2570,12 +3813,25 @@ export function CreateProjectDialog({
     }
     await onCreate({
       title: saved.title,
-      goal: finalPrompt,
+      goal: launchPrompt,
       quest_id: questIdManualOverride ? saved.quest_id || undefined : undefined,
       requested_connector_bindings: requestedConnectorBindings,
       requested_baseline_ref: requestedBaselineRef,
       startup_contract: startupContract,
+      launch_materials: {
+        setup_quest_id: setupQuestId || undefined,
+        setup_attachments: setupLaunchAttachments,
+        local_attachments: localLaunchAttachments,
+      },
     })
+  }
+
+  const handleAcceptAutonomousPlan = () => {
+    const suggested = durableSetupSuggestedForm ? { ...latestFormRef.current, ...durableSetupSuggestedForm } : latestFormRef.current
+    if (durableSetupSuggestedForm) {
+      applyAgentPatch(durableSetupSuggestedForm)
+    }
+    void handleCreate(suggested)
   }
 
   return (
@@ -2586,9 +3842,28 @@ export function CreateProjectDialog({
         description={t.body}
         onClose={onClose}
         className={LAUNCH_DIALOG_SHELL_CLASS}
+        hideHeader
       >
+        {entryMode === 'intake' && !setupPacket ? (
+          <AutonomousSetupIntakeSurface
+            locale={locale}
+            assistantLabel={`${runnerLabel(activeRunnerName)} · SetupAgent`}
+            value={intakeMessage}
+            onValueChange={setIntakeMessage}
+            attachments={localLaunchAttachments}
+            onQueueFiles={queueLocalLaunchAttachments}
+            onRemoveAttachment={removeLocalLaunchAttachment}
+            onSubmit={handleStartSetupFromIntake}
+            submitting={setupQuestCreating}
+            error={error}
+            onSwitchToForm={() => setEntryMode('form')}
+            onSwitchToCopilot={() => void handleSwitchToCopilot()}
+            onOpenBenchStore={onOpenBenchStore}
+            onClose={onClose}
+          />
+        ) : (
         <div
-          className="feed-scrollbar modal-scrollbar flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3 sm:gap-4 sm:p-4 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:items-stretch lg:overflow-hidden lg:p-5"
+          className="feed-scrollbar modal-scrollbar relative flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3 sm:gap-4 sm:p-4 lg:grid lg:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)] lg:grid-rows-[minmax(0,1fr)] lg:items-stretch lg:overflow-hidden lg:p-5"
           data-onboarding-id="start-research-dialog"
         >
         <div
@@ -2596,12 +3871,44 @@ export function CreateProjectDialog({
             'flex flex-none flex-col overflow-visible lg:h-full lg:min-h-0 lg:flex-auto lg:overflow-hidden lg:rounded-[28px] lg:border lg:border-black/[0.06] lg:bg-[rgba(255,250,245,0.76)] lg:shadow-[0_22px_72px_-54px_rgba(15,23,42,0.3)] lg:backdrop-blur-xl'
           )}
         >
-          <div className="shrink-0 px-1 py-1 lg:border-b lg:border-[rgba(45,42,38,0.08)] lg:px-4 lg:py-4 dark:lg:border-[rgba(45,42,38,0.08)]">
-            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[rgba(107,103,97,0.8)] dark:text-[rgba(107,103,97,0.8)] lg:text-sm lg:normal-case lg:tracking-normal lg:text-[rgba(38,36,33,0.95)]">
-              {t.formTitle}
-            </div>
-            <div className="mt-1 text-[11px] leading-5 text-[rgba(107,103,97,0.72)] dark:text-[rgba(107,103,97,0.72)] lg:text-xs">
-              {t.formHint}
+          <div className="shrink-0 px-1 py-1 lg:border-b lg:border-[rgba(45,42,38,0.08)] lg:px-4 lg:py-3 dark:lg:border-[rgba(45,42,38,0.08)]">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2" data-onboarding-id="start-research-preview-mode-tabs">
+                <Button
+                  type="button"
+                  variant={rightPaneMode === 'assistant' ? 'secondary' : 'ghost'}
+                  className="rounded-full"
+                  onClick={() => {
+                    setRightPaneMode('assistant')
+                  }}
+                  data-onboarding-id="start-research-toggle-assistant"
+                >
+                  {t.setupAgentToggle}
+                </Button>
+                {onSwitchToCopilot ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="rounded-full"
+                    onClick={() => void handleSwitchToCopilot()}
+                  >
+                    <ArrowUpRight className="mr-1.5 h-4 w-4" />
+                    {locale === 'zh' ? '协作模式' : 'Copilot'}
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  variant={rightPaneMode === 'preview' ? 'secondary' : 'ghost'}
+                  className="rounded-full"
+                  onClick={() => setRightPaneMode('preview')}
+                  data-onboarding-id="start-research-toggle-preview"
+                >
+                  {t.previewPanel}
+                </Button>
+              </div>
+              <Button type="button" variant="ghost" size="icon" className="rounded-full" onClick={onClose} aria-label={locale === 'zh' ? '关闭' : 'Close'}>
+                <X className="h-4 w-4" />
+              </Button>
             </div>
           </div>
 
@@ -2790,6 +4097,14 @@ export function CreateProjectDialog({
                   </InlineField>
                 ) : null}
               </SectionCard>
+
+              <LaunchMaterialsCard
+                locale={locale}
+                setupAttachments={setupLaunchAttachments}
+                localAttachments={localLaunchAttachments}
+                onQueueFiles={queueLocalLaunchAttachments}
+                onRemoveAttachment={removeLocalLaunchAttachment}
+              />
 
               <>
                   <SectionCard title={t.template} muted>
@@ -3118,27 +4433,6 @@ export function CreateProjectDialog({
             'flex flex-none flex-col overflow-visible p-0 sm:p-0 lg:h-full lg:min-h-0 lg:flex-auto lg:overflow-hidden lg:rounded-[28px] lg:bg-transparent lg:p-0'
           )}
         >
-          <div className="mb-3 flex shrink-0 items-center justify-end gap-2 px-1 lg:px-0" data-onboarding-id="start-research-preview-mode-tabs">
-            <Button
-              type="button"
-              variant={rightPaneMode === 'assistant' ? 'secondary' : 'ghost'}
-              className="rounded-full"
-              onClick={() => setRightPaneMode('assistant')}
-              data-onboarding-id="start-research-toggle-assistant"
-            >
-              {t.setupAgentToggle}
-            </Button>
-            <Button
-              type="button"
-              variant={rightPaneMode === 'preview' ? 'secondary' : 'ghost'}
-              className="rounded-full"
-              onClick={() => setRightPaneMode('preview')}
-              data-onboarding-id="start-research-toggle-preview"
-            >
-              {t.previewPanel}
-            </Button>
-          </div>
-
           <div className="min-h-0 flex-1">
             {rightPaneMode === 'assistant' ? (
               <div data-onboarding-id="start-research-assistant-surface" className="h-full min-h-0">
@@ -3146,6 +4440,7 @@ export function CreateProjectDialog({
                   <SetupAgentQuestPanel
                     questId={setupQuestId}
                     locale={locale}
+                    transformSubmitMessage={transformSetupAgentSubmitMessage}
                   />
                 ) : (
                   <SetupAgentRail
@@ -3238,7 +4533,24 @@ export function CreateProjectDialog({
             </div>
           </div>
         </div>
+        {planningReviewOpen ? (
+          <StartSetupPlanningReviewDialog
+            open={planningReviewOpen}
+            locale={locale}
+            session={visibleSetupSession}
+            hasSuggestedForm={Boolean(durableSetupSuggestedForm && Object.keys(durableSetupSuggestedForm).length > 0)}
+            loading={Boolean(loading)}
+            onClose={closePlanningReview}
+            onAcceptAutonomous={handleAcceptAutonomousPlan}
+            onReviewForm={() => {
+              handleReviewSuggestedForm()
+              closePlanningReview()
+            }}
+            onSwitchToCopilot={onSwitchToCopilot ? () => void handleSwitchToCopilot() : undefined}
+          />
+        ) : null}
         </div>
+        )}
       <Dialog open={validationDialogOpen} onOpenChange={handleValidationDialogChange}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -3255,6 +4567,119 @@ export function CreateProjectDialog({
         </DialogContent>
       </Dialog>
       </OverlayDialog>
+      {setupPlanningNoticeOpen ? (
+        <div
+          className={cn(
+            'pointer-events-none fixed inset-0 z-[10020] flex items-center justify-center bg-black/10 p-4 backdrop-blur-[2px] transition-all duration-[1800ms] ease-out',
+            setupPlanningNoticeClosing ? 'opacity-0 backdrop-blur-0' : 'opacity-100'
+          )}
+        >
+          <div
+            className={cn(
+              'pointer-events-auto w-full max-w-2xl rounded-[28px] border border-[rgba(45,42,38,0.08)] bg-[rgba(252,248,242,0.96)] px-5 py-5 shadow-[0_34px_100px_-54px_rgba(15,23,42,0.58)] backdrop-blur-2xl transition-all duration-[1800ms] ease-out',
+              setupPlanningNoticeClosing ? 'translate-y-3 scale-[0.985] opacity-0' : 'translate-y-0 scale-100 opacity-100'
+            )}
+          >
+            <div className="flex items-start gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white/72 shadow-[inset_0_0_0_1px_rgba(45,42,38,0.08)]">
+                <img
+                  src={assetUrl('logo.svg')}
+                  alt="DeepScientist"
+                  className="h-7 w-7 object-contain"
+                />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-base font-semibold text-black dark:text-black">
+                  {locale === 'zh' ? '收到啦，正在认真规划 ✨' : 'Got it — planning carefully ✨'}
+                </div>
+                <div className="mt-1 text-[13px] leading-6 text-[rgba(86,82,77,0.82)]">
+                  {setupPlanningNoticeSettled
+                    ? locale === 'zh'
+                      ? '预计总计需要约 5 分钟进行研究分析设计计划，请耐心等候。'
+                      : 'This research analysis and design plan may take about 5 minutes in total. Thanks for your patience.'
+                    : setupPlanningNoticeStageLabel}
+                </div>
+                <div
+                  key={setupPlanningNoticeSettled ? 'settled' : setupPlanningNoticeLiveLine}
+                  className="mt-3 rounded-2xl border border-[rgba(45,42,38,0.08)] bg-white/64 px-3.5 py-2.5 text-[13px] leading-5 text-[rgba(45,42,38,0.88)] shadow-[0_14px_36px_-32px_rgba(45,42,38,0.32)] motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 motion-safe:duration-500"
+                >
+                  {setupPlanningNoticeSettled
+                    ? locale === 'zh'
+                      ? '规划生成会继续在 SetupAgent 对话里完成；完成后会自动展示可审阅的启动计划。'
+                      : 'Planning will continue in the SetupAgent conversation and appear there when ready.'
+                    : setupPlanningNoticeLiveLine}
+                </div>
+                <div className="mt-4 overflow-hidden rounded-full bg-[rgba(45,42,38,0.08)]">
+                  <div
+                    className={cn(
+                      'h-1.5 rounded-full bg-[linear-gradient(90deg,rgba(199,173,150,0.95),rgba(157,185,198,0.95))] transition-[width,opacity] duration-700 ease-out',
+                      setupPlanningNoticeSettled && 'opacity-80'
+                    )}
+                    style={{ width: `${Math.round(setupPlanningNoticeProgress * 100)}%` }}
+                  />
+                </div>
+                <PlanningStepsPulse
+                  locale={locale}
+                  className="mt-4"
+                  activeIndex={setupPlanningNoticePhaseIndex}
+                  settled={setupPlanningNoticeSettled}
+                />
+                <div className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
+                  {setupPlanningNoticeCards.map((card, index) => {
+                    const revealed = index < setupPlanningNoticeVisibleSectionCount
+                    const active = !setupPlanningNoticeSettled && revealed && index === setupPlanningNoticeVisibleSectionCount - 1
+                    const completed = setupPlanningNoticeSettled || index < setupPlanningNoticeVisibleSectionCount - 1
+                    return (
+                      <div
+                        key={card.title}
+                        className={cn(
+                          'min-h-[132px] rounded-[18px] border px-3.5 py-3 transition-all duration-500',
+                          active
+                            ? 'border-[rgba(126,77,42,0.20)] bg-white/86 text-[rgba(45,42,38,0.92)] shadow-[0_18px_42px_-30px_rgba(126,77,42,0.34)] ring-1 ring-[rgba(199,173,150,0.28)]'
+                            : revealed
+                              ? 'border-[rgba(45,42,38,0.08)] bg-white/72 text-[rgba(45,42,38,0.86)] shadow-[0_12px_32px_-28px_rgba(45,42,38,0.28)]'
+                              : 'border-[rgba(45,42,38,0.05)] bg-[rgba(248,245,240,0.72)] text-[rgba(107,103,97,0.62)]'
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.14em]">
+                            {card.title}
+                          </div>
+                          <span
+                            className={cn(
+                              'mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] transition-all duration-500',
+                              completed
+                                ? 'border-[rgba(88,122,94,0.18)] bg-[rgba(88,122,94,0.12)] text-[rgba(57,96,65,0.95)]'
+                                : active
+                                  ? 'border-[rgba(126,77,42,0.18)] bg-[rgba(199,173,150,0.20)] text-[rgba(126,77,42,0.95)]'
+                                  : 'border-[rgba(45,42,38,0.08)] bg-white/42 text-[rgba(107,103,97,0.58)]'
+                            )}
+                          >
+                            {completed ? '✓' : active ? '•' : index + 1}
+                          </span>
+                        </div>
+                        <div className="mt-2 text-[12px] leading-5 text-[rgba(86,82,77,0.78)]">
+                          {active ? card.activeBody : card.body}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[rgba(107,103,97,0.72)] transition hover:bg-black/[0.04] hover:text-[rgba(45,42,38,0.94)]"
+                onClick={() => {
+                  closeSetupPlanningNotice()
+                }}
+                aria-label={locale === 'zh' ? '关闭规划提示' : 'Close planning notice'}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <DeepXivSetupDialog open={deepxivSetupOpen} onClose={() => setDeepxivSetupOpen(false)} locale={locale} />
     </>
   )
