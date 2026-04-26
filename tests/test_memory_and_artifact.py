@@ -423,6 +423,18 @@ def test_apply_start_setup_form_patch_persists_and_merges_suggested_form(temp_ho
             "goal": "Run the benchmark faithfully.",
             "runtime_constraints": "- Use only GPU 0 after confirmation",
         },
+        session_patch={
+            "recommended_workspace_mode": "copilot",
+            "launch_readiness": "needs_confirmation",
+            "missing_confirmations": ["Confirm whether external API keys may be used."],
+            "fit_assessment": {
+                "verdict": "copilot_recommended",
+                "summary": "The task still needs repeated human guidance before autonomous launch is safe.",
+            },
+            "preview_plan": {
+                "summary": "If launched, the system would first normalize the baseline, then evaluate whether a durable optimization loop is actually possible.",
+            },
+        },
         message="Prepared a merged setup draft.",
     )
 
@@ -431,6 +443,7 @@ def test_apply_start_setup_form_patch_persists_and_merges_suggested_form(temp_ho
     assert result["suggested_form"]["title"] == "Original setup title"
     assert result["suggested_form"]["goal"] == "Run the benchmark faithfully."
     assert result["suggested_form"]["runtime_constraints"] == "- Use only GPU 0 after confirmation"
+    assert result["session_patch"]["recommended_workspace_mode"] == "copilot"
 
     persisted = quest_service.read_quest_yaml(quest_root)
     startup_contract = persisted.get("startup_contract") if isinstance(persisted.get("startup_contract"), dict) else {}
@@ -443,6 +456,46 @@ def test_apply_start_setup_form_patch_persists_and_merges_suggested_form(temp_ho
     assert suggested_form["title"] == "Original setup title"
     assert suggested_form["goal"] == "Run the benchmark faithfully."
     assert suggested_form["runtime_constraints"] == "- Use only GPU 0 after confirmation"
+    assert start_setup_session["recommended_workspace_mode"] == "copilot"
+    assert start_setup_session["launch_readiness"] == "needs_confirmation"
+    assert start_setup_session["missing_confirmations"] == ["Confirm whether external API keys may be used."]
+    assert start_setup_session["fit_assessment"]["verdict"] == "copilot_recommended"
+    assert "normalize the baseline" in str(start_setup_session["preview_plan"]["summary"])
+
+
+def test_apply_start_setup_form_patch_allows_session_patch_without_form_changes(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create(
+        "start setup session-only patch quest",
+        startup_contract={
+            "workspace_mode": "copilot",
+            "start_setup_session": {
+                "source": "manual",
+                "locale": "zh",
+                "suggested_form": {
+                    "title": "Session-only test",
+                },
+            },
+        },
+    )
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    result = artifact.apply_start_setup_form_patch(
+        quest_root,
+        session_patch={
+            "recommended_workspace_mode": "copilot",
+            "launch_readiness": "not_ready",
+            "missing_confirmations": ["Need a clearer task boundary."],
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["form_patch"] == {}
+    assert result["suggested_form"]["title"] == "Session-only test"
+    assert result["session_patch"]["launch_readiness"] == "not_ready"
 
 
 def test_confirm_baseline_strict_flattens_canonical_metric_summary(temp_home: Path) -> None:
@@ -1505,7 +1558,9 @@ def test_writing_facing_analysis_campaign_requires_selected_outline_and_todo_map
             ],
         )
 
-    assert "selected_outline_ref" in str(exc_info.value)
+        assert "selected_outline_ref" in str(exc_info.value)
+        assert "submit_paper_outline" in str(exc_info.value)
+        assert "analysis-lite" in str(exc_info.value)
 
 
 def test_artifact_stage_milestones_emit_semantic_connector_messages(temp_home: Path, monkeypatch) -> None:
@@ -2114,7 +2169,7 @@ def test_supplementary_experiment_protocol_supports_runtime_ref_queries_and_unif
     assert by_ref[manifest_after["parent_branch"]]["workflow_state"]["writing_state"] == "ready"
 
 
-def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path) -> None:
+def test_submit_paper_bundle_writes_draft_checkpoint_without_finalize(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
     quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
@@ -2166,16 +2221,21 @@ def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path
     baseline_inventory = read_json(Path(result["baseline_inventory_path"]), {})
     assert baseline_inventory["schema_version"] == 1
     manifest = read_json(Path(result["manifest_path"]), {})
+    assert manifest["package_type"] == "draft_checkpoint"
     assert manifest["prepare_open_source"] is False
     assert manifest["open_source_manifest_path"] is None
     assert manifest["open_source_cleanup_plan_path"] is None
     snapshot = quest_service.snapshot(quest["quest_id"])
-    assert snapshot["active_anchor"] == "finalize"
+    assert snapshot["active_anchor"] == "write"
     assert snapshot["continuation_policy"] == "wait_for_user_or_resume"
     assert snapshot["continuation_anchor"] == "decision"
-    assert snapshot["continuation_reason"] == "paper_bundle_submitted"
-    assert snapshot["paper_contract_health"]["closure_state"] == "delivery_ready"
-    assert snapshot["paper_contract_health"]["delivery_state"] == "bundle_ready"
+    assert snapshot["continuation_reason"] == "paper_draft_checkpoint_submitted"
+    assert snapshot["paper_contract_health"]["closure_state"] == "draft_checkpoint_continue_writing"
+    assert snapshot["paper_contract_health"]["delivery_state"] == "draft_checkpoint_ready"
+    assert snapshot["paper_contract_health"]["draft_checkpoint_ready"] is True
+    assert snapshot["paper_contract_health"]["finalize_ready"] is False
+    assert snapshot["paper_contract_health"]["submission_ready"] is False
+    assert Path(result["manuscript_coverage_path"]).exists()
     assert snapshot["paper_evidence"]["item_count"] == 0
     assert snapshot["paper_lines"][0]["paper_line_id"] == result["paper_line_state"]["paper_line_id"]
 
@@ -2190,6 +2250,100 @@ def test_submit_paper_bundle_writes_manifest_and_advances_anchor(temp_home: Path
     )
     assert stage_view["stage_key"] == "paper"
     assert any(item["label"] == "Bundle Manifest" for item in stage_view["sections"]["key_files"])
+
+
+def test_validate_manuscript_coverage_blocks_short_memo_as_full_paper(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("paper coverage quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Coverage Outline",
+        detailed_outline={
+            "title": "Coverage Outline",
+            "research_questions": ["RQ-coverage"],
+            "experimental_designs": ["Exp-coverage"],
+            "contributions": ["C-coverage"],
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Use this for coverage validation.",
+    )
+    paper_root = quest_service.active_workspace_root(quest_root) / "paper"
+    paper_root.mkdir(parents=True, exist_ok=True)
+    (paper_root / "draft.md").write_text("# Short Memo\n\nOne paragraph.\n", encoding="utf-8")
+
+    coverage_result = artifact.validate_manuscript_coverage(quest_root, detail="full")
+    coverage = coverage_result["manuscript_coverage"]
+
+    assert coverage["draft_checkpoint_ready"] is True
+    assert coverage["manuscript_ready"] is False
+    assert coverage["submission_ready"] is False
+    assert coverage["one_section_only"] is True
+    assert any("fewer than 5 section" in item for item in coverage["manuscript_blockers"])
+
+
+def test_paper_experiment_matrix_preserves_same_item_analysis_rows(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("paper matrix duplicate quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Matrix Outline",
+        detailed_outline={
+            "title": "Matrix Outline",
+            "sections": [
+                {
+                    "section_id": "analysis",
+                    "title": "Analysis",
+                    "paper_role": "main_text",
+                    "required_items": ["shared-item"],
+                    "result_table": [
+                        {
+                            "item_id": "shared-item",
+                            "kind": "analysis_slice",
+                            "campaign_id": "analysis-a",
+                            "slice_id": "robustness",
+                            "status": "completed",
+                            "result_summary": "Robustness check passed.",
+                        },
+                        {
+                            "item_id": "shared-item",
+                            "kind": "analysis_slice",
+                            "campaign_id": "analysis-b",
+                            "slice_id": "failure",
+                            "status": "completed",
+                            "result_summary": "Failure modes identified.",
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Use this for matrix validation.",
+    )
+
+    matrix = read_json(quest_service.active_workspace_root(quest_root) / "paper" / "paper_experiment_matrix.json", {})
+    shared_rows = [row for row in matrix["rows"] if row["item_id"] == "shared-item"]
+    assert len(shared_rows) == 2
+    assert {row["slice_id"] for row in shared_rows} == {"robustness", "failure"}
 
 
 def test_submit_paper_bundle_can_prepare_open_source_when_enabled(temp_home: Path) -> None:
