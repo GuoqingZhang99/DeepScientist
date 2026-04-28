@@ -7619,14 +7619,16 @@ class QuestService:
 
     @staticmethod
     def _skip_explorer_profile_relative(relative: str, profile: str | None) -> bool:
-        if profile != "mobile":
+        if profile not in {"mobile", "workspace"}:
             return False
         normalized = relative.strip("/")
         if not normalized:
             return False
         parts = PurePosixPath(normalized).parts
         top = parts[0] if parts else normalized
-        if top in {".codex", ".claude", ".kimi", ".opencode", ".ds", "tmp", "userfiles", "artifacts"}:
+        if top in {".codex", ".claude", ".kimi", ".opencode", ".ds", "tmp", "userfiles"}:
+            return True
+        if profile == "mobile" and top == "artifacts":
             return True
         if top.startswith(".") and normalized not in {".gitignore"}:
             return True
@@ -7634,7 +7636,7 @@ class QuestService:
 
     @staticmethod
     def _truncate_explorer_directory(relative: str, *, profile: str | None, depth: int) -> bool:
-        if profile != "mobile":
+        if profile not in {"mobile", "workspace"}:
             return False
         normalized = relative.strip("/")
         if not normalized:
@@ -7643,11 +7645,19 @@ class QuestService:
         top = parts[0] if parts else normalized
         if top == "memory":
             return False
+        if profile == "mobile":
+            if top == "baselines":
+                return depth >= 1
+            if top in {"literature", "paper", "experiments", "handoffs"}:
+                return depth >= 2
+            return depth >= 1
         if top == "baselines":
+            return depth >= 2
+        if top == "artifacts":
             return depth >= 1
         if top in {"literature", "paper", "experiments", "handoffs"}:
-            return depth >= 2
-        return depth >= 1
+            return depth >= 3
+        return depth >= 2
 
     @staticmethod
     def _classify_path_scope(quest_root: Path, path: Path) -> tuple[str, bool]:
