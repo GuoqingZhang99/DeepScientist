@@ -98,8 +98,8 @@ DeepScientist ships four built-in runner paths:
 
 Important installation detail:
 
-- DeepScientist prefers the `codex` already available on your machine and only falls back to the bundled npm dependency when no local Codex path is available.
-- DeepScientist does not auto-install or auto-authenticate Claude Code or OpenCode for you. For those two paths, make the CLI work first, then let DeepScientist reuse it.
+- DeepScientist prefers runner CLIs already available on your machine and only falls back to bundled npm helper copies when a compatible package-local binary is present.
+- DeepScientist does not auto-authenticate Claude Code, Kimi Code, or OpenCode for you. For those paths, make the CLI work first, then let DeepScientist reuse it.
 
 If `codex` is still missing afterward, repair it explicitly:
 

@@ -169,6 +169,22 @@ print_optional_latex_notice() {
   fi
 }
 
+print_runner_notice() {
+  printf '\n'
+  printf 'Runner selection:\n'
+  printf '  - You do not need to choose every runner during installation.\n'
+  printf '  - Start with the default Codex lane first: %s\n' "$BIN_DIR/ds"
+  printf '  - After the Web workspace opens, you can configure or switch runners from Settings.\n'
+  printf '  - One-off launch examples when the CLI already works in your shell:\n'
+  printf '      %s --runner claude\n' "$BIN_DIR/ds"
+  printf '      %s --runner kimi\n' "$BIN_DIR/ds"
+  printf '      %s --runner opencode\n' "$BIN_DIR/ds"
+  printf '  - Diagnostics examples:\n'
+  printf '      %s doctor --runner claude\n' "$BIN_DIR/ds"
+  printf '      %s doctor --runner kimi\n' "$BIN_DIR/ds"
+  printf '      %s doctor --runner opencode\n' "$BIN_DIR/ds"
+}
+
 resolve_path() {
   if command -v python3 >/dev/null 2>&1; then
     python3 - "$1" <<'PY'
@@ -583,6 +599,7 @@ printf 'Start web workspace: %s\n' "$BIN_DIR/ds --web"
 printf 'Default start: %s\n' "$BIN_DIR/ds"
 printf 'When `ds` starts, it prints the local Web URL and opens it automatically when supported.\n'
 printf 'If `uv` is missing, the first `ds` start will bootstrap a local copy automatically under the DeepScientist home.\n'
+print_runner_notice
 if [ "$DIR_SET" -eq 1 ] && [ "$BIN_DIR_SET" -eq 0 ] && [ -z "$ENV_BIN_DIR" ]; then
   printf 'Custom install dir detected; launcher wrappers were still refreshed in the default global bin dir: %s\n' "$BIN_DIR"
   printf 'If you prefer install-local wrappers instead, rerun with: --bin-dir %s/bin\n' "$BASE_DIR"

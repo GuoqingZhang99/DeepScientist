@@ -38,13 +38,36 @@ const UPDATE_CHECK_TTL_MS = 12 * 60 * 60 * 1000;
 
 const optionsWithValues = new Set(['--home', '--host', '--port', '--quest-id', '--mode', '--proxy', '--codex-profile', '--codex', '--auth', '--runner']);
 
+function normalizeRunnerName(value, fallback = '') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, '-');
+  if (!normalized) return fallback;
+  if (normalized === 'claude-code' || normalized === 'claudecode') return 'claude';
+  if (normalized === 'kimi-code' || normalized === 'kimicode') return 'kimi';
+  if (normalized === 'open-code' || normalized === 'open code' || normalized === 'opencode-ai' || normalized === 'opencodeai') return 'opencode';
+  return normalized.replace(/-/g, '');
+}
+
+function runnerDisplayName(value) {
+  const normalized = normalizeRunnerName(value, 'codex');
+  return {
+    codex: 'Codex',
+    claude: 'Claude Code',
+    kimi: 'Kimi Code',
+    opencode: 'OpenCode',
+  }[normalized] || normalized || 'runner';
+}
+
 function buildCodexOverrideEnv({ yolo = true, profile = null, binary = null, runner = null } = {}) {
   const normalizedProfile = typeof profile === 'string' ? profile.trim() : '';
   const normalizedBinary = typeof binary === 'string' ? binary.trim() : '';
-  const normalizedRunner = typeof runner === 'string' ? runner.trim().toLowerCase() : '';
+  const normalizedRunner = normalizeRunnerName(runner);
   const overrides = {};
   if (normalizedRunner) {
     overrides.DEEPSCIENTIST_DEFAULT_RUNNER = normalizedRunner;
+    overrides.DEEPSCIENTIST_ENABLE_RUNNER = normalizedRunner;
   }
   if (normalizedBinary) {
     overrides.DEEPSCIENTIST_CODEX_BINARY = normalizedBinary;
@@ -175,7 +198,7 @@ Launcher flags:
   --here                Create/use ./DeepScientist under the current working directory as home
   --proxy <url>         Use an outbound HTTP/WS proxy for npm and Python runtime traffic
   --yolo [true|false]   Control Codex YOLO mode. Default is true; pass false to restore on-request + workspace-write
-  --runner <name>      Select builtin runner for this launch: codex, claude, or opencode
+  --runner <name>      Select builtin runner for this launch: codex, claude, kimi, or opencode
   --codex-profile <id>  Run DeepScientist with a specific Codex profile, for example \`m27\`
   --codex <path>        Run DeepScientist with a specific Codex executable path for this launch
   --quest-id <id>       Open the TUI on one quest directly
@@ -944,15 +967,19 @@ function pythonVersionText(probe) {
   return version;
 }
 
-function renderLaunchHints({ home, url, bindUrl, pythonSelection, yolo, authEnabled, authToken }) {
+function renderLaunchHints({ home, url, bindUrl, pythonSelection, yolo, authEnabled, authToken, runnerName }) {
+  const normalizedRunner = normalizeRunnerName(runnerName, 'codex');
   const runtimeRows = [
     ['Version', packageJson.version],
     ['Home', truncateMiddle(home)],
     ['Browser URL', url],
     ['Bind URL', bindUrl],
     ['Python', truncateMiddle(pythonVersionText(pythonSelection))],
-    ['Codex mode', yolo ? 'YOLO (never + danger-full-access)' : 'Default (on-request + workspace-write)'],
+    ['Runner', runnerDisplayName(normalizedRunner)],
   ];
+  if (normalizedRunner === 'codex') {
+    runtimeRows.push(['Codex mode', yolo ? 'YOLO (never + danger-full-access)' : 'Default (on-request + workspace-write)']);
+  }
   if (authEnabled && authToken) {
     runtimeRows.splice(4, 0, ['Auth token', authToken]);
   }
@@ -994,6 +1021,7 @@ function printLaunchCard({
   yolo,
   authEnabled,
   authToken,
+  runnerName,
 }) {
   const width = Math.max(72, Math.min(process.stdout.columns || 100, 108));
   const divider = colorize('\u001B[38;5;245m', '─'.repeat(Math.max(36, width - 6)));
@@ -1063,7 +1091,7 @@ function printLaunchCard({
   console.log(centerText('Need to move this installation later? Use ds migrate /new/path.', width));
   console.log(centerText(officialRepositoryLine(), width));
   console.log('');
-  renderLaunchHints({ home, url, bindUrl, pythonSelection, yolo, authEnabled, authToken });
+  renderLaunchHints({ home, url, bindUrl, pythonSelection, yolo, authEnabled, authToken, runnerName });
 }
 
 function escapeHtml(value) {
@@ -1078,18 +1106,25 @@ function escapeHtml(value) {
 function writeRunnerPreflightReport(home, runnerName, probe) {
   const reportDir = path.join(home, 'runtime', 'preflight');
   ensureDir(reportDir);
-  const reportPath = path.join(reportDir, `${String(runnerName || 'runner').trim().toLowerCase() || 'runner'}-preflight.html`);
+  const normalizedRunner = normalizeRunnerName(runnerName, 'runner');
+  const runnerLabel = {
+    codex: 'Codex',
+    claude: 'Claude Code',
+    kimi: 'Kimi Code',
+    opencode: 'OpenCode',
+  }[normalizedRunner] || String(runnerName || 'runner').trim() || 'runner';
+  const reportPath = path.join(reportDir, `${normalizedRunner}-preflight.html`);
   const warnings = Array.isArray(probe?.warnings) ? probe.warnings : [];
   const errors = Array.isArray(probe?.errors) ? probe.errors : [];
   const guidance = Array.isArray(probe?.guidance) ? probe.guidance : [];
   const details = probe && typeof probe.details === 'object' ? probe.details : {};
   const profile = typeof details.profile === 'string' ? details.profile.trim() : '';
-  const intro = profile
-    ? `DeepScientist blocked startup because the Codex hello probe did not pass for profile \`${profile}\`. Verify that \`codex --profile ${profile}\` works on this machine and that the profile's provider-specific API key, Base URL, and model configuration are already set up.`
-    : 'DeepScientist blocked startup because the Codex hello probe did not pass. In most installs, `npm install -g @researai/deepscientist` also installs the bundled Codex dependency. If `codex` is still missing, repair it with `npm install -g @openai/codex`. Then run `codex login` (or just `codex`), finish authentication, run `ds doctor`, and launch `ds` again.';
-  const introZh = profile
-    ? `DeepScientist 启动前进行了 Codex 可用性检查，但 profile \`${profile}\` 的 hello 探测没有通过。请先确认 \`codex --profile ${profile}\` 在当前机器上可以正常启动，并确保该 profile 依赖的 provider API Key、Base URL 和模型配置都已经在 Codex 中配置好。`
-    : 'DeepScientist 启动前进行了 Codex 可用性检查，但 hello 探测没有通过。正常情况下，`npm install -g @researai/deepscientist` 也会一并安装 bundled Codex 依赖；如果此后 `codex` 仍不可用，请再执行 `npm install -g @openai/codex` 修复。然后运行 `codex login`（或直接运行 `codex`）完成认证，再执行 `ds doctor`，最后重新启动 `ds`。';
+  const intro = profile && normalizedRunner === 'codex'
+    ? `DeepScientist blocked startup because the ${runnerLabel} hello probe did not pass for profile \`${profile}\`. Verify that \`codex --profile ${profile}\` works on this machine and that the profile's provider-specific API key, Base URL, and model configuration are already set up.`
+    : `DeepScientist blocked startup because the selected runner (${runnerLabel}) did not pass its startup probe. Start DeepScientist with a runner that already works, or enter the web workspace with the default runner and configure another runner later from Settings.`;
+  const introZh = profile && normalizedRunner === 'codex'
+    ? `DeepScientist 启动前进行了 ${runnerLabel} 可用性检查，但 profile \`${profile}\` 的 hello 探测没有通过。请先确认 \`codex --profile ${profile}\` 在当前机器上可以正常启动，并确保该 profile 依赖的 provider API Key、Base URL 和模型配置都已经在 Codex 中配置好。`
+    : `DeepScientist 启动前检查了所选 runner（${runnerLabel}），但它没有通过启动探测。你可以先用已经可用的默认 runner 进入 Web 工作区，再在 Settings 里配置或切换 Claude Code / Kimi Code / OpenCode。`;
   const renderItems = (items, tone) =>
     items
       .map(
@@ -1154,7 +1189,7 @@ function writeRunnerPreflightReport(home, runnerName, probe) {
         <p class="meta">${escapeHtml(introZh)}</p>
 
         <h2>Summary</h2>
-        <p>${escapeHtml(probe?.summary || 'Codex startup probe failed.')}</p>
+        <p>${escapeHtml(probe?.summary || `${runnerLabel} startup probe failed.`)}</p>
 
         ${errors.length ? `<h2>Errors</h2><ul>${renderItems(errors, 'error')}</ul>` : ''}
         ${warnings.length ? `<h2>Warnings</h2><ul>${renderItems(warnings, 'warn')}</ul>` : ''}
@@ -1328,13 +1363,16 @@ function probeRunnerReady(home, runtimePython, runnerName, envOverrides = {}) {
   return probeRunnerBootstrap(home, runtimePython, runnerName, envOverrides);
 }
 
-function resolveStartupRunner(home, runtimePython, preferredRunner, envOverrides = {}) {
-  const normalizedPreferred = String(preferredRunner || 'codex').trim().toLowerCase() || 'codex';
+function resolveStartupRunner(home, runtimePython, preferredRunner, envOverrides = {}, options = {}) {
+  const normalizedPreferred = normalizeRunnerName(preferredRunner, 'codex');
   const enabled = readEnabledRunnerNames(home, runtimePython, envOverrides);
-  const ordered = [
-    normalizedPreferred,
-    ...enabled.filter((name) => name !== normalizedPreferred),
-  ];
+  const allowFallback = options.allowFallback !== false;
+  const ordered = allowFallback
+    ? [
+        normalizedPreferred,
+        ...enabled.filter((name) => name !== normalizedPreferred),
+      ]
+    : [normalizedPreferred];
   const seen = new Set();
   const candidates = ordered.filter((name) => {
     if (!name || seen.has(name)) return false;
@@ -1429,7 +1467,7 @@ function probeCodexBootstrap(home, runtimePython, envOverrides = {}) {
 
 function createRunnerPreflightError(home, runnerName, probe) {
   const report = writeRunnerPreflightReport(home, runnerName, probe);
-  const normalizedRunner = String(runnerName || 'codex').trim().toLowerCase() || 'codex';
+  const normalizedRunner = normalizeRunnerName(runnerName, 'codex');
   const error = new Error(probe?.summary || `${normalizedRunner} startup probe failed.`);
   error.code = 'DS_RUNNER_PREFLIGHT';
   error.runnerName = normalizedRunner;
@@ -4902,7 +4940,7 @@ function readConfiguredUiAddressFromFile(home, fallbackHost, fallbackPort) {
   }
 }
 
-async function startDaemon(home, runtimePython, host, port, proxy = null, envOverrides = {}, authEnabled = false, runnerName = null) {
+async function startDaemon(home, runtimePython, host, port, proxy = null, envOverrides = {}, authEnabled = false, runnerName = null, allowRunnerFallback = true) {
   const browserUrl = browserUiUrl(host, port);
   const daemonBindUrl = bindUiUrl(host, port);
   const state = readDaemonState(home);
@@ -4939,6 +4977,7 @@ async function startDaemon(home, runtimePython, host, port, proxy = null, envOve
         reused: true,
         authEnabled: stateAuthEnabled,
         authToken: resolvedAuthToken,
+        runnerName: normalizeRunnerName(runnerName || readConfiguredDefaultRunner(home, "codex"), "codex"),
       };
     }
     console.error(
@@ -4956,15 +4995,18 @@ async function startDaemon(home, runtimePython, host, port, proxy = null, envOve
     removeDaemonState(home);
   }
 
-  const requestedRunner = String(runnerName || readConfiguredDefaultRunner(home, "codex")).trim().toLowerCase() || "codex";
-  const startupRunner = resolveStartupRunner(home, runtimePython, requestedRunner, envOverrides);
+  const requestedRunner = normalizeRunnerName(runnerName || readConfiguredDefaultRunner(home, "codex"), "codex");
+  const startupRunner = resolveStartupRunner(home, runtimePython, requestedRunner, envOverrides, {
+    allowFallback: allowRunnerFallback,
+  });
   if (!startupRunner.ok) {
     throw createRunnerPreflightError(home, requestedRunner, startupRunner.probe);
   }
   const effectiveRunner = startupRunner.runnerName;
   const effectiveEnvOverrides = {
     ...envOverrides,
-    ...(effectiveRunner !== requestedRunner ? { DEEPSCIENTIST_DEFAULT_RUNNER: effectiveRunner } : {}),
+    DEEPSCIENTIST_DEFAULT_RUNNER: effectiveRunner,
+    DEEPSCIENTIST_ENABLE_RUNNER: effectiveRunner,
   };
   if (startupRunner.fallback) {
     console.log(`WARNING: ${requestedRunner} is not ready yet. Starting DeepScientist with fallback runner \`${effectiveRunner}\` for this session.`);
@@ -4997,7 +5039,7 @@ async function startDaemon(home, runtimePython, host, port, proxy = null, envOve
         host,
         port,
         proxy,
-        envOverrides,
+        envOverrides: effectiveEnvOverrides,
         daemonId: String((liveState || {}).daemon_id || ''),
       });
       if (supervisorPid) {
@@ -5009,6 +5051,7 @@ async function startDaemon(home, runtimePython, host, port, proxy = null, envOve
         reused: false,
         authEnabled,
         authToken: desiredAuthToken,
+        runnerName: effectiveRunner,
       };
     }
     await sleep(250);
@@ -5475,8 +5518,18 @@ async function launcherMain(rawArgs) {
   step(4, 4, 'Starting local daemon and UI surfaces');
   let started;
   try {
-    const selectedRunner = String(options.runner || readConfiguredDefaultRunner(home, "codex")).trim().toLowerCase() || "codex";
-    started = await startDaemon(home, runtimePython, host, port, options.proxy, codexOverrideEnv, authEnabled, selectedRunner);
+    const selectedRunner = normalizeRunnerName(options.runner || readConfiguredDefaultRunner(home, "codex"), "codex");
+    started = await startDaemon(
+      home,
+      runtimePython,
+      host,
+      port,
+      options.proxy,
+      codexOverrideEnv,
+      authEnabled,
+      selectedRunner,
+      !options.runner
+    );
   } catch (error) {
     if (handleRunnerPreflightFailure(error)) return true;
     throw error;
@@ -5494,6 +5547,7 @@ async function launcherMain(rawArgs) {
     yolo: options.yolo,
     authEnabled: started.authEnabled,
     authToken: started.authToken,
+    runnerName: started.runnerName || selectedRunner,
   });
 
   if (options.daemonOnly) {
@@ -5545,17 +5599,20 @@ async function main() {
     const home = resolveHome(args);
     const pythonRuntime = ensurePythonRuntime(home);
     const runtimePython = pythonRuntime.runtimePython;
+    const runnerOptionForEnv = positional.value === 'doctor' || positional.value === 'docker'
+      ? null
+      : readOptionValue(args, '--runner');
     const codexOverrideEnv = buildCodexOverrideEnv({
       yolo: resolveYoloFlag(args, true),
       profile: readOptionValue(args, '--codex-profile'),
       binary: readOptionValue(args, '--codex'),
-      runner: readOptionValue(args, '--runner'),
+      runner: runnerOptionForEnv,
     });
     if (positional.value === 'run' || positional.value === 'daemon') {
       maybePrintOptionalLatexNotice(home);
     }
     if (positional.value === 'run' || positional.value === 'daemon') {
-      const selectedRunner = String(readOptionValue(args, '--runner') || readConfiguredDefaultRunner(home, "codex")).trim().toLowerCase() || "codex";
+      const selectedRunner = normalizeRunnerName(readOptionValue(args, '--runner') || readConfiguredDefaultRunner(home, "codex"), "codex");
       const bootstrapState = selectedRunner === "codex"
         ? readCodexBootstrapState(home, runtimePython, codexOverrideEnv)
         : readRunnerBootstrapState(home, runtimePython, selectedRunner, codexOverrideEnv);

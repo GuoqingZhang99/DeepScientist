@@ -97,8 +97,8 @@ DeepScientist 现在内建四条 runner 路径：
 
 安装相关有一个很重要的差异：
 
-- 对 `codex`，DeepScientist 会优先使用你机器上已有的 `codex`，本机找不到时才回退到 npm 包里 bundled 的依赖。
-- 对 `claude` 和 `opencode`，DeepScientist 不会替你完成安装和认证；这两条路径都应该先让 CLI 本身跑通，再交给 DeepScientist 复用。
+- DeepScientist 会优先使用你机器上已有的 runner CLI；只有存在兼容的 package-local binary 时，才回退到 npm 包里的 helper。
+- 对 `claude`、`kimi` 和 `opencode`，DeepScientist 不会替你完成认证；这些路径都应该先让 CLI 本身跑通，再交给 DeepScientist 复用。
 
 如果安装完成后 `codex` 仍然不可用，请显式修复：
 

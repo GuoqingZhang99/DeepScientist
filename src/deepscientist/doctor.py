@@ -16,6 +16,7 @@ from .bash_exec.shells import build_exec_shell_launch, build_terminal_shell_laun
 from .config import ConfigManager
 from .diagnostics import diagnose_runner_failure
 from .home import ensure_home_layout
+from .runners.metadata import list_builtin_runner_names
 from .runtime_tools import RuntimeToolService
 from .shared import read_json, read_jsonl_tail, resolve_runner_binary, utc_now, utf8_text_subprocess_kwargs
 
@@ -230,7 +231,7 @@ def _check_config_validation(config_manager: ConfigManager) -> dict[str, Any]:
 
 def _check_runner_support(config_manager: ConfigManager) -> dict[str, Any]:
     config_payload = config_manager.load_named_normalized("config")
-    runners_payload = config_manager.load_named_normalized("runners")
+    runners_payload = config_manager.load_runners_config()
 
     default_runner = str(config_payload.get("default_runner") or "codex").strip().lower() or "codex"
     enabled_runners = sorted(
@@ -268,7 +269,7 @@ def _check_runner_support(config_manager: ConfigManager) -> dict[str, Any]:
 
 def _check_runner(config_manager: ConfigManager, runner_name: str) -> dict[str, Any]:
     normalized_runner = str(runner_name or "codex").strip().lower() or "codex"
-    runners_payload = config_manager.load_named_normalized("runners")
+    runners_payload = config_manager.load_runners_config()
     runner_cfg = runners_payload.get(normalized_runner) if isinstance(runners_payload.get(normalized_runner), dict) else {}
     binary = str(runner_cfg.get("binary") or normalized_runner).strip() or normalized_runner
     resolved_binary = resolve_runner_binary(binary, runner_name=normalized_runner)
@@ -683,6 +684,7 @@ def run_doctor(
     home: Path,
     *,
     repo_root: Path,
+    runner_names: list[str] | None = None,
     on_check: DoctorProgressCallback | None = None,
 ) -> dict[str, Any]:
     ensure_home_layout(home)
@@ -703,10 +705,18 @@ def run_doctor(
         ("config_validation", lambda: _check_config_validation(config_manager)),
         ("runner_support", lambda: _check_runner_support(config_manager)),
     ]
-    runners_payload = config_manager.load_named_normalized("runners")
+    runners_payload = config_manager.load_runners_config()
     default_runner = str(config_payload.get("default_runner") or "codex").strip().lower() or "codex"
     runner_targets: list[str] = []
-    for candidate in [default_runner, *sorted(name for name, value in runners_payload.items() if isinstance(value, dict) and bool(value.get("enabled", False)))]:
+    explicit_runner_names = _normalize_doctor_runner_targets(runner_names)
+    if explicit_runner_names:
+        candidate_runner_names = explicit_runner_names
+    else:
+        candidate_runner_names = [
+            default_runner,
+            *sorted(name for name, value in runners_payload.items() if isinstance(value, dict) and bool(value.get("enabled", False))),
+        ]
+    for candidate in candidate_runner_names:
         normalized_candidate = str(candidate or "").strip().lower()
         if normalized_candidate and normalized_candidate not in runner_targets:
             runner_targets.append(normalized_candidate)
@@ -739,6 +749,31 @@ def run_doctor(
         "browser_url": browser_url,
         "checks": checks,
     }
+
+
+def _normalize_doctor_runner_targets(runner_names: list[str] | None) -> list[str]:
+    targets: list[str] = []
+    seen: set[str] = set()
+    for raw_value in runner_names or []:
+        for item in str(raw_value or "").replace(";", ",").split(","):
+            normalized = item.strip().lower().replace("_", "-")
+            if normalized in {"all", "*"}:
+                candidates = list(list_builtin_runner_names())
+            else:
+                if normalized in {"claude-code", "claudecode"}:
+                    normalized = "claude"
+                elif normalized in {"kimi-code", "kimicode"}:
+                    normalized = "kimi"
+                elif normalized in {"open-code", "open code", "opencode-ai", "opencodeai"}:
+                    normalized = "opencode"
+                else:
+                    normalized = normalized.replace("-", "")
+                candidates = [normalized] if normalized else []
+            for candidate in candidates:
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    targets.append(candidate)
+    return targets
 
 
 def render_doctor_report(report: dict[str, Any]) -> str:

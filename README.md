@@ -40,6 +40,7 @@
   <a href="docs/en/12_GUIDED_WORKFLOW_TOUR.md">Product Tour</a> •
   <a href="docs/en/15_CODEX_PROVIDER_SETUP.md">Codex Setup</a> •
   <a href="docs/en/24_CLAUDE_CODE_PROVIDER_SETUP.md">Claude Setup</a> •
+  <a href="docs/en/27_KIMI_CODE_PROVIDER_SETUP.md">Kimi Setup</a> •
   <a href="docs/en/25_OPENCODE_PROVIDER_SETUP.md">OpenCode Setup</a>
 </p>
 
@@ -289,6 +290,15 @@ ds doctor --runner claude
 ds --here --runner claude
 ```
 
+If Kimi Code already works directly in your shell, use this lane:
+
+```bash
+npm install -g @researai/deepscientist
+kimi --version
+ds doctor --runner kimi
+ds --here --runner kimi
+```
+
 If OpenCode already works directly in your shell, use this lane:
 
 ```bash
@@ -338,8 +348,9 @@ If `which codex` still prints nothing after that, fix the npm global bin path fi
 
 Important runner note:
 
-- DeepScientist can fall back to the npm-bundled helper copy for `codex`
-- DeepScientist does not set up Claude Code or OpenCode for you; for those two paths, make `claude` or `opencode` work first, then run `ds doctor --runner <name>`
+- DeepScientist can fall back to npm-bundled helper copies for `codex`, `claude`, and `opencode` when they are installed with the package. Kimi Code is treated as an external CLI unless a compatible local `kimi` helper is present.
+- Runner authentication and provider configuration still belong to the underlying CLI. Make `codex`, `claude`, `kimi`, or `opencode` work once in your shell, then run `ds doctor --runner <name>`.
+- You can also start DeepScientist first with the default runner and switch/configure Claude Code, Kimi Code, or OpenCode later from the web workspace settings.
 
 After startup, the default local address is:
 
@@ -364,6 +375,7 @@ If this is your first run, prefer an isolated environment, a non-root user, and 
 - [00 Quick Start](docs/en/00_QUICK_START.md)
 - [15 Codex Provider Setup](docs/en/15_CODEX_PROVIDER_SETUP.md)
 - [24 Claude Code Setup](docs/en/24_CLAUDE_CODE_PROVIDER_SETUP.md)
+- [27 Kimi Code Setup](docs/en/27_KIMI_CODE_PROVIDER_SETUP.md)
 - [25 OpenCode Setup](docs/en/25_OPENCODE_PROVIDER_SETUP.md)
 - [09 Doctor](docs/en/09_DOCTOR.md)
 
@@ -387,6 +399,7 @@ If this is your first run, prefer an isolated environment, a non-root user, and 
 
 - [15 Codex Provider Setup](docs/en/15_CODEX_PROVIDER_SETUP.md)
 - [24 Claude Code Setup](docs/en/24_CLAUDE_CODE_PROVIDER_SETUP.md)
+- [27 Kimi Code Setup](docs/en/27_KIMI_CODE_PROVIDER_SETUP.md)
 - [25 OpenCode Setup](docs/en/25_OPENCODE_PROVIDER_SETUP.md)
 - [21 Local Model Backends Guide](docs/en/21_LOCAL_MODEL_BACKENDS_GUIDE.md)
 - [Weixin Connector Guide](docs/en/10_WEIXIN_CONNECTOR_GUIDE.md)

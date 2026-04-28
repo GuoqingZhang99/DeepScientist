@@ -54,7 +54,7 @@ from ..connector.weixin_support import normalize_weixin_base_url, normalize_weix
 from ..network import urlopen_with_proxy as urlopen
 from ..runners.metadata import get_runner_metadata, list_builtin_runner_names
 from ..runners.runtime_overrides import apply_codex_runtime_overrides, apply_runners_runtime_overrides
-from ..shared import ensure_utf8_subprocess_env, read_json, read_text, read_yaml, resolve_runner_binary, run_command, sha256_text, utc_now, utf8_text_subprocess_kwargs, which, write_text, write_yaml
+from ..shared import ensure_utf8_subprocess_env, read_json, read_text, read_yaml, resolve_runner_binary, run_command, sha256_text, utc_now, utf8_text_subprocess_kwargs, which, write_json, write_text, write_yaml
 from .models import (
     CONFIG_NAMES,
     OPTIONAL_CONFIG_NAMES,
@@ -528,12 +528,12 @@ The **Test** button checks:
 
 This is a safe local smoke test.
 
-## Codex startup gate
+## Runner startup gate
 
-- `bootstrap.codex_ready` starts as `false`
-- the launcher runs a real Codex hello probe before first daemon start
-- once Codex answers correctly, DeepScientist flips this flag to `true`
-- if the probe fails, DeepScientist writes the failure summary back into config and blocks startup
+- the launcher runs a real hello probe for the selected runner before first daemon start
+- `codex`, `claude`, `kimi`, and `opencode` can each record readiness under `bootstrap.runner_readiness`
+- if the selected runner fails, DeepScientist writes the failure summary back into config and blocks only that requested startup path
+- you can start with the default runner first, then configure or switch Claude Code / Kimi Code / OpenCode from Settings
 
 ## Figure and chart style policy
 
@@ -558,6 +558,7 @@ This page edits `{home_text}/config/runners.yaml`.
 - keep `codex.retry_on_failure: true` so transient Codex failures can resume automatically
 - keep retry timing near `10s / 6x / 1800s max` so Codex backs off exponentially and the final retries sit at the 30-minute cap
 - DeepScientist hard-limits one turn to at most `7` total attempts, even if the config says more
+- one-off diagnostics can target a runner without permanently enabling it: `ds doctor --runner claude`, `ds doctor --runner kimi`, or `ds doctor --runner opencode`
 
 ## Test behavior
 
@@ -565,7 +566,7 @@ The **Test** button checks:
 
 - whether the configured runner binaries are on PATH
 - whether disabled runners are intentionally skipped
-- for Codex, it also runs a real hello probe so login problems, profile misconfiguration, and first-run setup issues surface before quest execution
+- for enabled runners, it also runs a real hello probe so login problems, profile misconfiguration, and first-run setup issues surface before quest execution
 - it does not simulate the full failure/retry loop, so use quest runtime logs when debugging recovery behavior
 """
         if name == "plugins":
@@ -765,7 +766,7 @@ Use **Test** when the file exposes runtime dependencies.
 
     def probe_runner_bootstrap(self, runner_name: str, *, persist: bool = False, payload: dict | None = None) -> dict:
         normalized_runner = str(runner_name or "codex").strip().lower() or "codex"
-        runners_payload = payload if isinstance(payload, dict) else self.load_named_normalized("runners")
+        runners_payload = payload if isinstance(payload, dict) else self.load_runners_config()
         runner_payload = runners_payload.get(normalized_runner) if isinstance(runners_payload.get(normalized_runner), dict) else {}
         if normalized_runner == "codex":
             result = self._probe_codex_runner(runner_payload)
@@ -891,7 +892,8 @@ Use **Test** when the file exposes runtime dependencies.
 
     def _test_runners_payload(self, payload: dict, *, live: bool) -> dict:
         items = []
-        for name, config in payload.items():
+        normalized_payload = apply_runners_runtime_overrides(self._normalize_named_payload("runners", payload))
+        for name, config in normalized_payload.items():
             if not isinstance(config, dict):
                 continue
             enabled = bool(config.get("enabled", False))
@@ -914,8 +916,8 @@ Use **Test** when the file exposes runtime dependencies.
                     "live_probe_executed": False,
                 },
             }
-            if enabled and name == "codex" and exists and live:
-                probe = self._probe_codex_runner(config)
+            if enabled and exists and live:
+                probe = self.probe_runner_bootstrap(name, persist=False, payload=normalized_payload)
                 item["ok"] = bool(probe.get("ok"))
                 item["warnings"] = [*warnings, *list(probe.get("warnings") or [])]
                 item["errors"] = list(probe.get("errors") or [])
@@ -2567,6 +2569,7 @@ Use **Test** when the file exposes runtime dependencies.
         defaults = default_payload(name, self.home)
         if name == "runners":
             normalized = self._deep_merge(defaults, prepared)
+            runtime_enabled_runners = self._runtime_enabled_runner_names()
             codex = normalized.get("codex")
             if isinstance(codex, dict):
                 if self._looks_like_legacy_codex_retry_profile(codex):
@@ -2587,6 +2590,10 @@ Use **Test** when the file exposes runtime dependencies.
                     claude.pop("approval_policy", None)
                 if "sandbox_mode" in claude:
                     claude.pop("sandbox_mode", None)
+            for runner_name in runtime_enabled_runners:
+                runner_config = normalized.get(runner_name)
+                if isinstance(runner_config, dict):
+                    runner_config["enabled"] = True
             return normalized
         if name == "connectors":
             normalized = deepcopy(defaults)
@@ -2631,12 +2638,42 @@ Use **Test** when the file exposes runtime dependencies.
             return normalized
         return self._deep_merge(defaults, prepared)
 
+    @staticmethod
+    def _normalize_runtime_runner_name(value: object) -> str:
+        normalized = str(value or "").strip().lower().replace("_", "-")
+        if normalized in {"claude-code", "claudecode"}:
+            return "claude"
+        if normalized in {"kimi-code", "kimicode"}:
+            return "kimi"
+        if normalized in {"open-code", "open code", "opencode-ai", "opencodeai"}:
+            return "opencode"
+        return normalized.replace("-", "")
+
+    @classmethod
+    def _runtime_enabled_runner_names(cls) -> set[str]:
+        names: set[str] = set()
+        raw_values = [
+            os.environ.get("DEEPSCIENTIST_DEFAULT_RUNNER"),
+            os.environ.get("DS_DEFAULT_RUNNER"),
+            os.environ.get("DEEPSCIENTIST_ENABLE_RUNNER"),
+            os.environ.get("DS_ENABLE_RUNNER"),
+            os.environ.get("DEEPSCIENTIST_ENABLE_RUNNERS"),
+            os.environ.get("DS_ENABLE_RUNNERS"),
+        ]
+        for raw_value in raw_values:
+            for item in str(raw_value or "").replace(";", ",").split(","):
+                normalized = cls._normalize_runtime_runner_name(item)
+                if normalized:
+                    names.add(normalized)
+        return names
+
     def _normalize_config_payload(self, payload: dict) -> dict:
         defaults = default_payload("config", self.home)
         normalized = self._deep_merge(defaults, payload)
         default_runner_override = str(
             os.environ.get("DEEPSCIENTIST_DEFAULT_RUNNER") or os.environ.get("DS_DEFAULT_RUNNER") or ""
         ).strip().lower()
+        default_runner_override = self._normalize_runtime_runner_name(default_runner_override)
         if default_runner_override:
             normalized["default_runner"] = default_runner_override
         bootstrap = normalized.get("bootstrap") if isinstance(normalized.get("bootstrap"), dict) else {}
