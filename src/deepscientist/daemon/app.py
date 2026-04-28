@@ -3402,6 +3402,19 @@ class DaemonApp:
                         )
                         return
                     exhausted_summary = f"{failure_summary} Retry budget exhausted after {attempt_index} attempt(s)."
+                    diagnosis = self._runner_failure_diagnosis(
+                        runner_name=runner_name,
+                        summary=exhausted_summary,
+                        stderr_text=str(exc),
+                        output_text="",
+                    )
+                    if diagnosis is not None and diagnosis.retriable:
+                        self.quest_service.update_runtime_state(
+                            quest_root=quest_root,
+                            continuation_policy="wait_for_user_or_resume",
+                            continuation_reason=self._retry_exhausted_continuation_reason(diagnosis),
+                            continuation_updated_at=utc_now(),
+                        )
                     self._append_retry_event(
                         quest_id,
                         event_type="runner.turn_retry_exhausted",
@@ -3414,6 +3427,7 @@ class DaemonApp:
                         max_attempts=max_attempts,
                         summary=exhausted_summary,
                         failure_summary=failure_summary,
+                        diagnosis=diagnosis,
                     )
                     self._record_turn_error(
                         quest_id=quest_id,
@@ -3423,6 +3437,8 @@ class DaemonApp:
                         model=model,
                         summary=exhausted_summary,
                         retry_state=None,
+                        diagnosis_code=diagnosis.code if diagnosis is not None else None,
+                        guidance=list(diagnosis.guidance) if diagnosis is not None else None,
                     )
                     return
 
@@ -3576,6 +3592,19 @@ class DaemonApp:
                     return
 
                 exhausted_summary = f"{failure_summary} Retry budget exhausted after {attempt_index} attempt(s)."
+                diagnosis = self._runner_failure_diagnosis(
+                    runner_name=runner_name,
+                    summary=exhausted_summary,
+                    stderr_text=result.stderr_text,
+                    output_text=result.output_text,
+                )
+                if diagnosis is not None and diagnosis.retriable:
+                    self.quest_service.update_runtime_state(
+                        quest_root=quest_root,
+                        continuation_policy="wait_for_user_or_resume",
+                        continuation_reason=self._retry_exhausted_continuation_reason(diagnosis),
+                        continuation_updated_at=utc_now(),
+                    )
                 self._append_retry_event(
                     quest_id,
                     event_type="runner.turn_retry_exhausted",
@@ -3588,6 +3617,7 @@ class DaemonApp:
                     max_attempts=max_attempts,
                     summary=exhausted_summary,
                     failure_summary=failure_summary,
+                    diagnosis=diagnosis,
                 )
                 self._record_turn_error(
                     quest_id=quest_id,
@@ -3597,6 +3627,8 @@ class DaemonApp:
                     model=model,
                     summary=exhausted_summary,
                     retry_state=None,
+                    diagnosis_code=diagnosis.code if diagnosis is not None else None,
+                    guidance=list(diagnosis.guidance) if diagnosis is not None else None,
                 )
                 return
             finally:
@@ -4035,6 +4067,7 @@ class DaemonApp:
         backoff_seconds: float | None = None,
         next_attempt_index: int | None = None,
         previous_run_id: str | None = None,
+        diagnosis: FailureDiagnosis | None = None,
     ) -> dict[str, Any]:
         payload = {
             "event_id": generate_id("evt"),
@@ -4058,6 +4091,9 @@ class DaemonApp:
             payload["next_attempt_index"] = next_attempt_index
         if previous_run_id:
             payload["previous_run_id"] = previous_run_id
+        if diagnosis is not None:
+            payload["diagnosis_code"] = diagnosis.code
+            payload["diagnosis"] = self._failure_diagnosis_payload(diagnosis)
         append_jsonl(self.home / "quests" / quest_id / ".ds" / "events.jsonl", payload)
         self.logger.log(
             "warning" if "scheduled" in event_type or "exhausted" in event_type else "info",
@@ -4071,6 +4107,7 @@ class DaemonApp:
             backoff_seconds=backoff_seconds,
             next_attempt_index=next_attempt_index,
             previous_run_id=previous_run_id,
+            diagnosis_code=diagnosis.code if diagnosis is not None else None,
         )
         return payload
 
@@ -4263,6 +4300,34 @@ class DaemonApp:
         )
 
     @staticmethod
+    def _failure_diagnosis_payload(diagnosis: FailureDiagnosis) -> dict[str, Any]:
+        fix = [str(line) for line in diagnosis.guidance if str(line).strip()]
+        return {
+            "code": diagnosis.code,
+            "problem": diagnosis.problem,
+            "why": diagnosis.why,
+            "fix": fix,
+            "guidance": fix,
+            "retriable": bool(diagnosis.retriable),
+            "matched_text": diagnosis.matched_text,
+        }
+
+    @staticmethod
+    def _runner_failure_diagnosis(
+        *,
+        runner_name: str,
+        summary: str,
+        stderr_text: str,
+        output_text: str,
+    ) -> FailureDiagnosis | None:
+        return diagnose_runner_failure(
+            runner_name=runner_name,
+            summary=summary,
+            stderr_text=stderr_text,
+            output_text=output_text,
+        )
+
+    @staticmethod
     def _non_retryable_failure_diagnosis(
         *,
         runner_name: str,
@@ -4270,7 +4335,7 @@ class DaemonApp:
         stderr_text: str,
         output_text: str,
     ) -> FailureDiagnosis | None:
-        diagnosis = diagnose_runner_failure(
+        diagnosis = DaemonApp._runner_failure_diagnosis(
             runner_name=runner_name,
             summary=summary,
             stderr_text=stderr_text,
@@ -4279,6 +4344,12 @@ class DaemonApp:
         if diagnosis is None or diagnosis.retriable:
             return None
         return diagnosis
+
+    @staticmethod
+    def _retry_exhausted_continuation_reason(diagnosis: FailureDiagnosis) -> str:
+        if diagnosis.code == "codex_upstream_provider_error":
+            return "external_codex_upstream_provider_error"
+        return "runner_retry_budget_exhausted"
 
     def _record_turn_postprocess_warning(
         self,
