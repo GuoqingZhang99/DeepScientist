@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { X } from 'lucide-react'
 
 import { useToast } from '@/components/ui/toast'
 import { useQuestMessageAttachments, type QuestMessageAttachmentDraft } from '@/lib/hooks/useQuestMessageAttachments'
@@ -224,8 +225,39 @@ export function QuestStudioTraceView({
   const waitingNoticeMessage = String(waitingNotice?.message || '').trim()
   const waitingNoticeLabel = String(waitingNotice?.label || '').trim()
   const waitingNoticeReason = String(waitingNotice?.reason || snapshot?.continuation_reason || '').trim()
+  const waitingNoticeCreatedAt = String(waitingNotice?.created_at || '').trim()
+  const waitingNoticeKey = React.useMemo(
+    () =>
+      [
+        waitingNoticeStatus,
+        waitingNoticeLabel,
+        waitingNoticeMessage,
+        waitingNoticeReason,
+        waitingNoticeCreatedAt,
+      ].join('|'),
+    [
+      waitingNoticeCreatedAt,
+      waitingNoticeLabel,
+      waitingNoticeMessage,
+      waitingNoticeReason,
+      waitingNoticeStatus,
+    ]
+  )
+  const [dismissedWaitingNoticeKey, setDismissedWaitingNoticeKey] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    if (waitingNoticeStatus !== 'auto_resumed' || !waitingNoticeKey) return
+    const timer = window.setTimeout(() => {
+      setDismissedWaitingNoticeKey(waitingNoticeKey)
+    }, 10_000)
+    return () => window.clearTimeout(timer)
+  }, [waitingNoticeKey, waitingNoticeStatus])
+  const dismissWaitingNotice = React.useCallback(() => {
+    if (!waitingNoticeKey) return
+    setDismissedWaitingNoticeKey(waitingNoticeKey)
+  }, [waitingNoticeKey])
   const waitingBanner = React.useMemo(() => {
     if (waitingNoticeStatus !== 'waiting' && waitingNoticeStatus !== 'auto_resumed') return null
+    if (dismissedWaitingNoticeKey === waitingNoticeKey) return null
     const isWaiting = waitingNoticeStatus === 'waiting'
     const title = waitingNoticeLabel || (isWaiting
       ? t('copilot_waiting_feedback', undefined, 'Waiting for feedback')
@@ -236,22 +268,45 @@ export function QuestStudioTraceView({
     return (
       <div
         className={[
-          'mx-4 mt-3 rounded-2xl border px-4 py-3 text-sm shadow-sm',
+          'mx-4 mt-3 rounded-xl border px-4 py-3 text-sm shadow-[0_14px_38px_rgba(85,75,65,0.10)] backdrop-blur-md',
           isWaiting
-            ? 'border-amber-500/30 bg-amber-500/10 text-amber-950 dark:border-amber-300/25 dark:bg-amber-300/10 dark:text-amber-100'
-            : 'border-emerald-500/25 bg-emerald-500/10 text-emerald-950 dark:border-emerald-300/25 dark:bg-emerald-300/10 dark:text-emerald-100',
+            ? 'border-[#cab79f]/55 bg-[#f3eee7]/95 text-[#574b3f] dark:border-[#b8a58d]/35 dark:bg-[#302b26]/92 dark:text-[#eee4d6]'
+            : 'border-[#a9b8ab]/55 bg-[#edf2ee]/95 text-[#405047] dark:border-[#9caf9f]/35 dark:bg-[#24302a]/92 dark:text-[#dfe9e1]',
         ].join(' ')}
       >
         <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] opacity-75">{title}</div>
-            <div className="mt-1 leading-5">{body}</div>
-            {waitingNoticeReason ? <div className="mt-1 text-xs opacity-70">{waitingNoticeReason}</div> : null}
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] opacity-75">{title}</div>
+            <div className="mt-1 leading-5 text-[13px]">{body}</div>
+            {waitingNoticeReason ? <div className="mt-1 text-xs opacity-65">{waitingNoticeReason}</div> : null}
           </div>
+          <button
+            type="button"
+            onClick={dismissWaitingNotice}
+            className={[
+              'mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border transition-colors',
+              isWaiting
+                ? 'border-[#cdbda8]/55 bg-white/30 text-[#6a5b4c] hover:bg-white/55 dark:border-[#9d8a72]/35 dark:bg-white/[0.06] dark:text-[#e8d9c5] dark:hover:bg-white/[0.12]'
+                : 'border-[#aebdaf]/55 bg-white/35 text-[#4c6355] hover:bg-white/60 dark:border-[#89a08d]/35 dark:bg-white/[0.06] dark:text-[#d5e5d8] dark:hover:bg-white/[0.12]',
+            ].join(' ')}
+            aria-label={t('copilot_notice_dismiss', undefined, 'Dismiss notice')}
+            title={t('copilot_notice_dismiss', undefined, 'Dismiss notice')}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       </div>
     )
-  }, [snapshot?.continuation_reason, t, waitingNoticeLabel, waitingNoticeMessage, waitingNoticeReason, waitingNoticeStatus])
+  }, [
+    dismissWaitingNotice,
+    dismissedWaitingNoticeKey,
+    t,
+    waitingNoticeKey,
+    waitingNoticeLabel,
+    waitingNoticeMessage,
+    waitingNoticeReason,
+    waitingNoticeStatus,
+  ])
 
   return (
     <QuestCopilotPaneLayout
