@@ -573,6 +573,56 @@ def _mcp_result_payload(item: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _parse_single_text_content(value: Any) -> Any | None:
+    if not isinstance(value, list) or len(value) != 1:
+        return None
+    item = value[0]
+    if not isinstance(item, dict):
+        return None
+    text = item.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _raw_tool_result_payload(event: dict[str, Any]) -> Any | None:
+    item = event.get("item") if isinstance(event.get("item"), dict) else {}
+    item_type = str(item.get("type") or event.get("item_type") or "")
+    if item_type == "mcp_tool_call":
+        result = item.get("result")
+        if isinstance(result, dict):
+            structured = result.get("structured_content") or result.get("structuredContent")
+            if structured is not None:
+                return structured
+            parsed_content = _parse_single_text_content(result.get("content"))
+            if parsed_content is not None:
+                return parsed_content
+            return result
+        if result is not None:
+            return result
+
+    for value in (
+        item.get("result"),
+        item.get("aggregated_output"),
+        item.get("changes"),
+        item.get("output"),
+        item.get("content"),
+        item.get("error"),
+        event.get("result"),
+        event.get("aggregated_output"),
+        event.get("changes"),
+        event.get("output"),
+        event.get("content"),
+        event.get("error"),
+    ):
+        if value is not None:
+            return value
+    return None
+
+
 def _mcp_tool_metadata(
     *,
     quest_id: str,
@@ -1082,16 +1132,26 @@ class CodexRunner:
                                 telemetry.get("full_detail_tool_call_count") or 0
                             ) + 1
                     if str(tool_event.get("type") or "") == "runner.tool_result":
+                        raw_tool_payload = _raw_tool_result_payload(payload)
+                        compaction_kwargs: dict[str, Any] = {}
+                        if raw_tool_payload is not None:
+                            compaction_kwargs["raw_payload"] = raw_tool_payload
                         compacted_tool_event, compaction_meta = compact_runner_tool_event(
                             tool_event,
                             quest_root=request.quest_root,
                             run_id=request.run_id,
+                            **compaction_kwargs,
                         )
                         tool_event = compacted_tool_event
                         telemetry["tool_result_count"] = int(telemetry.get("tool_result_count") or 0) + 1
                         telemetry["tool_result_bytes_total"] = int(
                             telemetry.get("tool_result_bytes_total") or 0
-                        ) + int(compaction_meta.get("output_bytes") or compaction_meta.get("payload_bytes") or 0)
+                        ) + int(
+                            compaction_meta.get("source_payload_bytes")
+                            or compaction_meta.get("output_bytes")
+                            or compaction_meta.get("payload_bytes")
+                            or 0
+                        )
                         if bool(compaction_meta.get("compacted")):
                             telemetry["compacted_tool_result_count"] = int(
                                 telemetry.get("compacted_tool_result_count") or 0

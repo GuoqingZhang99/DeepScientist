@@ -12,6 +12,7 @@ DEFAULT_EVIDENCE_PACKET_THRESHOLD_BYTES = 48_000
 DEFAULT_RUNNER_TOOL_RESULT_THRESHOLD_BYTES = 8_000
 _MAX_SUMMARY_CHARS = 900
 _MAX_BLOCKERS = 12
+_RAW_PAYLOAD_UNSET = object()
 
 
 def payload_json_bytes(payload: Any) -> bytes:
@@ -137,6 +138,30 @@ def summarize_payload(payload: Any, *, tool_name: str) -> str:
     return summary
 
 
+def _ok_from_payload_or_status(payload: Any, *, status: str | None = None) -> bool | None:
+    if isinstance(payload, dict):
+        ok_value = payload.get("ok")
+        if isinstance(ok_value, bool):
+            return ok_value
+        success_value = payload.get("success")
+        if isinstance(success_value, bool):
+            return success_value
+        for key in ("status", "state"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"failed", "failure", "error", "errored", "cancelled", "canceled", "invalid"}:
+                    return False
+                if normalized in {"completed", "complete", "success", "succeeded", "ok", "ready"}:
+                    return True
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status in {"failed", "failure", "error", "errored", "cancelled", "canceled", "invalid"}:
+        return False
+    if normalized_status in {"completed", "complete", "success", "succeeded", "ok", "ready"}:
+        return True
+    return None
+
+
 def compact_evidence_payload(
     payload: Any,
     *,
@@ -149,6 +174,7 @@ def compact_evidence_payload(
     threshold_bytes: int = DEFAULT_EVIDENCE_PACKET_THRESHOLD_BYTES,
     reason: str | None = None,
     full_detail_requested: bool | None = None,
+    status: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     payload_bytes = len(payload_json_bytes(payload))
     threshold = max(1, int(threshold_bytes))
@@ -225,10 +251,12 @@ def compact_evidence_payload(
         "drill_down_rule": "Read sidecar_path only when the compact facts are insufficient for the next decision.",
     }
     compacted = {
-        "ok": bool(payload.get("ok")) if isinstance(payload, dict) and isinstance(payload.get("ok"), bool) else True,
         "compacted": True,
         "evidence_packet": evidence_packet,
     }
+    ok_value = _ok_from_payload_or_status(payload, status=status)
+    if ok_value is not None:
+        compacted["ok"] = ok_value
     return compacted, {
         "compacted": True,
         "sidecar_path": str(sidecar_path),
@@ -245,6 +273,7 @@ def compact_runner_tool_event(
     quest_root: Path,
     run_id: str,
     threshold_bytes: int = DEFAULT_RUNNER_TOOL_RESULT_THRESHOLD_BYTES,
+    raw_payload: Any = _RAW_PAYLOAD_UNSET,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if str(event.get("type") or "") != "runner.tool_result":
         return event, {"compacted": False}
@@ -253,20 +282,25 @@ def compact_runner_tool_event(
     args = str(event.get("args") or "")
     full_detail_requested = "detail" in args and "full" in args.lower()
     output_bytes = len(output.encode("utf-8", errors="replace"))
-    if output_bytes <= max(1, int(threshold_bytes)):
+    has_raw_payload = raw_payload is not _RAW_PAYLOAD_UNSET
+    source_payload = raw_payload if has_raw_payload else _RAW_PAYLOAD_UNSET
+    source_payload_bytes = len(payload_json_bytes(source_payload)) if has_raw_payload else 0
+    threshold = max(1, int(threshold_bytes))
+    if output_bytes <= threshold and source_payload_bytes <= threshold:
         return event, {
             "compacted": False,
             "output_bytes": output_bytes,
-            "threshold_bytes": int(threshold_bytes),
+            "source_payload_bytes": source_payload_bytes,
+            "threshold_bytes": threshold,
         }
 
-    parsed_payload: Any
-    try:
-        parsed_payload = json.loads(output)
-    except json.JSONDecodeError:
-        parsed_payload = {"text": output}
+    if not has_raw_payload:
+        try:
+            source_payload = json.loads(output)
+        except json.JSONDecodeError:
+            source_payload = {"text": output}
     compacted_payload, meta = compact_evidence_payload(
-        parsed_payload,
+        source_payload,
         quest_root=quest_root,
         run_id=run_id,
         tool_name=tool_name,
@@ -275,11 +309,15 @@ def compact_runner_tool_event(
         threshold_bytes=threshold_bytes,
         reason="runner_tool_result_context_budget",
         full_detail_requested=full_detail_requested,
+        status=str(event.get("status") or ""),
     )
     compacted_event = dict(event)
     compacted_event["output"] = json.dumps(compacted_payload, ensure_ascii=False, indent=2)
     compacted_event["output_bytes"] = output_bytes
     compacted_event["output_sha256"] = hashlib.sha256(output.encode("utf-8", errors="replace")).hexdigest()
+    if has_raw_payload:
+        compacted_event["source_payload_bytes"] = source_payload_bytes
+        compacted_event["source_payload_sha256"] = payload_sha256(source_payload)
     compacted_event["output_compacted"] = True
     compacted_event["evidence_packet"] = (
         compacted_payload.get("evidence_packet") if isinstance(compacted_payload, dict) else None
@@ -287,4 +325,5 @@ def compact_runner_tool_event(
     return compacted_event, {
         **meta,
         "output_bytes": output_bytes,
+        "source_payload_bytes": source_payload_bytes,
     }

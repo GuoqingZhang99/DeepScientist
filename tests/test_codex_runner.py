@@ -13,6 +13,7 @@ from deepscientist.runners import ClaudeRunner, CodexRunner, OpenCodeRunner, Run
 from deepscientist.runners.codex import (
     _compact_tool_event_payload,
     _message_events,
+    _raw_tool_result_payload,
     _sanitize_text_for_windows_gbk,
     _tool_event,
 )
@@ -244,6 +245,83 @@ def test_codex_runner_leaves_normal_tool_result_event_parseable(temp_home: Path)
     assert json.loads(compacted["output"])["status"] == "ready"
 
 
+def test_codex_runner_compacted_failed_tool_result_does_not_default_success(temp_home: Path) -> None:
+    from deepscientist.evidence_packets import compact_runner_tool_event
+
+    quest_root = temp_home / "quest"
+    quest_root.mkdir(parents=True, exist_ok=True)
+    event = {
+        "event_id": "evt-failed-tool",
+        "type": "runner.tool_result",
+        "quest_id": "q-001",
+        "run_id": "run-001",
+        "source": "codex",
+        "skill_id": "baseline",
+        "tool_call_id": "tool-failed",
+        "tool_name": "artifact.read_quest_documents",
+        "status": "failed",
+        "args": '{"detail": "full"}',
+        "output": json.dumps({"message": "x" * 12_000}, ensure_ascii=False),
+    }
+
+    compacted, meta = compact_runner_tool_event(event, quest_root=quest_root, run_id="run-001")
+
+    assert meta["compacted"] is True
+    rendered = json.loads(compacted["output"])
+    assert rendered["ok"] is False
+
+
+def test_codex_runner_sidecars_raw_payload_before_render_truncation(temp_home: Path) -> None:
+    from deepscientist.evidence_packets import compact_runner_tool_event
+
+    quest_root = temp_home / "quest"
+    quest_root.mkdir(parents=True, exist_ok=True)
+    large_result = {
+        "status": "completed",
+        "items": [{"path": f"paper-section-{index}.md", "text": "x" * 120} for index in range(300)],
+        "missing_items": ["paper/references.bib"],
+    }
+    raw_event = {
+        "type": "item.completed",
+        "item_type": "mcp_tool_call",
+        "item": {
+            "type": "mcp_tool_call",
+            "id": "tool-raw-large",
+            "server": "artifact",
+            "tool": "read_quest_documents",
+            "status": "completed",
+            "arguments": {"detail": "full"},
+            "result": {"structured_content": large_result},
+        },
+    }
+    rendered_event = _tool_event(
+        raw_event,
+        quest_id="q-001",
+        run_id="run-001",
+        skill_id="write",
+        known_tool_names={},
+        created_at="2026-03-21T00:00:00Z",
+    )
+
+    assert rendered_event is not None
+    assert len(rendered_event["output"]) < 2_000
+    assert "paper-section-299.md" not in rendered_event["output"]
+    compacted, meta = compact_runner_tool_event(
+        rendered_event,
+        quest_root=quest_root,
+        run_id="run-001",
+        raw_payload=_raw_tool_result_payload(raw_event),
+    )
+
+    assert meta["compacted"] is True
+    assert meta["source_payload_bytes"] > 8_000
+    packet = json.loads(compacted["output"])["evidence_packet"]
+    sidecar = read_json(Path(packet["sidecar_path"]), {})
+    assert sidecar["payload"]["items"] == large_result["items"]
+    assert sidecar["payload"]["missing_items"] == ["paper/references.bib"]
+    assert "[truncated " not in json.dumps(sidecar["payload"], ensure_ascii=False)
+
+
 def test_codex_runner_writes_tool_result_telemetry_and_sidecar(
     monkeypatch,
     temp_home: Path,
@@ -382,7 +460,10 @@ def test_codex_runner_writes_tool_result_telemetry_and_sidecar(
     tool_results = [event for event in quest_events if event.get("type") == "runner.tool_result"]
     assert tool_results[-1]["output_compacted"] is True
     packet = tool_results[-1]["evidence_packet"]
-    assert Path(packet["sidecar_path"]).exists()
+    sidecar = read_json(Path(packet["sidecar_path"]), {})
+    assert sidecar["payload"]["log"] == large_log
+    assert "[truncated " not in sidecar["payload"]["log"]
+    assert sidecar["payload_sha256"] == packet["payload_sha256"]
 
 
 def test_codex_tool_event_carries_bash_id_from_id_only_monitor_call() -> None:
