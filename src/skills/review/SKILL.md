@@ -44,6 +44,7 @@ It should convert “the draft feels almost done” into a durable, skeptical, t
 
 Default review stance: independent audit before celebration.
 Do not treat “looks polished” as “is defensible”.
+Do not accept structural green lights as paper-quality proof. Coverage, compile success, and file counts must still survive a skeptical claim/evidence/reviewer-risk audit.
 
 ## Use when
 
@@ -96,7 +97,7 @@ Use, in roughly this order:
 - figures, tables, and captions
 - current-turn attachments and user-provided local paths / directories / URLs for the manuscript bundle or review packet
 - prior self-review or reviewer-first notes as low-trust auxiliary input
-- nearby papers when novelty or comparison is unclear
+- nearby papers and high-level accepted papers found through current literature search, not only remembered examples
 
 If the draft/result state is still unclear, open `intake-audit` first before continuing the review workflow.
 Before proposing extra experiments, read those structured `evaluation_summary` blocks first so you do not request work that the recorded evidence already resolved.
@@ -131,6 +132,8 @@ Audit at least these dimensions:
 - writing defensibility and logical flow
 - manuscript language hygiene and provenance leakage
 - figure / table usefulness
+- full-paper style, pacing, and section-level argument quality relative to strong accepted papers
+- experiment package completeness relative to nearby high-level papers
 - submission readiness
 
 ## Workflow
@@ -146,6 +149,8 @@ Identify:
 - the strongest current evidence
 - the weakest current evidence
 - the top 3 likely rejection reasons
+- the ready experiment/analysis group count versus the current target, including any user-specified target such as 4-8 analyses
+- what the closest high-quality paper comparators are and which parts of their writing / logic / experiment package should be used as review standards
 - whether manuscript text leaks user requirements, agent actions, route/control state, branch/worktree names, tool recommendations, TODOs, or raw implementation shorthand
 - whether `artifact.validate_academic_outline(detail='full')` and `artifact.validate_manuscript_language(detail='full')` pass when a selected outline or draft exists
 - whether the likely next route is:
@@ -155,15 +160,33 @@ Identify:
   - supplementary experiment
   - claim downgrade
 
-### 2. Check novelty and positioning only when needed
+### 2. Run a paper-quality literature benchmark
 
-If novelty, related-work coverage, or field positioning is unclear:
+Before calling a substantial manuscript strong, run a current literature/style benchmark unless the review scope is explicitly local-only.
 
-1. open `scout`
-2. run a focused literature / comparison audit
-3. record what is genuinely overlapping, what remains novel, and what is merely better positioned writing
+Search for nearby high-quality papers using the best available current source:
 
-Do not request new experiments just to answer a literature-positioning question.
+- Prefer DeepXiv or OpenAlex when configured.
+- Use web search when needed for venue status, accepted-paper pages, PDFs, proceedings, journal pages, or recent related work.
+- Include high-level exemplars when relevant: ICLR, ICML, NeurIPS, CVPR, ACL, EMNLP, KDD, SIGIR, AAAI, IJCAI, Nature/Science family, or Q1 journal papers in the field.
+- Prefer accepted papers, proceedings pages, journal pages, arXiv PDFs with accepted-version metadata, and official conference / journal records over blog posts or low-trust summaries.
+
+Build a compact comparison set, usually 3-8 papers:
+
+- 1-3 closest technical neighbors
+- 1-3 strong writing / story exemplars from top venues
+- 1-2 experiment-package exemplars when the manuscript's evaluation design is uncertain
+
+For each comparator, record title, venue/source, why it is relevant, and what it teaches about:
+
+- abstract and introduction framing
+- problem -> gap -> method -> evidence logic
+- method explanation and reader onboarding
+- experiment design, ablations, robustness, baselines, and limitations
+- figure/table roles and result narrative
+- related-work positioning and claim boundaries
+
+Do not request new experiments just to answer a literature-positioning question. First decide whether the fix is writing, positioning, claim narrowing, or genuinely missing evidence.
 
 ### 3. Write a reliable review report
 
@@ -177,6 +200,8 @@ The review should be:
 - reader-aware
 - evidence-grounded
 
+Never write "no weaknesses", "no key issues", or equivalent closure language unless the review has first listed the main rejection routes and shown why each is fixed, downgraded, or out of scope.
+
 At minimum, the review report should cover:
 
 - summary
@@ -187,7 +212,9 @@ At minimum, the review report should cover:
 - storyline / outline advice
 - priority revision plan
 - experiment inventory and research experiment plan
+- analysis-count sufficiency and whether the count is real rather than inflated by duplicate/stale rows
 - novelty verification and related-work matrix
+- high-level paper comparison matrix covering writing, logic, full-paper organization, style, figures/tables, and experiment package gaps
 - references
 
 If helpful, include an internal conservative overall judgment or score, but do not pretend numerical precision when evidence is still unstable.

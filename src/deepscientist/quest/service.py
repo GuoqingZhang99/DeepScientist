@@ -2822,9 +2822,19 @@ class QuestService:
                 or manuscript_coverage.get("manuscript_blockers")
                 or []
             ),
+            "manuscript_warning_reasons": list(
+                active_line.get("manuscript_warning_reasons")
+                or manuscript_coverage.get("manuscript_warnings")
+                or []
+            ),
             "submission_blocking_reasons": list(
                 active_line.get("submission_blocking_reasons")
                 or manuscript_coverage.get("submission_blockers")
+                or []
+            ),
+            "submission_warning_reasons": list(
+                active_line.get("submission_warning_reasons")
+                or manuscript_coverage.get("submission_warnings")
                 or []
             ),
             "manuscript_coverage": manuscript_coverage or None,

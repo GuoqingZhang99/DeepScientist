@@ -603,6 +603,13 @@ def test_review_skill_requires_independent_audit_outputs_and_followup_routing() 
     assert "matrix exp id" in text
     assert "highlight hypotheses" in text
     assert "copy-ready replacement sentence" in text or "copy-ready replacement" in text
+    assert "Run a paper-quality literature benchmark" in text
+    assert "DeepXiv or OpenAlex" in text
+    assert "Use web search when needed" in text
+    assert "ICLR, ICML, NeurIPS" in text
+    assert "Q1 journal" in text
+    assert "high-level paper comparison matrix" in text
+    assert "writing, logic, full-paper organization" in text
 
 
 def test_decision_and_finalize_skills_require_checkpoint_style_memory_when_resume_state_changes() -> None:

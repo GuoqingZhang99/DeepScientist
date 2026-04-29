@@ -104,6 +104,8 @@ When the quest is algorithm-first, add one extra truth-source rule before non-tr
 - read `artifact.get_optimization_frontier(...)`
 - treat the frontier as the primary optimize-state summary
 - only override it when newer durable evidence clearly dominates
+- if the frontier says `explore`, do not collapse immediately to exploit unless the latest durable result clearly changes the frontier
+- if the frontier says `fusion`, judge whether complementary lines can be merged before launching another isolated candidate
 
 ## Required decision record
 
@@ -139,6 +141,12 @@ Use the following canonical actions:
 - `request_user_decision`
 
 Choose the smallest action that genuinely resolves the current state.
+
+For paper-outline decisions, use `artifact.submit_paper_outline(mode='select', ...)` when selecting an existing candidate and `artifact.submit_paper_outline(mode='revise', ...)` when the selected outline needs repair.
+For paper-bundle decisions, use `artifact.submit_paper_bundle(...)` only when the draft or package state is durable enough for that package type.
+When deciding whether a paper line can advance, judge method fidelity and story coherence as well as metric coverage.
+For resume-changing route decisions, write one compact checkpoint-style quest memory card so later turns know the current active node, node history, what not to reopen by default, and the first files to read.
+Use `type:checkpoint-memory` and `references/checkpoint-memory-template.md` for that card.
 
 ## Operational guidance
 

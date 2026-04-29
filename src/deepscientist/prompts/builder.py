@@ -778,16 +778,14 @@ class PromptBuilder:
         text = read_text(path).strip()
         if not text:
             return "- none"
-        return "\n".join(
-            [
-                f"- path: {path}",
-                "- rule: treat this file as the highest-priority durable summary of the user's current requirements and constraints",
-                "- manuscript_boundary_rule: user requirements are planning constraints and acceptance criteria, not paper-ready source text",
-                "- manuscript_transduction_rule: when writing papers, convert only scientifically relevant requirements into neutral protocol language and keep operator/user/restart/provenance wording out of manuscript prose",
-                "",
-                text,
-            ]
-        )
+        lines = [
+            f"- path: {path}",
+            "- rule: treat this file as the highest-priority durable summary of the user's current requirements and constraints",
+            "- manuscript_boundary_rule: user requirements are planning constraints and acceptance criteria, not paper-ready source text",
+            "- manuscript_transduction_rule: when writing papers, convert only scientifically relevant requirements into neutral protocol language and keep operator/user/restart/provenance wording out of manuscript prose",
+        ]
+        lines.extend(["", text])
+        return "\n".join(lines)
 
     def _continuation_guard_block(
         self,
@@ -2048,6 +2046,7 @@ class PromptBuilder:
                         f"submission_ready={bool(paper_contract_health.get('submission_ready'))}"
                     ),
                     f"- paper_health_counts: unresolved_required={int(paper_contract_health.get('unresolved_required_count') or 0)}, unmapped_completed={int(paper_contract_health.get('unmapped_completed_count') or 0)}, blocking_pending={int(paper_contract_health.get('blocking_open_supplementary_count') or 0)}",
+                    f"- paper_quality_warning_count: {len(paper_contract_health.get('manuscript_warning_reasons') or []) + len(paper_contract_health.get('submission_warning_reasons') or [])}",
                     f"- paper_package_type: {str(paper_contract_health.get('package_type') or 'draft_checkpoint')}",
                     f"- paper_recommended_next_stage: {str(paper_contract_health.get('recommended_next_stage') or 'none')}",
                     f"- paper_recommended_action: {str(paper_contract_health.get('recommended_action') or 'none')}",
@@ -2064,6 +2063,9 @@ class PromptBuilder:
             )
             lines.append(
                 "- paper_contract_rule: do not finalize unless submission_ready is true."
+            )
+            lines.append(
+                "- paper_quality_warning_rule: paper quality and analysis-count warnings are reminders, not automatic blockers; surface them before claiming the draft is strong or final."
             )
             lines.append(
                 "- paper_view_rule: a selected outline must separate `paper_view` (paper idea, claims, method, analyses) from `evidence_view` (result rows, run ids, paths, reproducibility details)."

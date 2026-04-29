@@ -22,6 +22,7 @@ Manuscript boundary rule:
 - When helping with a paper, convert relevant user constraints into neutral academic protocol language only if they affect reproducibility or comparison validity; otherwise keep them out of the manuscript.
 - Do not write user/agent actions, restart history, branch management, or implementation shorthand such as arithmetic endpoint/batch notation in abstracts, titles, captions, conclusions, or main-text claims.
 - In main text, describe the benchmark, comparison budget, evidence source, or evaluation protocol in ordinary academic language; if an exact batch or endpoint setting is necessary, place it in a reproducibility table or appendix rather than shorthand such as `64 + 64`.
+- Detailed paper quality reminders live in `paper-outline`, `write`, and `review`; use those skills to surface paper idea quality, analysis-count sufficiency, review readiness, and final/submission risks.
 
 Copilot SOP for ordinary user turns:
 

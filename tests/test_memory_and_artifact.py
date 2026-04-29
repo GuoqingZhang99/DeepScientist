@@ -2294,6 +2294,89 @@ def test_validate_manuscript_coverage_blocks_short_memo_as_full_paper(temp_home:
     assert any("fewer than 5 section" in item for item in coverage["manuscript_blockers"])
 
 
+def test_validate_academic_outline_surfaces_quality_reminders_without_blocking(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest = quest_service.create("paper outline reminder quest")
+    quest_root = Path(quest["quest_root"])
+    artifact = ArtifactService(temp_home)
+
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="candidate",
+        title="Reminder Outline",
+        detailed_outline={
+            "paper_view": {
+                "paper_type": "full_empirical",
+                "outline_maturity": "mature",
+                "working_title": "Reminder Outline",
+                "narrative_strategy": {
+                    "central_thesis": "The method improves the target setting under a controlled comparison.",
+                },
+                "story_spine": {
+                    "problem": "The target setting needs a more reliable comparison protocol.",
+                    "gap": "Existing runs do not isolate the relevant support signal.",
+                    "method": "The method adds a controlled support pass.",
+                    "main_result": "The measured main result improves over the accepted baseline.",
+                    "scope_limit": "The claim is limited to this benchmark and evidence budget.",
+                },
+                "core_claims": [
+                    {
+                        "claim_id": "C1",
+                        "claim": "The controlled support pass improves the target metric.",
+                        "scope": "Accepted baseline and target benchmark only.",
+                        "evidence_needed": ["main-result"],
+                        "what_would_falsify_it": "No gain under the same comparison budget.",
+                    }
+                ],
+                "method_abstraction": {
+                    "intuition": "A separate support pass reduces unsupported updates.",
+                    "mechanism_steps": ["collect support", "score candidates", "update only supported decisions"],
+                },
+                "evaluation_plan": {
+                    "setting": "Accepted benchmark protocol.",
+                    "datasets_or_benchmarks": ["TargetBench"],
+                    "baselines": ["accepted-baseline"],
+                    "metrics": ["score"],
+                },
+                "analysis_plan": [
+                    {
+                        "analysis_id": "A1",
+                        "title": "Single ablation",
+                        "analysis_role": "component ablation",
+                        "reviewer_question": "Does the support pass matter?",
+                        "claim_links": ["C1"],
+                        "target_display": "Ablation table",
+                        "main_or_appendix": "main_text",
+                    }
+                ],
+                "evidence_grounding": {
+                    "observed_facts": ["main-result improved the target metric"],
+                    "allowed_interpretations": ["the support pass may be useful in this setting"],
+                    "must_not_claim": ["general improvement across unrelated benchmarks"],
+                },
+            }
+        },
+    )
+    artifact.submit_paper_outline(
+        quest_root,
+        mode="select",
+        outline_id="outline-001",
+        selected_reason="Use this for outline reminder validation.",
+    )
+
+    result = artifact.validate_academic_outline(quest_root, detail="full")
+    validation = result["academic_outline_validation"]
+
+    assert result["ok"] is True
+    assert validation["analysis_plan_ready"] is True
+    assert validation["analysis_count"] == 1
+    assert any("central_insight" in item for item in validation["warnings"])
+    assert any("fewer than 4" in item for item in validation["warnings"])
+    assert any("reviewer_objections" in item for item in validation["warnings"])
+
+
 def test_paper_experiment_matrix_preserves_same_item_analysis_rows(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()

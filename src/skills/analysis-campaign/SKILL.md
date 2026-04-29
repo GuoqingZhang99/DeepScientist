@@ -43,11 +43,12 @@ Answer the smallest evidence question that changes, confirms, or blocks a parent
 6. Aggregate only the decision-relevant findings and route the next step.
    End in continue, write, experiment, idea, decision, blocker, or stop.
 
-## Paper-facing analysis quantity gate
+## Paper-facing analysis quantity reminder
 
 For manuscript-support campaigns, first audit `artifact.get_paper_contract(detail='full')` and, when a draft exists, `artifact.validate_manuscript_coverage(detail='full')`.
 
-- A mature empirical manuscript usually needs 4-8 distinct paper-facing experiment/analysis groups before `write` can call it full. Fewer is acceptable only for an early/narrow outline with an explicit waiver.
+- A mature empirical manuscript usually needs 5-10 ready paper-facing experiment/analysis groups total, with 4-8 reviewer-facing analysis jobs in the outline when the paper is full empirical. Fewer is acceptable only for an early/narrow outline with an explicit waiver.
+- If the user requested a concrete analysis count, such as 4-8 analyses, treat it as a tracked target; report the completed/mapped count and any explicit waiver before returning to full-paper writing.
 - Do not pad the count with stale methods, abandoned methods, unrelated baseline repairs, or old exploratory rows. Each slice must identify the current method or claim it supports.
 - If legacy-method analysis is intentionally included, mark it as baseline/comparator/negative evidence and keep it separate from current-method support.
 - Paper-facing slice outputs must separate the `manuscript_takeaway` from internal setup, user instructions, worktree paths, command history, and artifact provenance.
@@ -75,6 +76,9 @@ For manuscript-support campaigns, first audit `artifact.get_paper_contract(detai
 - If a slice would materially improve soundness but is infeasible now, record the blocker and choose the best runnable lower-cost alternative or narrower proxy.
 - If a slice is paper-relevant, its result must be bound back into the current paper contract rather than left only in `experiments/analysis-results/*` or chat.
 - Writing-facing slices must carry write-back metadata: `paper_role`, `section_id`, `item_id`, `claim_links`, method/comparator id, display target, and main/appendix role.
+- Writing-facing campaign metadata should keep `selected_outline_ref`, `research_questions`, `experimental_designs`, and `todo_items` explicit; map results back to `paper/paper_experiment_matrix.md` with `exp_id`, `section_id`, `item_id`, `claim_links`, and `paper_role`.
+- Classify paper evidence as claim-carrying, supporting, or auxiliary; keep stable support separate from contradiction, and record `comparison_baselines`, `evaluation_summary`, `takeaway`, and `comparability` when comparisons matter.
+- Include highlight-validation, efficiency or cost, robustness, failure, and limitation checks only when they answer the parent claim or reviewer question.
 
 ## Validation
 
@@ -102,7 +106,9 @@ It may choose a one-slice check, a lightweight durable report, an artifact-backe
 It may choose slice order, workspace layout, filenames, monitoring strategy, and whether a smoke test, direct verification, or full run is the right first move.
 It may also shrink, reorder, or replace slices to fit the real hardware and runtime envelope, as long as the resulting campaign still answers the parent evidence question honestly.
 
-Do not treat `PLAN.md`, `CHECKLIST.md`, `artifact.create_analysis_campaign(...)`, one-slice campaigns, returned worktrees, `evaluation_summary`, smoke tests, detached runs, paper-matrix files, `tqdm`, or a fixed phase order as required paths.
+Do not treat `PLAN.md`, `CHECKLIST.md`, `artifact.create_analysis_campaign(...)`, one-slice campaigns, returned worktrees, `evaluation_summary`, smoke tests, detached runs, or paper-matrix updates as universal required paths.
+Do not treat paper-matrix files, `tqdm`, or a fixed phase order as required paths either.
+`PLAN.md`, `CHECKLIST.md`, `paper/paper_experiment_matrix.md`, and local matrix/checklist files are allowed control surfaces, not mandatory success paths.
 They are tactics.
 The hard requirement is traceable evidence that changes, confirms, or blocks the evidence boundary of the parent claim and leaves an explicit next route.
 

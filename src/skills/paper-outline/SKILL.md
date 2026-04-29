@@ -42,6 +42,22 @@ A good outline does three things:
 
 Strong papers often start from simple code but make a useful idea legible. Residual connections are more than a code shortcut; the paper teaches how to make depth trainable. Attention is more than a module; the paper teaches how to remove a bottleneck. Do the same only when the quest evidence supports that kind of interpretation.
 
+## Mature Outline Reminder
+
+A mature paper outline is not just a section list. For `paper_type: full_empirical` and `outline_maturity: mature`, surface reminders when these are missing:
+
+- a central thesis and a central insight that are reader-facing, not just metric summaries
+- an `insight_ladder` showing how observed facts become allowed interpretations
+- 1-3 scoped claims, each with `evidence_needed` and `what_would_falsify_it`
+- a closest-neighbor / novelty boundary explaining what the paper is and is not claiming against prior or obvious alternatives
+- at least three likely reviewer objections, each mapped to planned evidence, manuscript revision, claim downgrade, or accepted limitation
+- 4-8 reviewer-facing analysis jobs beyond the headline result unless an explicit analysis-budget waiver downgrades the paper scope
+
+Analysis quantity has two reminder levels:
+
+- `paper_view.analysis_plan`: normally 4-8 planned analysis jobs for a mature empirical paper.
+- paper-facing evidence package: normally 5-10 ready experiment/analysis groups total before treating the manuscript as strong. If the user specifies a number such as 4-8 analyses, track that target visibly until completed, waived, or explicitly downgraded.
+
 ## Required Shape
 
 Use this inside `artifact.submit_paper_outline(..., detailed_outline={...})`.
@@ -57,12 +73,26 @@ Use this inside `artifact.submit_paper_outline(..., detailed_outline={...})`.
       "central_insight": "The reusable lesson suggested by the evidence",
       "reader_takeaway": "What another researcher can learn or reuse"
     },
+    "insight_ladder": [
+      {
+        "level": "Observed fact -> interpretation",
+        "statement": "What this fact teaches",
+        "evidence": ["main-result-id"],
+        "claim_links": ["C1"],
+        "risk": "What could make the interpretation too strong"
+      }
+    ],
     "story_spine": {
       "problem": "What scientific problem exists?",
       "gap": "What prior/easy approach fails to address?",
       "method": "What abstract method is introduced?",
       "main_result": "What measured result supports the claim?",
       "scope_limit": "Where the claim stops"
+    },
+    "positioning": {
+      "closest_neighbor": "The closest existing method, baseline, or obvious alternative",
+      "novelty_boundary": "Exactly what is new or reusable here",
+      "not_claiming": ["Claims this paper does not make"]
     },
     "core_claims": [
       {
@@ -96,6 +126,14 @@ Use this inside `artifact.submit_paper_outline(..., detailed_outline={...})`.
         "target_display": "Main-text ablation table",
         "main_or_appendix": "main_text",
         "failure_interpretation": "How the claim should change if this fails"
+      }
+    ],
+    "reviewer_objections": [
+      {
+        "objection": "Why a skeptical reviewer might reject or downgrade the paper",
+        "answer_route": "analysis | writing | claim_downgrade | limitation",
+        "linked_claims": ["C1"],
+        "needed_evidence": ["analysis-id"]
       }
     ],
     "evidence_grounding": {
@@ -179,8 +217,10 @@ Before handing to `write`, check:
 
 - `artifact.validate_academic_outline(detail='full')` passes.
 - The paper has one clear idea and 1-3 scoped claims.
+- If the outline is mature/full-empirical, `insight_ladder`, novelty boundary, reviewer objections, claim falsification criteria, and analysis-count reminders are present or explicitly waived.
 - The outline says what was observed, what can be interpreted, and what must not be claimed.
 - The analysis plan has 4-8 useful jobs, or a waiver.
+- Main-text experiment/analysis item ids are checked for stale duplicates that inflate evidence count.
 - `paper_view` does not mention quest, worktree, selected outline, route history, user requests, ports, or `64+64`.
 - Exact engineering details are in `evidence_view` or appendix-only fields.
 
