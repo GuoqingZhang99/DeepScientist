@@ -21,6 +21,7 @@ type OnboardingState = OnboardingPersistence & {
   openChooser: (origin?: 'auto' | 'manual') => void
   startTutorial: (language: OnboardingLanguage, pathname: string, origin?: 'auto' | 'manual') => void
   restartTutorial: (pathname: string, language?: OnboardingLanguage | null) => void
+  goToStep: (stepIndex: number) => void
   nextStep: () => void
   previousStep: () => void
   close: () => void
@@ -162,6 +163,12 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
       status: 'running',
       stepIndex: resolveStartStepIndex(pathname),
       startedFrom: 'manual',
+    })
+  },
+
+  goToStep: (stepIndex) => {
+    set({
+      stepIndex: Math.max(0, stepIndex),
     })
   },
 

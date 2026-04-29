@@ -2533,6 +2533,17 @@ npm --prefix src/ui run build</pre>
         }
 
     def config_save(self, name: str, body: dict) -> dict:
+        if name == "config" and isinstance(body.get("structured"), dict):
+            default_runner = self.app.config_manager._normalize_runtime_runner_name(
+                body["structured"].get("default_runner")
+            )
+            if default_runner in {"codex", "claude", "kimi", "opencode"}:
+                os.environ["DEEPSCIENTIST_DEFAULT_RUNNER"] = default_runner
+                os.environ["DEEPSCIENTIST_ENABLE_RUNNER"] = default_runner
+                os.environ.pop("DS_DEFAULT_RUNNER", None)
+                os.environ.pop("DS_ENABLE_RUNNER", None)
+                os.environ.pop("DEEPSCIENTIST_ENABLE_RUNNERS", None)
+                os.environ.pop("DS_ENABLE_RUNNERS", None)
         if isinstance(body.get("structured"), dict):
             result = self.app.config_manager.save_named_payload(name, body["structured"])
         else:
