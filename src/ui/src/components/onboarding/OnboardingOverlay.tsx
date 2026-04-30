@@ -651,6 +651,25 @@ function queryTarget(id?: string | null) {
   return document.querySelector<HTMLElement>(`[data-onboarding-id="${id}"]`)
 }
 
+function waitForTarget(id: string, timeoutMs = 2400) {
+  const startedAt = Date.now()
+  return new Promise<HTMLElement | null>((resolve) => {
+    const tick = () => {
+      const target = queryTarget(id)
+      if (target) {
+        resolve(target)
+        return
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        resolve(null)
+        return
+      }
+      window.setTimeout(tick, 80)
+    }
+    tick()
+  })
+}
+
 function stepNeedsCopilotPanel(step: OnboardingStep | null) {
   if (!step) return false
   const ids = [step.targetId, step.actionTargetId, step.waitForElementId].filter(Boolean)
@@ -724,9 +743,15 @@ function scrollTargetIntoViewVerticalOnly(target: HTMLElement) {
 function triggerTargetAction(id?: string | null) {
   const target = queryTarget(id)
   if (!target) return false
+  const clickableTarget =
+    target instanceof HTMLElement &&
+    !target.matches('button, a, [role="button"], input, select, textarea')
+      ? target.querySelector<HTMLElement>('button, a, [role="button"], input, select, textarea')
+      : null
+  const actionTarget = clickableTarget || target
   const isFileTreeNode = Boolean(target.closest('[data-node-id]'))
   if (isFileTreeNode) {
-    target.dispatchEvent(
+    actionTarget.dispatchEvent(
       new MouseEvent('click', {
         bubbles: true,
         cancelable: true,
@@ -734,7 +759,7 @@ function triggerTargetAction(id?: string | null) {
         detail: 1,
       })
     )
-    target.dispatchEvent(
+    actionTarget.dispatchEvent(
       new MouseEvent('click', {
         bubbles: true,
         cancelable: true,
@@ -742,7 +767,7 @@ function triggerTargetAction(id?: string | null) {
         detail: 2,
       })
     )
-    target.dispatchEvent(
+    actionTarget.dispatchEvent(
       new MouseEvent('dblclick', {
         bubbles: true,
         cancelable: true,
@@ -752,11 +777,11 @@ function triggerTargetAction(id?: string | null) {
     )
     return true
   }
-  if (typeof target.click === 'function') {
-    target.click()
+  if (typeof actionTarget.click === 'function') {
+    actionTarget.click()
     return true
   }
-  target.dispatchEvent(
+  actionTarget.dispatchEvent(
     new MouseEvent('click', {
       bubbles: true,
       cancelable: true,
@@ -784,6 +809,51 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
 }
 
+function cardTargetOverlap(args: {
+  top: number
+  left: number
+  cardWidth: number
+  cardHeight: number
+  targetRect: DOMRect
+}) {
+  const right = args.left + args.cardWidth
+  const bottom = args.top + args.cardHeight
+  const overlapWidth = Math.max(0, Math.min(right, args.targetRect.right) - Math.max(args.left, args.targetRect.left))
+  const overlapHeight = Math.max(0, Math.min(bottom, args.targetRect.bottom) - Math.max(args.top, args.targetRect.top))
+  return overlapWidth * overlapHeight
+}
+
+function bestFallbackCardPosition(args: {
+  targetRect: DOMRect
+  cardWidth: number
+  cardHeight: number
+  margin: number
+  viewportWidth: number
+  viewportHeight: number
+}) {
+  const maxTop = Math.max(args.margin, args.viewportHeight - args.margin - args.cardHeight)
+  const maxLeft = Math.max(args.margin, args.viewportWidth - args.margin - args.cardWidth)
+  const candidates = [
+    { top: args.margin, left: args.margin },
+    { top: args.margin, left: maxLeft },
+    { top: maxTop, left: args.margin },
+    { top: maxTop, left: maxLeft },
+  ]
+
+  return candidates
+    .map((candidate, index) => ({
+      ...candidate,
+      index,
+      overlap: cardTargetOverlap({
+        ...candidate,
+        cardWidth: args.cardWidth,
+        cardHeight: args.cardHeight,
+        targetRect: args.targetRect,
+      }),
+    }))
+    .sort((a, b) => a.overlap - b.overlap || b.index - a.index)[0]
+}
+
 function resolveCardPosition(args: {
   targetRect: DOMRect | null
   cardWidth: number
@@ -809,12 +879,29 @@ function resolveCardPosition(args: {
   const canPlaceLeft = rect.left - gap - args.cardWidth >= margin
 
   let placement = args.placement || 'auto'
+  if (
+    (placement === 'bottom' && !canPlaceBottom) ||
+    (placement === 'top' && !canPlaceTop) ||
+    (placement === 'right' && !canPlaceRight) ||
+    (placement === 'left' && !canPlaceLeft)
+  ) {
+    placement = 'auto'
+  }
   if (placement === 'auto') {
     if (canPlaceBottom) placement = 'bottom'
     else if (canPlaceTop) placement = 'top'
     else if (canPlaceRight) placement = 'right'
     else if (canPlaceLeft) placement = 'left'
-    else placement = 'bottom'
+    else {
+      return bestFallbackCardPosition({
+        targetRect: rect,
+        cardWidth: args.cardWidth,
+        cardHeight: args.cardHeight,
+        margin,
+        viewportWidth,
+        viewportHeight,
+      })
+    }
   }
 
   let top = rect.bottom + gap
@@ -921,6 +1008,7 @@ export function OnboardingOverlay() {
     neverShowAgain,
     close,
     completeTutorial,
+    goToStep,
   } = useOnboardingStore((state) => ({
     hydrated: state.hydrated,
     status: state.status,
@@ -935,6 +1023,7 @@ export function OnboardingOverlay() {
     neverShowAgain: state.neverShowAgain,
     close: state.close,
     completeTutorial: state.completeTutorial,
+    goToStep: state.goToStep,
   }))
 
   const [targetRect, setTargetRect] = React.useState<DOMRect | null>(null)
@@ -989,6 +1078,40 @@ export function OnboardingOverlay() {
     }
     advance()
   }, [advance, navigate, status, step])
+
+  const restoreBenchstoreStartStep = React.useCallback(async () => {
+    triggerTargetAction('experiment-launch-close')
+    if (!queryTarget('benchstore-dialog')) {
+      triggerTargetAction('landing-benchstore')
+      await waitForTarget('benchstore-dialog')
+    }
+    if (!queryTarget('benchstore-detail-action-strip')) {
+      const featuredCard = await waitForTarget('benchstore-featured-card')
+      if (featuredCard) {
+        triggerTargetAction('benchstore-featured-card')
+        await waitForTarget('benchstore-detail-action-strip')
+      }
+    }
+    goToStep(7)
+  }, [goToStep])
+
+  const handlePrevious = React.useCallback(() => {
+    if (step?.id === 'benchstore-overview') {
+      triggerTargetAction('benchstore-close')
+      goToStep(2)
+      return
+    }
+    if (step?.id === 'landing-open-dialog') {
+      void restoreBenchstoreStartStep()
+      return
+    }
+    if (step?.id === 'launch-mode-overview') {
+      triggerTargetAction('experiment-launch-close')
+      goToStep(8)
+      return
+    }
+    previousStep()
+  }, [goToStep, previousStep, restoreBenchstoreStartStep, step?.id])
 
   React.useEffect(() => {
     hydrate()
@@ -1331,14 +1454,15 @@ export function OnboardingOverlay() {
 
       <div
         ref={cardRef}
-        className="pointer-events-auto fixed w-[min(466px,calc(100vw-32px))] overflow-hidden rounded-[30px] border border-[rgba(255,255,255,0.28)] bg-[linear-gradient(180deg,rgba(255,252,248,0.98),rgba(246,239,231,0.95))] p-5 shadow-[0_32px_110px_-44px_rgba(15,23,42,0.62)] backdrop-blur-xl"
+        className="pointer-events-auto fixed flex max-h-[calc(100vh-32px)] w-[min(466px,calc(100vw-32px))] flex-col overflow-hidden rounded-[30px] border border-[rgba(255,255,255,0.28)] bg-[linear-gradient(180deg,rgba(255,252,248,0.98),rgba(246,239,231,0.95))] p-5 shadow-[0_32px_110px_-44px_rgba(15,23,42,0.62)] backdrop-blur-xl"
         style={{
           top: cardPosition.top,
           left: cardPosition.left,
         }}
       >
         <div className="absolute inset-x-0 top-0 h-px bg-[linear-gradient(90deg,transparent,rgba(160,133,103,0.4),transparent)]" />
-        <div className="flex items-start gap-3">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="flex items-start gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[rgba(199,173,150,0.22)] text-[rgba(92,78,58,0.95)]">
             {step.route === 'landing' ? <Compass className="h-5 w-5" /> : <Sparkles className="h-5 w-5" />}
           </div>
@@ -1397,18 +1521,19 @@ export function OnboardingOverlay() {
               </div>
             ) : null}
           </div>
+          </div>
         </div>
 
-        <div className={cn('mt-6 flex gap-2', stepIndex === 0 ? 'justify-end' : 'justify-between')}>
+        <div className={cn('mt-6 flex shrink-0 flex-wrap gap-2', stepIndex === 0 ? 'justify-end' : 'justify-between')}>
           {stepIndex > 0 ? (
-            <Button variant="ghost" onClick={previousStep}>
+            <Button variant="ghost" onClick={handlePrevious}>
               <ChevronLeft className="mr-1 h-4 w-4" />
               {copy.back}
             </Button>
           ) : (
             <span />
           )}
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Button variant="secondary" onClick={() => exitTutorial('close')}>
               <BookOpen className="mr-2 h-4 w-4" />
               {copy.skip}
