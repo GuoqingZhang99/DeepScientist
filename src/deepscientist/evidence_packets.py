@@ -13,6 +13,22 @@ DEFAULT_RUNNER_TOOL_RESULT_THRESHOLD_BYTES = 8_000
 _MAX_SUMMARY_CHARS = 900
 _MAX_BLOCKERS = 12
 _RAW_PAYLOAD_UNSET = object()
+_READ_CACHE_SCHEMA_VERSION = 1
+_HOT_TOOL_RESULT_THRESHOLDS_BYTES = {
+    "artifact.get_quest_state": 4_000,
+    "artifact.get_global_status": 4_000,
+    "artifact.get_paper_contract_health": 4_000,
+    "artifact.validate_manuscript_coverage": 4_000,
+    "artifact.list_paper_outlines": 2_000,
+    "bash_exec.bash_exec": 2_000,
+}
+_FULL_DETAIL_FORCE_COMPACT_TOOLS = {
+    "artifact.get_quest_state",
+    "artifact.get_global_status",
+    "artifact.get_paper_contract_health",
+    "artifact.validate_manuscript_coverage",
+    "artifact.list_paper_outlines",
+}
 
 
 def payload_json_bytes(payload: Any) -> bytes:
@@ -26,9 +42,64 @@ def payload_sha256(payload: Any) -> str:
     return hashlib.sha256(payload_json_bytes(payload)).hexdigest()
 
 
+def _normalized_tool_name(tool_name: str | None) -> str:
+    return str(tool_name or "").strip()
+
+
+def _compact_threshold_for_tool(tool_name: str, *, default_threshold: int) -> int:
+    hot_threshold = _HOT_TOOL_RESULT_THRESHOLDS_BYTES.get(_normalized_tool_name(tool_name))
+    if hot_threshold is None:
+        return int(default_threshold)
+    return min(int(default_threshold), hot_threshold)
+
+
+def _tool_force_compaction(*, tool_name: str, full_detail_requested: bool | None, force: bool) -> bool:
+    if force:
+        return True
+    return bool(full_detail_requested) and _normalized_tool_name(tool_name) in _FULL_DETAIL_FORCE_COMPACT_TOOLS
+
+
 def _slug(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip())
     return normalized.strip("-")[:80] or "payload"
+
+
+def _strip_read_cache_volatile(value: Any) -> Any:
+    volatile_keys = {
+        "created_at",
+        "updated_at",
+        "generated_at",
+        "completed_at",
+        "read_cache",
+        "run_age_seconds",
+        "status_age_seconds",
+        "silent_seconds",
+        "progress_age_seconds",
+        "signal_age_seconds",
+    }
+    if isinstance(value, dict):
+        return {
+            key: _strip_read_cache_volatile(item)
+            for key, item in value.items()
+            if str(key) not in volatile_keys and not str(key).endswith("_age_seconds")
+        }
+    if isinstance(value, list):
+        return [_strip_read_cache_volatile(item) for item in value]
+    return value
+
+
+def _read_cache_path(*, quest_root: Path, tool_name: str, detail: str | None, cache_key: Any) -> Path:
+    key_hash = payload_sha256({"tool_name": tool_name, "detail": detail, "cache_key": cache_key})[:20]
+    return quest_root / ".ds" / "read_cache" / f"{_slug(tool_name)}-{key_hash}.json"
+
+
+def _command_fingerprint(payload: dict[str, Any]) -> str:
+    return payload_sha256(
+        {
+            "command": " ".join(str(payload.get("command") or "").split()),
+            "cwd": str(payload.get("cwd") or payload.get("workdir") or "").strip(),
+        }
+    )
 
 
 def _sidecar_path(
@@ -327,3 +398,193 @@ def compact_runner_tool_event(
         "output_bytes": output_bytes,
         "source_payload_bytes": source_payload_bytes,
     }
+
+
+def compact_mcp_tool_result(
+    payload: dict[str, Any],
+    *,
+    quest_root: Path,
+    run_id: str | None,
+    tool_name: str,
+    detail: str | None = None,
+    force: bool = False,
+    threshold_bytes: int | None = None,
+    reason: str | None = None,
+    full_detail_requested: bool | None = None,
+) -> dict[str, Any]:
+    normalized_detail = str(detail or "").strip().lower() or None
+    requested_full_detail = bool(full_detail_requested) or normalized_detail == "full"
+    default_threshold = DEFAULT_EVIDENCE_PACKET_THRESHOLD_BYTES if threshold_bytes is None else int(threshold_bytes)
+    effective_threshold = (
+        _compact_threshold_for_tool(tool_name, default_threshold=default_threshold)
+        if requested_full_detail
+        else default_threshold
+    )
+    compacted, _meta = compact_evidence_payload(
+        payload,
+        quest_root=quest_root,
+        run_id=run_id,
+        tool_name=tool_name,
+        detail=normalized_detail,
+        force=_tool_force_compaction(
+            tool_name=tool_name,
+            full_detail_requested=requested_full_detail,
+            force=force,
+        ),
+        threshold_bytes=effective_threshold,
+        reason=reason,
+        full_detail_requested=requested_full_detail,
+    )
+    return compacted if isinstance(compacted, dict) else payload
+
+
+def cached_compact_mcp_tool_result(
+    payload: dict[str, Any],
+    *,
+    quest_root: Path,
+    run_id: str | None,
+    tool_name: str,
+    detail: str | None = None,
+    cache_key: Any = None,
+    source_path: Path | None = None,
+    force: bool = False,
+    threshold_bytes: int | None = None,
+    reason: str | None = None,
+    full_detail_requested: bool | None = None,
+) -> dict[str, Any]:
+    normalized_detail = str(detail or "").strip().lower() or None
+    if _normalized_tool_name(tool_name) == "bash_exec.bash_exec":
+        payload = dict(payload)
+        if not payload.get("cwd"):
+            payload["cwd"] = str(quest_root)
+        if not payload.get("command_fingerprint"):
+            payload["command_fingerprint"] = _command_fingerprint(payload)
+    resolved_source = source_path.expanduser().resolve() if source_path is not None else None
+    source_stat = resolved_source.stat() if resolved_source is not None and resolved_source.exists() else None
+    stable_payload = _strip_read_cache_volatile(payload)
+    payload_fingerprint = payload_sha256(stable_payload)
+    original_bytes = len(payload_json_bytes(payload))
+    resolved_cache_key = cache_key if cache_key is not None else {"detail": normalized_detail}
+    cache_path = _read_cache_path(
+        quest_root=quest_root,
+        tool_name=tool_name,
+        detail=normalized_detail,
+        cache_key=resolved_cache_key,
+    )
+    cached = read_json(cache_path, {})
+    cache_hit = (
+        isinstance(cached, dict)
+        and int(cached.get("schema_version") or 0) == _READ_CACHE_SCHEMA_VERSION
+        and cached.get("payload_fingerprint") == payload_fingerprint
+    )
+    read_cache = {
+        "schema_version": _READ_CACHE_SCHEMA_VERSION,
+        "cache_hit": cache_hit,
+        "cache_path": str(cache_path),
+        "payload_fingerprint": payload_fingerprint,
+        "payload_bytes": original_bytes,
+        "source_path": str(resolved_source) if resolved_source is not None else None,
+        "source_mtime_ns": getattr(source_stat, "st_mtime_ns", None) if source_stat is not None else None,
+        "source_size": getattr(source_stat, "st_size", None) if source_stat is not None else None,
+    }
+    if cache_hit:
+        cached_evidence_packet = (
+            dict(cached.get("evidence_packet") or {})
+            if isinstance(cached.get("evidence_packet"), dict)
+            else None
+        )
+        if cached_evidence_packet is None:
+            sidecar_payload, _sidecar_meta = compact_evidence_payload(
+                payload,
+                quest_root=quest_root,
+                run_id=run_id,
+                tool_name=tool_name,
+                detail=normalized_detail,
+                force=True,
+                threshold_bytes=1,
+                reason="read_cache_sidecar_ref",
+                full_detail_requested=full_detail_requested,
+            )
+            if isinstance(sidecar_payload, dict) and isinstance(sidecar_payload.get("evidence_packet"), dict):
+                cached_evidence_packet = dict(sidecar_payload["evidence_packet"])
+                cached["evidence_packet"] = cached_evidence_packet
+                write_json(cache_path, cached)
+        read_cache["saved_bytes"] = max(0, original_bytes)
+        if cached_evidence_packet:
+            read_cache["sidecar_path"] = cached_evidence_packet.get("sidecar_path")
+            read_cache["payload_sha256"] = cached_evidence_packet.get("payload_sha256")
+        ok_value = _ok_from_payload_or_status(payload)
+        result = {
+            "ok": ok_value if ok_value is not None else True,
+            "compacted": True,
+            "delta_marker": True,
+            "delta_kind": "unchanged_read_cache",
+            "tool_name": tool_name,
+            "detail": normalized_detail,
+            "fingerprint": payload_fingerprint,
+            "summary": cached.get("summary") or summarize_payload(payload, tool_name=tool_name),
+            "read_cache": read_cache,
+            "command_fingerprint": payload.get("command_fingerprint"),
+            "cwd": payload.get("cwd"),
+        }
+        if cached_evidence_packet:
+            result["evidence_packet"] = cached_evidence_packet
+        return result
+
+    compacted = compact_mcp_tool_result(
+        payload,
+        quest_root=quest_root,
+        run_id=run_id,
+        tool_name=tool_name,
+        detail=normalized_detail,
+        force=force,
+        threshold_bytes=threshold_bytes,
+        reason=reason,
+        full_detail_requested=full_detail_requested,
+    )
+    evidence_packet = (
+        dict(compacted.get("evidence_packet") or {})
+        if isinstance(compacted, dict) and isinstance(compacted.get("evidence_packet"), dict)
+        else None
+    )
+    if evidence_packet is None:
+        sidecar_payload, _sidecar_meta = compact_evidence_payload(
+            payload,
+            quest_root=quest_root,
+            run_id=run_id,
+            tool_name=tool_name,
+            detail=normalized_detail,
+            force=True,
+            threshold_bytes=1,
+            reason="read_cache_sidecar_ref",
+            full_detail_requested=full_detail_requested,
+        )
+        if isinstance(sidecar_payload, dict) and isinstance(sidecar_payload.get("evidence_packet"), dict):
+            evidence_packet = dict(sidecar_payload["evidence_packet"])
+    read_cache["saved_bytes"] = 0
+    if evidence_packet:
+        read_cache["sidecar_path"] = evidence_packet.get("sidecar_path")
+        read_cache["payload_sha256"] = evidence_packet.get("payload_sha256")
+    compacted["read_cache"] = read_cache
+    if evidence_packet and compacted.get("compacted") is True and "evidence_packet" not in compacted:
+        compacted["evidence_packet"] = evidence_packet
+    ensure_dir(cache_path.parent)
+    write_json(
+        cache_path,
+        {
+            "schema_version": _READ_CACHE_SCHEMA_VERSION,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "tool_name": tool_name,
+            "detail": normalized_detail,
+            "cache_key": resolved_cache_key,
+            "payload_fingerprint": payload_fingerprint,
+            "payload_bytes": original_bytes,
+            "summary": summarize_payload(payload, tool_name=tool_name),
+            "source_path": str(resolved_source) if resolved_source is not None else None,
+            "source_mtime_ns": getattr(source_stat, "st_mtime_ns", None) if source_stat is not None else None,
+            "source_size": getattr(source_stat, "st_size", None) if source_stat is not None else None,
+            "evidence_packet": evidence_packet,
+        },
+    )
+    return compacted
