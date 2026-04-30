@@ -7369,6 +7369,147 @@ def test_daemon_retry_exhausts_after_five_attempts(temp_home: Path) -> None:
     )
 
 
+def test_daemon_retry_exhaustion_records_provider_diagnosis_payload(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app.runners_config["codex"].update(
+        {
+            "retry_on_failure": True,
+            "retry_max_attempts": 2,
+            "retry_initial_backoff_sec": 0,
+            "retry_backoff_multiplier": 2,
+            "retry_max_backoff_sec": 0,
+        }
+    )
+    quest = app.quest_service.create("retry exhausted provider diagnosis quest")
+    quest_id = quest["quest_id"]
+
+    class TransientProviderFailRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        def run(self, request):
+            self.requests.append(request)
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=False,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="unexpected status 503 Service Unavailable from upstream provider",
+                exit_code=1,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    runner = TransientProviderFailRunner()
+    app.runners["codex"] = runner
+
+    payload = app.handlers.chat(quest_id, {"text": "Please continue.", "source": "tui-ink"})
+    assert payload["ok"] is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snapshot = app.quest_service.snapshot(quest_id)
+        events = read_jsonl(Path(quest["quest_root"]) / ".ds" / "events.jsonl")
+        if (
+            any(item.get("type") == "runner.turn_error" for item in events)
+            and snapshot.get("retry_state") is None
+            and str(snapshot.get("display_status") or "").strip() == "error"
+        ):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("provider failure did not settle after retry budget exhaustion")
+
+    snapshot = app.quest_service.snapshot(quest_id)
+    events = read_jsonl(Path(quest["quest_root"]) / ".ds" / "events.jsonl")
+    retry_exhausted = [item for item in events if item.get("type") == "runner.turn_retry_exhausted"]
+    turn_errors = [item for item in events if item.get("type") == "runner.turn_error"]
+
+    assert len(runner.requests) == 2
+    assert snapshot["continuation_policy"] == "wait_for_user_or_resume"
+    assert snapshot["continuation_reason"] == "external_codex_upstream_provider_error"
+    assert retry_exhausted
+    diagnosis = retry_exhausted[-1].get("diagnosis")
+    assert diagnosis["code"] == "codex_upstream_provider_error"
+    assert diagnosis["problem"]
+    assert diagnosis["why"]
+    assert any("provider" in line.lower() for line in diagnosis["fix"])
+    assert retry_exhausted[-1]["diagnosis_code"] == "codex_upstream_provider_error"
+    assert turn_errors[-1]["diagnosis_code"] == "codex_upstream_provider_error"
+
+
+def test_daemon_stops_retry_for_provider_account_blocker(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    app.runners_config["codex"].update(
+        {
+            "retry_on_failure": True,
+            "retry_max_attempts": 5,
+            "retry_initial_backoff_sec": 0,
+            "retry_backoff_multiplier": 2,
+            "retry_max_backoff_sec": 0,
+        }
+    )
+    quest = app.quest_service.create("provider account blocker quest")
+    quest_id = quest["quest_id"]
+
+    class AccountBlockerRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        def run(self, request):
+            self.requests.append(request)
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=False,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="unexpected status 403 Forbidden: account balance is negative, please recharge first",
+                exit_code=1,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    runner = AccountBlockerRunner()
+    app.runners["codex"] = runner
+
+    payload = app.handlers.chat(quest_id, {"text": "Please continue.", "source": "tui-ink"})
+    assert payload["ok"] is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snapshot = app.quest_service.snapshot(quest_id)
+        events = read_jsonl(Path(quest["quest_root"]) / ".ds" / "events.jsonl")
+        if any(item.get("type") == "runner.turn_error" for item in events):
+            if snapshot.get("retry_state") is None and str(snapshot.get("display_status") or "").strip() == "error":
+                break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("provider account blocker did not settle into an immediate error state")
+
+    snapshot = app.quest_service.snapshot(quest_id)
+    events = read_jsonl(Path(quest["quest_root"]) / ".ds" / "events.jsonl")
+    turn_errors = [item for item in events if item.get("type") == "runner.turn_error"]
+
+    assert len(runner.requests) == 1
+    assert snapshot["retry_state"] is None
+    assert snapshot["continuation_policy"] == "wait_for_user_or_resume"
+    assert snapshot["continuation_reason"] == "non_retryable_runner_error"
+    assert not any(item.get("type") == "runner.turn_retry_scheduled" for item in events)
+    assert turn_errors[-1]["diagnosis_code"] == "codex_provider_account_error"
+
+
 def test_daemon_skips_retry_for_non_retryable_minimax_protocol_error(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
