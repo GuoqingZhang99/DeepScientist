@@ -975,11 +975,11 @@ export function SettingsPage({
       <main className="mx-auto mt-5 min-h-0 w-full flex-1 overflow-hidden">
         <div
           className={cn(
-            'mx-auto grid h-full min-h-0 w-full max-w-[90vw] grid-rows-[auto_minmax(0,1fr)] gap-4 xl:grid-rows-1 xl:gap-0',
-            dockOpen ? 'xl:grid-cols-[260px_minmax(0,1fr)_420px]' : 'xl:grid-cols-[260px_minmax(0,1fr)]'
+            'mx-auto grid h-full min-h-0 w-full max-w-[90vw] grid-rows-[minmax(180px,34svh)_minmax(0,1fr)] gap-4 md:grid-cols-[260px_minmax(0,1fr)] md:grid-rows-1 md:gap-0',
+            dockOpen && 'xl:grid-cols-[260px_minmax(0,1fr)_420px]'
           )}
         >
-          <aside className="feed-scrollbar flex max-h-[34vh] min-h-0 flex-col overflow-auto border-b border-black/[0.08] pb-4 xl:max-h-none xl:border-b-0 xl:border-r xl:pb-0 xl:pr-6 dark:border-white/[0.08]">
+          <aside className="feed-scrollbar flex h-full min-h-0 flex-col overflow-auto border-b border-black/[0.08] pb-4 md:border-b-0 md:border-r md:pb-0 md:pr-6 dark:border-white/[0.08]">
             <div className="text-sm font-medium">{t.title}</div>
 
             <div className="relative mt-4">
@@ -1142,7 +1142,7 @@ export function SettingsPage({
             </div>
           </aside>
 
-          <section ref={contentRef} className="feed-scrollbar min-h-0 overflow-y-auto py-4 xl:px-8 xl:py-6">
+          <section ref={contentRef} className="feed-scrollbar min-h-0 overflow-y-auto py-4 md:px-6 md:py-6 xl:px-8">
             <div className={cn('mx-auto w-full', dockOpen ? 'max-w-[1010px]' : 'max-w-[1180px]')}>
               {isPageLoading ? (
                 <div className="flex items-center gap-3 text-sm text-muted-foreground">
@@ -1394,7 +1394,11 @@ export function SettingsPage({
             </div>
           </section>
 
-          {dockOpen ? <SettingsOpsRail /> : null}
+          {dockOpen ? (
+            <div className="fixed inset-y-4 right-4 z-[80] w-[min(420px,calc(100vw-2rem))] xl:static xl:inset-auto xl:z-auto xl:w-auto xl:min-h-0">
+              <SettingsOpsRail />
+            </div>
+          ) : null}
         </div>
       </main>
       <SettingsOpsLauncher />
