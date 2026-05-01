@@ -44,11 +44,13 @@ Use several query families and refine them iteratively:
 
 ## 2.1 Source order and de-dup protocol
 
-Before opening a fresh broad search, check durable memory first:
+Before opening a fresh broad search, check durable memory and sibling quests first:
 
 1. recent quest `papers`, `ideas`, and `knowledge`
 2. recent global `papers`, `knowledge`, and `templates`
-3. `memory.search(...)` with the baseline name, task, dataset, mechanism, and current idea labels
+3. `memory.search(...)` with the baseline name, task, dataset, mechanism, and current idea labels — note this is substring match, so issue several single-keyword queries (`bc8`, `RAG`, `verifier`) instead of one long phrase
+4. sibling-quest scan: `bash_exec ls -t ~/DeepScientist/quests/*/brief.md` to enumerate prior quests, then `cat` the briefs for any same-domain matches; for material overlaps deep-read `~/DeepScientist/quests/<id>/paper/latex/main.tex`, especially the `Conclusion` and `Limitations` sections, where prescriptive guidance for follow-up quests is recorded
+5. `~/DeepScientist/framework_quirks.md` if it exists — known framework-layer pitfalls a future route would otherwise rediscover
 
 Then search externally for the missing neighborhood:
 
