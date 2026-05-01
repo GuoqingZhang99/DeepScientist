@@ -534,7 +534,11 @@ def test_review_and_rebuttal_skills_route_extra_evidence_into_shared_campaign_pr
 
 def test_publishability_stop_loss_guidance_is_prompt_only() -> None:
     root = repo_root() / "src" / "skills"
-    for skill_id in ("idea", "write", "review", "decision"):
+    for skill_id in ("write", "review", "decision"):
         text = (root / skill_id / "SKILL.md").read_text(encoding="utf-8")
         assert "publishability stop-loss" in text
+        assert "user decision" in text or "user publication" in text or "user's stated" in text
         assert "publishability_gate_mode" not in text
+    idea_text = (root / "idea" / "SKILL.md").read_text(encoding="utf-8")
+    assert "publishability stop-loss" not in idea_text
+    assert "publishability_gate_mode" not in idea_text
