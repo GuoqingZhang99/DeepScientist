@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   compileStartResearchPrompt,
   defaultStartResearchTemplate,
+  formatLaunchFormMarkdown,
   resolveStartResearchConnectorBindings,
   saveStartResearchTemplate,
   shouldRecommendStartResearchConnectorBinding,
@@ -69,6 +70,76 @@ describe('shouldRecommendStartResearchConnectorBinding', () => {
         },
       })
     ).toBe(true)
+  })
+})
+
+describe('launch form markdown', () => {
+  it('renders a recorded launch form from the startup contract', () => {
+    const form = {
+      ...defaultStartResearchTemplate('en'),
+      title: 'Autonomous paper quest',
+      goal: 'Improve the baseline and write a paper-ready summary.',
+      objectives: 'Reproduce baseline\nRun one improvement',
+      runtime_constraints: 'Use one local GPU only.',
+      decision_policy: 'autonomous' as const,
+      baseline_urls: 'https://github.com/example/baseline',
+    }
+
+    const markdown = formatLaunchFormMarkdown({
+      questId: '101',
+      title: 'Autonomous paper quest',
+      startupContract: {
+        workspace_mode: 'autonomous',
+        decision_policy: 'autonomous',
+        launch_form_source: 'setup_agent',
+        launch_form: form,
+      },
+      workspaceMode: 'autonomous',
+      locale: 'en',
+    })
+
+    expect(markdown).toContain('# Launch Form')
+    expect(markdown).toContain('Source: SetupAgent')
+    expect(markdown).toContain('Decision policy: Autonomous')
+    expect(markdown).toContain('Improve the baseline')
+    expect(markdown).toContain('https://github.com/example/baseline')
+  })
+
+  it('falls back to manual launch markdown when no structured form exists', () => {
+    const markdown = formatLaunchFormMarkdown({
+      questId: 'manual-1',
+      title: 'Manual Quest',
+      startupContract: {
+        workspace_mode: 'copilot',
+        decision_policy: 'user_gated',
+        launch_form_source: 'manual_markdown',
+        launch_markdown: 'Please help inspect this existing repo.',
+      },
+      locale: 'en',
+    })
+
+    expect(markdown).toContain('Manual Launch Markdown')
+    expect(markdown).toContain('Please help inspect this existing repo.')
+    expect(markdown).toContain('User-gated')
+  })
+
+  it('treats missing startup decision policy as user-gated in structured launch markdown', () => {
+    const markdown = formatLaunchFormMarkdown({
+      questId: 'legacy-1',
+      title: 'Legacy Quest',
+      startupContract: {
+        workspace_mode: 'autonomous',
+        launch_form_source: 'manual_form',
+        launch_form: {
+          title: 'Legacy Quest',
+          goal: 'Continue from an older saved form.',
+        },
+      },
+      locale: 'en',
+    })
+
+    expect(markdown).toContain('- Decision policy: User-gated')
+    expect(markdown).toContain('- Decision policy: Ask the user before major choices')
   })
 })
 

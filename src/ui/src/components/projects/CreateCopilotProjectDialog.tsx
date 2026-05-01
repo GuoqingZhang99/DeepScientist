@@ -242,6 +242,10 @@ export function CreateCopilotProjectDialog(props: {
           decision_policy: 'user_gated',
           launch_mode: 'custom',
           custom_profile: 'freeform',
+          launch_form_source: 'copilot_manual',
+          launch_form_recorded_at: new Date().toISOString(),
+          launch_setup_quest_id: props.initialSetupQuestId || null,
+          launch_markdown: String(props.initialMessage || '').trim() || normalizedTitle,
           project_display: {
             template,
             accent_color: accentColor,

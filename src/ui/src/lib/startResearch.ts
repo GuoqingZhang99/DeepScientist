@@ -73,6 +73,8 @@ export type StartResearchTemplate = {
   user_language: 'en' | 'zh'
 }
 
+export type LaunchFormSnapshot = StartResearchTemplate & StartResearchContractFields
+
 export type StartResearchContractFields = {
   scope: ResearchScope
   baseline_mode: BaselineMode
@@ -605,6 +607,18 @@ function sanitizeTemplate(input: PersistedStartResearchTemplate): StartResearchT
   }
 }
 
+export function sanitizeStartResearchTemplate(input: PersistedStartResearchTemplate): StartResearchTemplate {
+  return sanitizeTemplate(input)
+}
+
+export function buildStartResearchLaunchSnapshot(input: StartResearchTemplate): LaunchFormSnapshot {
+  const normalized = sanitizeTemplate(input)
+  return {
+    ...normalized,
+    ...resolveStartResearchContractFields(normalized),
+  }
+}
+
 function withoutPersistedQuestId(input: StartResearchTemplate): StartResearchTemplate {
   return {
     ...sanitizeTemplate(input),
@@ -639,6 +653,172 @@ function labelDecisionPolicy(value: DecisionPolicy) {
     default:
       return 'Autonomous: decide ordinary route choices yourself, keep the user informed through threaded updates, and do not hand routine decisions back to the user.'
   }
+}
+
+function labelDecisionPolicyShort(value: DecisionPolicy) {
+  return value === 'user_gated' ? 'User-gated' : 'Autonomous'
+}
+
+function labelLaunchFormSource(value: unknown) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'setup_agent') return 'SetupAgent'
+  if (normalized === 'manual_markdown') return 'Manual Markdown'
+  if (normalized === 'copilot_manual') return 'Copilot manual setup'
+  if (normalized === 'manual_form') return 'Manual start form'
+  return normalized || 'Unknown'
+}
+
+function markdownTextBlock(value: unknown, fallback = 'Not provided') {
+  const text = String(value || '').trim()
+  return text || fallback
+}
+
+function markdownBulletList(value: unknown, fallback = '- None provided') {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => String(item || '').trim()).filter(Boolean)
+    return items.length ? items.map((item) => `- ${item}`).join('\n') : fallback
+  }
+  const lines = String(value || '')
+    .split('\n')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return lines.length ? lines.map((item) => (item.startsWith('- ') ? item : `- ${item}`)).join('\n') : fallback
+}
+
+function startupContractRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+}
+
+export function formatLaunchFormMarkdown(input: {
+  questId?: string | null
+  title?: string | null
+  goal?: string | null
+  startupContract?: Record<string, unknown> | null
+  workspaceMode?: string | null
+  locale?: 'en' | 'zh'
+}) {
+  const startupContract = startupContractRecord(input.startupContract)
+  const rawLaunchForm = startupContractRecord(startupContract.launch_form)
+  const hasLaunchForm = Object.keys(rawLaunchForm).length > 0
+  const fallbackLanguage = input.locale === 'en' ? 'en' : 'zh'
+  const decisionPolicy = Object.prototype.hasOwnProperty.call(startupContract, 'decision_policy')
+    ? sanitizeDecisionPolicy(startupContract.decision_policy)
+    : 'user_gated'
+  const launchForm = hasLaunchForm
+    ? buildStartResearchLaunchSnapshot({
+        ...defaultStartResearchTemplate(
+          rawLaunchForm.user_language === 'en' || rawLaunchForm.user_language === 'zh'
+            ? (rawLaunchForm.user_language as 'en' | 'zh')
+            : fallbackLanguage
+        ),
+        decision_policy: decisionPolicy,
+        ...(rawLaunchForm as Partial<StartResearchTemplate & StartResearchContractFields>),
+      })
+    : null
+  const launchMarkdown = String(startupContract.launch_markdown || '').trim()
+  const fallbackGoal = String(input.goal || '').trim()
+  const workspaceMode = String(startupContract.workspace_mode || input.workspaceMode || '').trim() || 'unknown'
+  const source = labelLaunchFormSource(startupContract.launch_form_source)
+  const generatedAt = String(startupContract.launch_form_recorded_at || '').trim()
+  const setupQuestId = String(startupContract.launch_setup_quest_id || '').trim()
+
+  const lines = [
+    '# Launch Form',
+    '',
+    `- Quest: ${String(input.questId || '').trim() || 'Unknown'}`,
+    `- Title: ${String(input.title || launchForm?.title || '').trim() || 'Untitled quest'}`,
+    `- Source: ${source}`,
+    `- Workspace mode: ${workspaceMode}`,
+    `- Decision policy: ${labelDecisionPolicyShort(decisionPolicy)}`,
+    ...(setupQuestId ? [`- SetupAgent quest: ${setupQuestId}`] : []),
+    ...(generatedAt ? [`- Recorded at: ${generatedAt}`] : []),
+    '',
+  ]
+
+  if (launchForm) {
+    lines.push(
+      '## Primary Research Request',
+      '',
+      markdownTextBlock(launchForm.goal),
+      '',
+      '## Objectives',
+      '',
+      markdownBulletList(launchForm.objectives),
+      '',
+      '## Baseline And References',
+      '',
+      `- Baseline id: ${launchForm.baseline_id || 'None'}`,
+      `- Baseline variant: ${launchForm.baseline_variant_id || 'None'}`,
+      `- Baseline source preference: ${labelBaselineSourceMode(launchForm.baseline_source_mode)}`,
+      `- Execution start mode: ${labelExecutionStartMode(launchForm.execution_start_mode)}`,
+      `- Baseline acceptance target: ${labelBaselineAcceptanceTarget(launchForm.baseline_acceptance_target)}`,
+      '',
+      'Baseline URLs / local paths:',
+      markdownBulletList(launchForm.baseline_urls),
+      '',
+      'Paper URLs / local paths:',
+      markdownBulletList(launchForm.paper_urls),
+      '',
+      '## Runtime Constraints',
+      '',
+      markdownTextBlock(launchForm.runtime_constraints),
+      '',
+      '## Delivery And Decisions',
+      '',
+      `- Research paper required: ${launchForm.need_research_paper ? 'Yes' : 'No'}`,
+      `- Research intensity: ${labelResearchIntensity(launchForm.research_intensity)}`,
+      `- Decision policy: ${labelDecisionPolicy(launchForm.decision_policy)}`,
+      `- Launch mode: ${labelLaunchMode(launchForm.launch_mode)}`,
+      `- Standard profile: ${labelStandardProfile(launchForm.standard_profile)}`,
+      `- Custom profile: ${labelCustomProfile(launchForm.custom_profile)}`,
+      `- Review follow-up policy: ${labelReviewFollowupPolicy(launchForm.review_followup_policy)}`,
+      `- Baseline execution policy: ${labelBaselineExecutionPolicy(launchForm.baseline_execution_policy)}`,
+      `- Manuscript edit mode: ${labelManuscriptEditMode(launchForm.manuscript_edit_mode)}`,
+      '',
+      '## Derived Research Contract',
+      '',
+      `- Scope: ${labelScope(launchForm.scope)}`,
+      `- Baseline policy: ${labelBaselineMode(launchForm.baseline_mode)}`,
+      `- Resource policy: ${labelResourcePolicy(launchForm.resource_policy)}`,
+      `- Git strategy: ${labelGitStrategy(launchForm.git_strategy)}`,
+      `- Time budget per round: ${launchForm.time_budget_hours} hour(s)`,
+      '',
+      '## Custom Context',
+      '',
+      `Entry state summary:\n\n${markdownTextBlock(launchForm.entry_state_summary)}`,
+      '',
+      `Review summary:\n\n${markdownTextBlock(launchForm.review_summary)}`,
+      '',
+      'Review materials:',
+      markdownBulletList(launchForm.review_materials),
+      '',
+      `Custom brief:\n\n${markdownTextBlock(launchForm.custom_brief)}`
+    )
+  } else if (launchMarkdown || fallbackGoal) {
+    lines.push(
+      '## Manual Launch Markdown',
+      '',
+      launchMarkdown || fallbackGoal,
+      '',
+      '## Available Startup Contract',
+      '',
+      '```json',
+      JSON.stringify(startupContract, null, 2),
+      '```'
+    )
+  } else {
+    lines.push(
+      '## Available Startup Contract',
+      '',
+      'This quest does not have a recorded launch form or launch markdown. The current startup contract is shown below.',
+      '',
+      '```json',
+      JSON.stringify(startupContract, null, 2),
+      '```'
+    )
+  }
+
+  return lines.join('\n')
 }
 
 function labelLaunchMode(value: LaunchMode) {

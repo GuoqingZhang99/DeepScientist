@@ -66,6 +66,7 @@ artifact.prepare_start_setup_form(
 Rules:
 
 - use `form_patch` when the launch form itself changes
+- `decision_policy` is a real launch-form field, not just display copy. When autonomous launch is ready, set `form_patch.decision_policy="autonomous"` so the left-side form and the final launched quest both carry the fully autonomous decision contract.
 - `session_patch` is required for a successful setup turn and stores durable fit judgment, launch readiness, missing confirmations, and preview-plan data
 - at least one of `form_patch` or `session_patch` must be non-empty
 - never hide the JSON patch inside `message`
@@ -117,9 +118,9 @@ Minimum ready conditions:
 
 Decision rules:
 
-- If all required checks are sufficient and autonomous fit is good, write `recommended_workspace_mode=autonomous`, `launch_readiness=ready`, fill `form_patch`, and write `session_patch.preview_plan.markdown`.
+- If all required checks are sufficient and autonomous fit is good, write `recommended_workspace_mode=autonomous`, `launch_readiness=ready`, fill `form_patch`, explicitly include `form_patch.decision_policy="autonomous"`, and write `session_patch.preview_plan.markdown`.
 - If critical facts are missing, write `recommended_workspace_mode=provisional_autonomous`, `launch_readiness=needs_confirmation`, include those questions in `missing_confirmations`, update any safe `form_patch` fields, but do not write `session_patch.preview_plan` yet.
-- If the task is not a good autonomous fit, write `recommended_workspace_mode=copilot`, `launch_readiness=recommend_copilot`, explain why in `fit_assessment`, include the next collaboration questions or handoff items in `missing_confirmations`, but do not write a launch preview plan.
+- If the task is not a good autonomous fit, write `recommended_workspace_mode=copilot`, `launch_readiness=recommend_copilot`, explain why in `fit_assessment`, include the next collaboration questions or handoff items in `missing_confirmations`, set `form_patch.decision_policy="user_gated"` when you are changing the form, but do not write a launch preview plan.
 - Never show a launch preview before the user has answered the required questions. Missing details should appear as questions, not as a fake or empty plan.
 - Do not mark `launch_readiness=ready` when the form is mostly empty. In that case, ask the missing questions first.
 
@@ -147,6 +148,14 @@ Use `session_patch` consistently:
   - `markdown`: the user-facing Markdown plan
   - `phases`: array of phase objects with `title`, `goal`, `inputs`, `deliverable`, `user_decision_needed`, and `switch_condition`
   - `risks`: array of concise risks or uncertainty notes
+
+Mode field semantics:
+
+- `session_patch.recommended_workspace_mode` is SetupAgent's recommendation for the Planning UI.
+- `form_patch.decision_policy` is the launch contract that the main research Agent receives after the user starts the quest.
+- For a ready autonomous launch, always make the two consistent by writing `recommended_workspace_mode=autonomous` and `form_patch.decision_policy="autonomous"`.
+- `decision_policy="autonomous"` means the main Agent should decide ordinary route, branch, baseline, experiment-package, and routine cost choices itself while reporting reasons through progress or milestone updates.
+- This does not remove true blockers: missing credentials, privacy/export boundaries, external paid API authorization, irreversible operations, or explicit user-requested approvals should still be surfaced as confirmations.
 
 When `launch_readiness` is `needs_confirmation` or `recommend_copilot`, omit `preview_plan` entirely.
 

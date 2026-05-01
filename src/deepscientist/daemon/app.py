@@ -84,7 +84,7 @@ from ..connector.lingzhu_support import (
 from ..prompts import PromptBuilder
 from ..prompts.builder import classify_turn_intent, current_standard_skills
 from ..connector.qq_profiles import list_qq_profiles, merge_qq_profile_config, normalize_qq_connector_config
-from ..quest import QuestService
+from ..quest import AUTONOMOUS_BLOCKING_WAIT_REASONS, QuestService
 from ..runners import ClaudeRunner, CodexRunner, KimiRunner, OpenCodeRunner, RunRequest, get_runner_factory, register_builtin_runners
 from ..runners.metadata import get_runner_metadata
 from ..runtime_logs import JsonlLogger
@@ -117,13 +117,6 @@ _STALLED_RUNNING_TURN_INACTIVITY_SECONDS = 30 * 60
 _STALLED_RUNNING_TURN_INTERRUPT_TIMEOUT_SECONDS = 5.0
 _IMMEDIATE_READ_INTERRUPT_TIMEOUT_SECONDS = 5.0
 _RESUME_CONTINUE_TEXT = "Continue"
-_AUTONOMOUS_BLOCKING_WAIT_REASONS = {
-    "completion_approval",
-    "credential_required",
-    "privacy_or_data_export_boundary",
-    "large_cost_or_external_paid_api",
-    "user_gated_decision_request",
-}
 CODEX_RETRY_DEFAULT_MAX_ATTEMPTS = 7
 PREVIOUS_CODEX_RETRY_DEFAULT_MAX_ATTEMPTS = 5
 CODEX_RETRY_DEFAULT_INITIAL_BACKOFF_SEC = 10.0
@@ -3758,7 +3751,7 @@ class DaemonApp:
         if self._decision_policy_for(snapshot) != "autonomous":
             return snapshot, False
         reason = str(snapshot.get("continuation_reason") or "").strip() or "wait_for_user_or_resume"
-        if reason in _AUTONOMOUS_BLOCKING_WAIT_REASONS:
+        if reason in AUTONOMOUS_BLOCKING_WAIT_REASONS:
             return snapshot, False
         quest_root = self.quest_service._quest_root(quest_id)
         message = self.quest_service.localized_copy(

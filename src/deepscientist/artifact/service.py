@@ -49,7 +49,7 @@ from ..shared import (
     write_text,
     write_yaml,
 )
-from ..quest import QuestService
+from ..quest import AUTONOMOUS_BLOCKING_WAIT_REASONS, QuestService
 from ..memory.frontmatter import dump_markdown_document, load_markdown_document
 from .arxiv import fetch_arxiv_metadata, read_arxiv_content
 from .charts import render_main_experiment_metric_timeline_chart
@@ -11003,13 +11003,7 @@ class ArtifactService:
 
     @staticmethod
     def _blocking_wait_reasons() -> set[str]:
-        return {
-            "completion_approval",
-            "credential_required",
-            "privacy_or_data_export_boundary",
-            "large_cost_or_external_paid_api",
-            "user_gated_decision_request",
-        }
+        return set(AUTONOMOUS_BLOCKING_WAIT_REASONS)
 
     def _waiting_notice_payload(
         self,

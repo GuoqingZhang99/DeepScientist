@@ -1068,13 +1068,14 @@ npm --prefix src/ui run build</pre>
             "active_anchor": body.get("active_anchor") if "active_anchor" in body else None,
             "default_runner": body.get("default_runner") if "default_runner" in body else None,
             "workspace_mode": body.get("workspace_mode") if "workspace_mode" in body else None,
+            "decision_policy": body.get("decision_policy") if "decision_policy" in body else None,
         }
         if all(value is None for value in updates.values()):
             return {
                 "ok": True,
                 "snapshot": self.app.quest_service.snapshot(quest_id),
             }
-        previous_snapshot = self.app.quest_service.snapshot(quest_id) if updates.get("workspace_mode") else None
+        previous_snapshot = self.app.quest_service.snapshot(quest_id) if updates.get("workspace_mode") or updates.get("decision_policy") else None
         try:
             snapshot = self.app.quest_service.update_settings(quest_id, **updates)
         except FileNotFoundError:
@@ -1083,7 +1084,7 @@ npm --prefix src/ui run build</pre>
             return 400, {"ok": False, "message": str(exc)}
         # When switching from copilot to autonomous, continue safely without
         # replaying stale history-only user messages.
-        if previous_snapshot is not None:
+        if previous_snapshot is not None and (updates.get("workspace_mode") or updates.get("decision_policy")):
             prev_policy = str(previous_snapshot.get("continuation_policy") or "").strip().lower()
             new_policy = str(snapshot.get("continuation_policy") or "").strip().lower()
             prev_status = str(previous_snapshot.get("status") or previous_snapshot.get("runtime_status") or "").strip().lower()

@@ -3094,6 +3094,143 @@ def test_quest_settings_handler_updates_workspace_mode_and_research_state(temp_h
     assert runtime_state["continuation_reason"] == "copilot_mode"
 
 
+def test_quest_settings_handler_updates_decision_policy(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create(
+        "decision policy settings quest",
+        startup_contract={"workspace_mode": "autonomous", "decision_policy": "user_gated"},
+    )
+    quest_id = quest["quest_id"]
+
+    payload = app.handlers.quest_settings(
+        quest_id,
+        {
+            "decision_policy": "autonomous",
+        },
+    )
+
+    assert isinstance(payload, dict)
+    assert payload["ok"] is True
+    quest_yaml = read_yaml(temp_home / "quests" / quest_id / "quest.yaml", {})
+    startup_contract = dict(quest_yaml.get("startup_contract") or {})
+    assert startup_contract["decision_policy"] == "autonomous"
+
+
+def test_quest_settings_decision_policy_autonomous_wakes_non_blocking_wait(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create(
+        "decision policy wake quest",
+        startup_contract={"workspace_mode": "autonomous", "decision_policy": "user_gated"},
+    )
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    app.quest_service.update_research_state(quest_root, workspace_mode="autonomous")
+    app.quest_service.update_runtime_state(
+        quest_root=quest_root,
+        status="active",
+        continuation_policy="wait_for_user_or_resume",
+        continuation_reason="paper_bundle_submitted",
+    )
+
+    class ContinueRunner:
+        binary = ""
+
+        def __init__(self) -> None:
+            self.requests: list[dict[str, str]] = []
+
+        def run(self, request):
+            self.requests.append(
+                {
+                    "message": request.message,
+                    "turn_reason": request.turn_reason,
+                }
+            )
+            history_root = ensure_dir(request.quest_root / ".ds" / "codex_history" / request.run_id)
+            run_root = ensure_dir(request.quest_root / ".ds" / "runs" / request.run_id)
+            return RunResult(
+                ok=True,
+                run_id=request.run_id,
+                model=request.model,
+                output_text="decision policy continue ok",
+                exit_code=0,
+                history_root=history_root,
+                run_root=run_root,
+                stderr_text="",
+            )
+
+    runner = ContinueRunner()
+    app.runners["codex"] = runner
+
+    payload = app.handlers.quest_settings(quest_id, {"decision_policy": "autonomous"})
+
+    assert isinstance(payload, dict)
+    assert payload["ok"] is True
+    assert payload["snapshot"]["continuation_policy"] == "auto"
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if runner.requests:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("decision policy switch did not schedule a continuation turn")
+
+    assert runner.requests[0]["turn_reason"] == "user_message"
+    assert runner.requests[0]["message"] == "Continue"
+
+
+def test_quest_settings_decision_policy_autonomous_keeps_blocking_wait(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create(
+        "decision policy blocking wait quest",
+        startup_contract={"workspace_mode": "autonomous", "decision_policy": "user_gated"},
+    )
+    quest_id = quest["quest_id"]
+    quest_root = Path(quest["quest_root"])
+    app.quest_service.update_research_state(quest_root, workspace_mode="autonomous")
+    app.quest_service.update_runtime_state(
+        quest_root=quest_root,
+        status="active",
+        continuation_policy="wait_for_user_or_resume",
+        continuation_reason="credential_required",
+    )
+
+    payload = app.handlers.quest_settings(quest_id, {"decision_policy": "autonomous"})
+
+    assert isinstance(payload, dict)
+    assert payload["ok"] is True
+    assert payload["snapshot"]["continuation_policy"] == "wait_for_user_or_resume"
+    assert payload["snapshot"]["continuation_reason"] == "credential_required"
+
+    quest_yaml = read_yaml(temp_home / "quests" / quest_id / "quest.yaml", {})
+    startup_contract = dict(quest_yaml.get("startup_contract") or {})
+    assert startup_contract["decision_policy"] == "autonomous"
+
+
+def test_quest_settings_handler_rejects_invalid_decision_policy(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    app = DaemonApp(temp_home)
+    quest = app.quest_service.create("invalid decision policy quest")
+
+    status_code, payload = app.handlers.quest_settings(
+        quest["quest_id"],
+        {
+            "decision_policy": "ask-me-always",
+        },
+    )
+
+    assert status_code == 400
+    assert payload["ok"] is False
+    assert "decision policy" in str(payload["message"]).lower()
+
+
 def test_quest_settings_switch_to_autonomous_injects_continue_without_replaying_stale_user_message(
     temp_home: Path,
 ) -> None:

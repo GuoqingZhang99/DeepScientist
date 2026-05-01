@@ -1369,6 +1369,8 @@ def test_prompt_builder_start_setup_block_includes_local_daemon_api_context(temp
     assert "session_patch={...}" in prompt
     assert "mode_fit_rule" in prompt
     assert "preview_plan_rule" in prompt
+    assert 'form_patch.decision_policy="autonomous"' in prompt
+    assert "recommended_workspace_mode=autonomous" in prompt
 
 
 def test_prompt_builder_claude_start_setup_notes_namespaced_mcp_tool_names(temp_home: Path) -> None:

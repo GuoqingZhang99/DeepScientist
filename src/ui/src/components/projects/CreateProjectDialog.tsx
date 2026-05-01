@@ -37,6 +37,7 @@ import { resetDemoRuntime } from '@/demo/runtime'
 import { normalizeBuiltinRunnerName, runnerLabel } from '@/lib/runnerBranding'
 import {
   applyStartResearchIntensityPreset,
+  buildStartResearchLaunchSnapshot,
   type BaselineAcceptanceTarget,
   type BaselineSourceMode,
   compileStartResearchPrompt,
@@ -3806,6 +3807,11 @@ export function CreateProjectDialog({
       review_summary: effectiveReviewSummary,
       review_materials: effectiveReviewMaterials,
       custom_brief: saved.custom_brief,
+      launch_form_source: setupQuestId ? 'setup_agent' : 'manual_form',
+      launch_form_recorded_at: new Date().toISOString(),
+      launch_setup_quest_id: setupQuestId || null,
+      launch_form: buildStartResearchLaunchSnapshot(saved),
+      launch_markdown: launchPrompt,
       project_display: {
         template: 'experiment',
         accent_color: 'sage',

@@ -44,6 +44,7 @@ export interface GuidanceVm {
 export interface QuestSummary {
   quest_id: string
   title: string
+  goal?: string | null
   status: string
   active_anchor: string
   workspace_mode?: string

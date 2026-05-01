@@ -63,6 +63,13 @@ _EVENT_TYPE_BYTES_RE = re.compile(rb'"(?:type|event_type)"\s*:\s*"([^"]+)"')
 _EVENT_TOOL_NAME_BYTES_RE = re.compile(rb'"tool_name"\s*:\s*"([^"]+)"')
 _EVENT_RUN_ID_BYTES_RE = re.compile(rb'"run_id"\s*:\s*"([^"]+)"')
 CONTINUATION_POLICIES = {"auto", "when_external_progress", "wait_for_user_or_resume", "none"}
+AUTONOMOUS_BLOCKING_WAIT_REASONS = {
+    "completion_approval",
+    "credential_required",
+    "privacy_or_data_export_boundary",
+    "large_cost_or_external_paid_api",
+    "user_gated_decision_request",
+}
 _CHAT_ATTACHMENT_TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".mdx", ".json", ".csv", ".log", ".yaml", ".yml"}
 _CHAT_ATTACHMENT_TEXT_MIME_PREFIXES = ("text/",)
 _CHAT_ATTACHMENT_TEXT_MIME_TYPES = {"application/json", "application/x-yaml", "text/csv"}
@@ -3304,6 +3311,7 @@ class QuestService:
         payload = {
             "quest_id": quest_yaml.get("quest_id", quest_id),
             "title": quest_yaml.get("title", quest_id),
+            "goal": quest_yaml.get("goal"),
             "quest_root": str(quest_root.resolve()),
             "status": runtime_state.get("display_status") or runtime_state.get("status") or quest_yaml.get("status", "idle"),
             "runtime_status": runtime_state.get("status") or quest_yaml.get("status", "idle"),
@@ -3817,6 +3825,7 @@ class QuestService:
         payload = {
             "quest_id": quest_yaml.get("quest_id", quest_id),
             "title": quest_yaml.get("title", quest_id),
+            "goal": quest_yaml.get("goal"),
             "quest_root": str(quest_root.resolve()),
             "status": runtime_state.get("display_status") or runtime_state.get("status") or quest_yaml.get("status", "idle"),
             "runtime_status": runtime_state.get("status") or quest_yaml.get("status", "idle"),
@@ -4218,6 +4227,7 @@ class QuestService:
         active_anchor: str | None = None,
         default_runner: str | None = None,
         workspace_mode: str | None = None,
+        decision_policy: str | None = None,
     ) -> dict:
         quest_root = self._quest_root(quest_id)
         quest_yaml_path = self._quest_yaml_path(quest_root)
@@ -4293,6 +4303,33 @@ class QuestService:
             runtime_state_updates["continuation_reason"] = (
                 "copilot_mode" if normalized_workspace_mode == "copilot" else "autonomous_mode"
             )
+
+        if decision_policy is not None:
+            normalized_decision_policy = str(decision_policy).strip().lower()
+            if normalized_decision_policy not in {"autonomous", "user_gated"}:
+                raise ValueError("Unsupported decision policy. Allowed values: autonomous, user_gated.")
+            startup_contract = (
+                dict(quest_data.get("startup_contract") or {})
+                if isinstance(quest_data.get("startup_contract"), dict)
+                else {}
+            )
+            if str(startup_contract.get("decision_policy") or "").strip().lower() != normalized_decision_policy:
+                startup_contract["decision_policy"] = normalized_decision_policy
+                quest_data["startup_contract"] = startup_contract
+                changed = True
+            effective_workspace_mode = str(
+                research_state_updates.get("workspace_mode")
+                or self.read_research_state(quest_root).get("workspace_mode")
+                or startup_contract.get("workspace_mode")
+                or ""
+            ).strip().lower()
+            if normalized_decision_policy == "autonomous" and effective_workspace_mode == "autonomous":
+                runtime_state = self._read_runtime_state(quest_root)
+                current_policy = str(runtime_state.get("continuation_policy") or "").strip().lower()
+                current_reason = str(runtime_state.get("continuation_reason") or "").strip()
+                if current_policy == "wait_for_user_or_resume" and current_reason not in AUTONOMOUS_BLOCKING_WAIT_REASONS:
+                    runtime_state_updates["continuation_policy"] = "auto"
+                    runtime_state_updates["continuation_reason"] = "autonomous_decision_policy"
 
         if changed:
             quest_data["updated_at"] = utc_now()

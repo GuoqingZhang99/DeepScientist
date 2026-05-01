@@ -192,6 +192,7 @@ export const client = {
       active_anchor?: string
       default_runner?: string
       workspace_mode?: 'copilot' | 'autonomous'
+      decision_policy?: 'autonomous' | 'user_gated'
     }
   ) =>
     api<{ ok: boolean; snapshot: QuestSummary }>(`/api/quests/${questId}/settings`, {
