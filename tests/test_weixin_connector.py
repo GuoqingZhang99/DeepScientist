@@ -274,23 +274,12 @@ def test_upload_local_media_to_weixin_encodes_aes_key_like_openclaw(
 
 
 def test_send_weixin_message_raises_on_nonzero_ret(monkeypatch) -> None:
-    class _Response:
-        def __init__(self, payload: str) -> None:
-            self._payload = payload.encode("utf-8")
+    import httpx as _httpx
 
-        def read(self) -> bytes:
-            return self._payload
+    def _fake_request(self, method, url, **kwargs):  # noqa: ANN001
+        return _httpx.Response(200, text='{"ret":-2,"errmsg":"context invalid"}')
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(
-        "deepscientist.connector.weixin_support.urlopen",
-        lambda request, timeout=15: _Response('{"ret":-2,"errmsg":"context invalid"}'),
-    )
+    monkeypatch.setattr("httpx.Client.request", _fake_request)
 
     with pytest.raises(RuntimeError, match="ret=-2"):
         send_weixin_message(
@@ -349,10 +338,12 @@ def test_weixin_ilink_caps_server_controlled_long_poll_timeout(
 
 
 def test_get_weixin_updates_treats_timeout_as_empty_poll(monkeypatch) -> None:
-    def _raise_timeout(request, timeout=35):  # noqa: ANN001
-        raise TimeoutError("timed out")
+    import httpx as _httpx
 
-    monkeypatch.setattr("deepscientist.connector.weixin_support.urlopen", _raise_timeout)
+    def _raise_timeout(self, method, url, **kwargs):  # noqa: ANN001
+        raise _httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr("httpx.Client.request", _raise_timeout)
 
     response = get_weixin_updates(
         base_url="https://ilinkai.weixin.qq.com",
