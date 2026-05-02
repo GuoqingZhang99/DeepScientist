@@ -347,14 +347,14 @@ build_ui() {
     return
   fi
   print_step "Building web UI in install tree"
-  npm --prefix "$1/src/ui" install --include=dev --no-audit --no-fund
+  npm --prefix "$1/src/ui" ci --include=dev --no-audit --no-fund
   npm --prefix "$1/src/ui" run build
   rm -rf "$1/src/ui/node_modules" "$1/src/ui/lib/node_modules"
 }
 
 install_root_runtime() {
   print_step "Installing root runtime dependencies in install tree"
-  npm --prefix "$1" install --omit=dev --no-audit --no-fund
+  npm --prefix "$1" ci --omit=dev --no-audit --no-fund
 }
 
 build_tui() {
@@ -371,7 +371,7 @@ build_tui() {
     return
   fi
   print_step "Building TUI in install tree"
-  npm --prefix "$1/src/tui" install --include=dev --no-audit --no-fund
+  npm --prefix "$1/src/tui" ci --include=dev --no-audit --no-fund
   npm --prefix "$1/src/tui" run build
   npm --prefix "$1/src/tui" prune --omit=dev --no-audit --no-fund
 }
