@@ -816,6 +816,39 @@ def test_shared_memory_visibility_reads_other_quests_but_opens_them_read_only(te
     assert Path(remote_card["path"]).exists()
 
 
+def test_memory_read_resolves_sharedmemory_document_id_from_other_quest(temp_home: Path) -> None:
+    ensure_home_layout(temp_home)
+    ConfigManager(temp_home).ensure_files()
+    quest_service = QuestService(temp_home, skill_installer=SkillInstaller(repo_root(), temp_home))
+    quest_local = quest_service.create("shared memory read local")
+    quest_remote = quest_service.create("shared memory read remote")
+    local_root = Path(quest_local["quest_root"])
+    remote_root = Path(quest_remote["quest_root"])
+    memory = MemoryService(temp_home)
+
+    remote_card = memory.write_card(
+        scope="quest",
+        kind="knowledge",
+        title="Cross quest checkpoint",
+        body="checkpoint body for cross-quest read",
+        quest_root=remote_root,
+        quest_id=quest_remote["quest_id"],
+    )
+    relative = Path(remote_card["path"]).relative_to(remote_root / "memory").as_posix()
+    document_id = f"sharedmemory::{quest_remote['quest_id']}::{relative}"
+
+    opened = memory.read_card(path=document_id, scope="quest", quest_root=local_root)
+    assert opened["path"] == str(Path(remote_card["path"]))
+    assert opened["body"].strip() == "checkpoint body for cross-quest read"
+
+    with pytest.raises(FileNotFoundError):
+        memory.read_card(
+            path=f"sharedmemory::{quest_remote['quest_id']}::knowledge/missing-card.md",
+            scope="quest",
+            quest_root=local_root,
+        )
+
+
 def test_memory_document_open_uses_quest_root_when_active_workspace_is_worktree(temp_home: Path) -> None:
     ensure_home_layout(temp_home)
     ConfigManager(temp_home).ensure_files()
