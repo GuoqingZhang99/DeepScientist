@@ -34,6 +34,12 @@ from .base import (
     extract_start_setup_session_patch_from_text,
     resolve_mcp_tool_profile_for_quest,
 )
+from .codex_telemetry import (
+    DEFAULT_TURN_TOOL_CALL_BUDGET,
+    _finalize_tool_budget_telemetry,
+    _new_tool_budget_telemetry,
+    _record_tool_budget_event,
+)
 
 _TOOL_EVENT_ARGS_TEXT_LIMIT = 8_000
 _TOOL_EVENT_OUTPUT_TEXT_LIMIT = 16_000
@@ -958,6 +964,10 @@ class CodexRunner:
                 "windows_gbk_replacements": prompt_sanitization,
             },
         )
+        configured_tool_budget = runner_config.get("tool_call_budget")
+        if not isinstance(configured_tool_budget, int):
+            configured_tool_budget = DEFAULT_TURN_TOOL_CALL_BUDGET
+        tool_budget_telemetry = _new_tool_budget_telemetry(tool_call_budget=configured_tool_budget)
         telemetry: dict[str, Any] = {
             "version": 1,
             "quest_id": request.quest_id,
@@ -974,11 +984,11 @@ class CodexRunner:
             "prompt_bytes": len(prompt.encode("utf-8", errors="replace")),
             "stdout_event_count": 0,
             "stdout_bytes": 0,
-            "tool_call_count": 0,
             "tool_result_count": 0,
             "tool_result_bytes_total": 0,
             "compacted_tool_result_count": 0,
             "full_detail_tool_call_count": 0,
+            **tool_budget_telemetry,
             "token_usage": {},
             "created_at": utc_now(),
         }
@@ -1125,7 +1135,7 @@ class CodexRunner:
                 )
                 if tool_event is not None:
                     if str(tool_event.get("type") or "") == "runner.tool_call":
-                        telemetry["tool_call_count"] = int(telemetry.get("tool_call_count") or 0) + 1
+                        _record_tool_budget_event(telemetry, tool_event)
                         args_text = str(tool_event.get("args") or "")
                         if "detail" in args_text and "full" in args_text.lower():
                             telemetry["full_detail_tool_call_count"] = int(
@@ -1156,6 +1166,7 @@ class CodexRunner:
                             telemetry["compacted_tool_result_count"] = int(
                                 telemetry.get("compacted_tool_result_count") or 0
                             ) + 1
+                        _record_tool_budget_event(telemetry, tool_event)
                     append_jsonl(quest_events, tool_event)
                 message_events, message_output_parts = _message_events(
                     payload,
@@ -1195,6 +1206,7 @@ class CodexRunner:
             telemetry["stderr_bytes"] = len(stderr_text.encode("utf-8", errors="replace"))
             telemetry["output_text_bytes"] = len(output_text.encode("utf-8", errors="replace"))
             telemetry["completed_at"] = utc_now()
+            _finalize_tool_budget_telemetry(telemetry)
             telemetry_path = run_root / "telemetry.json"
             write_json(telemetry_path, telemetry)
             append_jsonl(
@@ -1225,10 +1237,20 @@ class CodexRunner:
                     "model": request.model,
                     "prompt_bytes": telemetry.get("prompt_bytes"),
                     "stdout_bytes": telemetry.get("stdout_bytes"),
+                    "tool_call_budget": telemetry.get("tool_call_budget"),
                     "tool_call_count": telemetry.get("tool_call_count"),
+                    "tool_count": telemetry.get("tool_count"),
+                    "tool_call_budget_remaining": telemetry.get("tool_call_budget_remaining"),
+                    "tool_call_budget_exceeded": telemetry.get("tool_call_budget_exceeded"),
+                    "unique_command_count": telemetry.get("unique_command_count"),
+                    "read_tool_call_count": telemetry.get("read_tool_call_count"),
+                    "repeated_read_result_count": telemetry.get("repeated_read_result_count"),
+                    "repeated_read_ratio": telemetry.get("repeated_read_ratio"),
                     "tool_result_bytes_total": telemetry.get("tool_result_bytes_total"),
                     "compacted_tool_result_count": telemetry.get("compacted_tool_result_count"),
+                    "saved_bytes": telemetry.get("saved_bytes"),
                     "full_detail_tool_call_count": telemetry.get("full_detail_tool_call_count"),
+                    "full_detail_count": telemetry.get("full_detail_count"),
                     "token_usage": telemetry.get("token_usage"),
                     "telemetry_path": str(telemetry_path),
                     "created_at": utc_now(),

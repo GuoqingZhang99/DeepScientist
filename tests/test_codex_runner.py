@@ -17,6 +17,7 @@ from deepscientist.runners.codex import (
     _sanitize_text_for_windows_gbk,
     _tool_event,
 )
+from deepscientist.runners.codex_telemetry import _new_tool_budget_telemetry, _record_tool_budget_event
 from deepscientist.runners.runtime_overrides import apply_claude_runtime_overrides
 from deepscientist.shared import read_json, read_jsonl, read_yaml, write_yaml
 from deepscientist.skills import SkillInstaller
@@ -320,6 +321,103 @@ def test_codex_runner_sidecars_raw_payload_before_render_truncation(temp_home: P
     assert sidecar["payload"]["items"] == large_result["items"]
     assert sidecar["payload"]["missing_items"] == ["paper/references.bib"]
     assert "[truncated " not in json.dumps(sidecar["payload"], ensure_ascii=False)
+
+
+def test_codex_runner_tool_budget_telemetry_counts_unique_commands_and_repeated_reads() -> None:
+    telemetry = _new_tool_budget_telemetry(tool_call_budget=3)
+
+    _record_tool_budget_event(
+        telemetry,
+        {
+            "type": "runner.tool_call",
+            "tool_name": "bash_exec.bash_exec",
+            "args": json.dumps({"mode": "read", "id": "bash-001", "tail_limit": 100}),
+            "metadata": {"command_fingerprint": "cmd-1"},
+        },
+    )
+    _record_tool_budget_event(
+        telemetry,
+        {
+            "type": "runner.tool_result",
+            "tool_name": "bash_exec.bash_exec",
+            "args": json.dumps({"mode": "read", "id": "bash-001", "tail_limit": 100}),
+            "delta_marker": True,
+            "delta_kind": "unchanged_tool_result",
+            "metadata": {"command_fingerprint": "cmd-1"},
+        },
+    )
+    _record_tool_budget_event(
+        telemetry,
+        {
+            "type": "runner.tool_call",
+            "tool_name": "artifact.get_quest_state",
+            "args": json.dumps({"detail": "full"}),
+        },
+    )
+    _record_tool_budget_event(
+        telemetry,
+        {
+            "type": "runner.tool_call",
+            "tool_name": "bash_exec.bash_exec",
+            "args": json.dumps({"mode": "read", "id": "bash-001", "tail_limit": 200}),
+            "metadata": {"command_fingerprint": "cmd-1"},
+        },
+    )
+    _record_tool_budget_event(
+        telemetry,
+        {
+            "type": "runner.tool_call",
+            "tool_name": "artifact.list_paper_outlines",
+            "args": "{}",
+        },
+    )
+
+    assert telemetry["tool_call_budget"] == 3
+    assert telemetry["tool_call_count"] == 4
+    assert telemetry["tool_count"] == 4
+    assert telemetry["tool_call_budget_remaining"] == 0
+    assert telemetry["tool_call_budget_exceeded"] is True
+    assert telemetry["unique_command_count"] == 1
+    assert telemetry["read_tool_call_count"] == 4
+    assert telemetry["repeated_read_result_count"] == 1
+    assert telemetry["repeated_read_ratio"] == 1 / 4
+    assert telemetry["full_detail_count"] == 1
+    assert telemetry["saved_bytes"] == 0
+
+
+def test_codex_runner_tool_budget_telemetry_counts_embedded_read_cache_delta() -> None:
+    telemetry = _new_tool_budget_telemetry(tool_call_budget=4)
+    _record_tool_budget_event(
+        telemetry,
+        {
+            "type": "runner.tool_call",
+            "tool_name": "artifact.get_global_status",
+            "args": json.dumps({"detail": "full"}),
+        },
+    )
+    _record_tool_budget_event(
+        telemetry,
+        {
+            "type": "runner.tool_result",
+            "tool_name": "artifact.get_global_status",
+            "output": json.dumps(
+                {
+                    "structured_content": {
+                        "ok": True,
+                        "delta_marker": True,
+                        "delta_kind": "unchanged_read_cache",
+                        "read_cache": {"saved_bytes": 1234},
+                        "command_fingerprint": "cmd-result",
+                    }
+                }
+            ),
+        },
+    )
+
+    assert telemetry["unique_command_count"] == 1
+    assert telemetry["repeated_read_result_count"] == 1
+    assert telemetry["repeated_read_ratio"] == 1.0
+    assert telemetry["saved_bytes"] == 1234
 
 
 def test_codex_runner_writes_tool_result_telemetry_and_sidecar(
