@@ -223,6 +223,8 @@ export function useDemoQuestWorkspace(
     loadOlderHistory: async () => undefined,
     loadFullHistory: async () => undefined,
     submit: demo.sendMessage,
+    readNow: async () => undefined,
+    withdraw: async () => undefined,
     stopRun: async () => undefined,
   }
 }

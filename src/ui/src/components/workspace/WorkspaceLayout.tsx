@@ -1723,6 +1723,7 @@ function LeftPanel({
     fileId: null,
     token: 0,
   })
+  const lastWorkspaceTreeSyncKeyRef = React.useRef<string | null>(null)
   const menuSectionId = React.useId()
   const activeTab = useActiveTab()
   const activeQuestWorkspaceView = React.useMemo(() => {
@@ -1779,6 +1780,7 @@ function LeftPanel({
     setExplorerModePreference('auto')
     setManualScopedExplorer(null)
     setStickyScopedSelection(null)
+    lastWorkspaceTreeSyncKeyRef.current = null
   }, [projectId])
 
   React.useEffect(() => {
@@ -1834,6 +1836,17 @@ function LeftPanel({
 
   React.useEffect(() => {
     if (!workspaceTreeSyncKey) return
+    const previousKey = lastWorkspaceTreeSyncKeyRef.current
+    lastWorkspaceTreeSyncKeyRef.current = workspaceTreeSyncKey
+    if (!previousKey) {
+      const state = useFileTreeStore.getState()
+      if (state.projectId !== projectId && !state.isLoading) {
+        void loadFiles(projectId)
+      }
+      return
+    }
+    if (previousKey === workspaceTreeSyncKey) return
+
     invalidateQuestFileTree(projectId)
     void loadFiles(projectId, { force: true })
     if (localQuestMode) {
@@ -1964,11 +1977,11 @@ function LeftPanel({
             sourceMode = 'snapshot'
           } catch (error) {
             console.warn('[WorkspaceLayout] Failed to load explorer snapshot, falling back to live view:', error)
-            explorerPayload = await questClient.explorer(projectId)
+            explorerPayload = await questClient.explorer(projectId, { profile: 'workspace' })
             if (cancelled) return
           }
         } else {
-          explorerPayload = await questClient.explorer(projectId)
+          explorerPayload = await questClient.explorer(projectId, { profile: 'workspace' })
           if (cancelled) return
         }
 
@@ -3464,9 +3477,11 @@ export function WorkspaceLayout({
     return key.trim() ? key : null
   }, [isLocalQuestProject, questWorkspace.snapshot])
   const isMobileViewport = useMobileViewport()
-  const isMobileQuestShell = Boolean(isQuestRouteProject && !isDemoProject && isMobileViewport)
+  const mobileQuestWorkspace = isDemoProject ? (demoWorkspace as any) : questWorkspace
+  const isMobileQuestShell = Boolean((isQuestRouteProject || isDemoProject) && isMobileViewport)
   const workspaceProjectTitle =
     projectName ??
+    (isDemoProject ? demoWorkspace.snapshot?.title : null) ??
     (isQuestRouteProject ? questWorkspace.snapshot?.title : null) ??
     (projectId ? `Project ${projectId}` : 'Project')
   const { addToast } = useToast()
@@ -3563,7 +3578,7 @@ export function WorkspaceLayout({
       if (!normalizedPath) return
       void (async () => {
         try {
-          const explorerPayload = await questClient.explorer(projectId)
+          const explorerPayload = await questClient.explorer(projectId, { profile: 'workspace' })
           const scopeResult = buildScopedQuestTree(projectId, explorerPayload, [normalizedPath])
           if (scopeResult.nodes.length === 0) return
           setRevealedFileScope({
@@ -4062,8 +4077,8 @@ export function WorkspaceLayout({
       <MobileQuestWorkspaceShell
         projectId={projectId}
         projectName={workspaceProjectTitle}
-        readOnly={readOnlyMode}
-        workspace={questWorkspace}
+        readOnly={readOnlyMode || isDemoProject}
+        workspace={mobileQuestWorkspace}
       />
     )
   }
