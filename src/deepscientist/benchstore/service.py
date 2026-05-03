@@ -476,6 +476,31 @@ class BenchStoreService:
         display_raw = payload.get("display") if isinstance(payload.get("display"), dict) else {}
         official_links_raw = payload.get("official_links") if isinstance(payload.get("official_links"), dict) else {}
         discovery_raw = payload.get("discovery") if isinstance(payload.get("discovery"), dict) else {}
+        official_links = {
+            "homepage": _optional_str(official_links_raw.get("homepage")),
+            "github": _optional_str(official_links_raw.get("github")),
+            "docs": _optional_str(official_links_raw.get("docs")),
+        }
+        if not any(official_links.values()):
+            official_links = {}
+        collection_priority = _optional_number(discovery_raw.get("collection_priority"))
+        recommendation_weight = _optional_number(discovery_raw.get("recommendation_weight"))
+        featured = _optional_bool(discovery_raw.get("featured"))
+        discovery = {
+            "collection": _optional_str(discovery_raw.get("collection")),
+            "collection_priority": int(collection_priority) if collection_priority is not None else None,
+            "recommendation_weight": int(recommendation_weight) if recommendation_weight is not None else None,
+            "featured": featured,
+            "featured_reason": _optional_str(discovery_raw.get("featured_reason")),
+        }
+        if not (
+            discovery["collection"]
+            or discovery["collection_priority"] is not None
+            or discovery["recommendation_weight"] is not None
+            or discovery["featured"] is True
+            or discovery["featured_reason"]
+        ):
+            discovery = {}
         image_path = _optional_str(payload.get("image_path"))
 
         entry = {
@@ -486,11 +511,7 @@ class BenchStoreService:
             "one_line": _optional_str(payload.get("one_line")),
             "task_description": _optional_str(payload.get("task_description")),
             "homepage": _optional_str(payload.get("homepage")),
-            "official_links": {
-                "homepage": _optional_str(official_links_raw.get("homepage")),
-                "github": _optional_str(official_links_raw.get("github")),
-                "docs": _optional_str(official_links_raw.get("docs")),
-            },
+            "official_links": official_links,
             "capability_tags": _normalize_string_list(payload.get("capability_tags"), field_name="capability_tags"),
             "aisb_direction": _optional_str(payload.get("aisb_direction")),
             "track_fit": _normalize_string_list(payload.get("track_fit"), field_name="track_fit"),
@@ -501,13 +522,7 @@ class BenchStoreService:
             "snapshot_status": _optional_str(payload.get("snapshot_status")),
             "support_level": _optional_str(payload.get("support_level")),
             "primary_outputs": _normalize_string_list(payload.get("primary_outputs"), field_name="primary_outputs"),
-            "discovery": {
-                "collection": _optional_str(discovery_raw.get("collection")),
-                "collection_priority": int(_optional_number(discovery_raw.get("collection_priority"))) if _optional_number(discovery_raw.get("collection_priority")) is not None else None,
-                "recommendation_weight": int(_optional_number(discovery_raw.get("recommendation_weight"))) if _optional_number(discovery_raw.get("recommendation_weight")) is not None else None,
-                "featured": bool(discovery_raw.get("featured")) if discovery_raw.get("featured") is not None else False,
-                "featured_reason": _optional_str(discovery_raw.get("featured_reason")),
-            },
+            "discovery": discovery,
             "launch_profiles": _normalize_launch_profiles(payload.get("launch_profiles")),
             "cost_band": _optional_str(payload.get("cost_band")),
             "time_band": _optional_str(payload.get("time_band")),
@@ -1188,6 +1203,9 @@ class BenchStoreService:
                     "entry_name": entry.get("name"),
                     "one_line": entry.get("one_line"),
                     "task_description": entry.get("task_description"),
+                    "homepage": entry.get("homepage"),
+                    "official_links": entry.get("official_links") or {},
+                    "discovery": entry.get("discovery") or {},
                     "paper": paper,
                     "capability_tags": entry.get("capability_tags") or [],
                     "track_fit": entry.get("track_fit") or [],

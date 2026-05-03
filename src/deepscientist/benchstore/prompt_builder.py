@@ -186,9 +186,18 @@ class BenchStorePromptBuilder:
         discovery = entry.get("discovery") if isinstance(entry.get("discovery"), dict) else {}
         if discovery:
             lines.extend(["", "## Discovery"])
-            lines.append(f"- collection: {str(discovery.get('collection') or 'none').strip() or 'none'}")
-            lines.append(f"- recommendation_weight: {discovery.get('recommendation_weight', 0)}")
-            lines.append(f"- featured: {discovery.get('featured', False)}")
+            collection = str(discovery.get("collection") or "").strip()
+            if collection:
+                lines.append(f"- collection: {collection}")
+            if discovery.get("collection_priority") is not None:
+                lines.append(f"- collection_priority: {discovery.get('collection_priority')}")
+            if discovery.get("recommendation_weight") is not None:
+                lines.append(f"- recommendation_weight: {discovery.get('recommendation_weight')}")
+            if discovery.get("featured") is not None:
+                lines.append(f"- featured: {bool(discovery.get('featured'))}")
+            featured_reason = str(discovery.get("featured_reason") or "").strip()
+            if featured_reason:
+                lines.append(f"- featured_reason: {featured_reason}")
         lines.extend(["", "## Fit Advice"])
         lines.extend([f"- recommended_when: {recommended_when or 'none'}", f"- not_recommended_when: {not_recommended_when or 'none'}"])
         if raw_payload:
