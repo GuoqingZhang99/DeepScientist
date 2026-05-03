@@ -225,6 +225,23 @@ safe_remove_dir() {
   rm -rf "$target"
 }
 
+invalidate_runtime_python_env() {
+  local runtime_dir="$BASE_DIR/runtime/python-env"
+  if [ ! -d "$runtime_dir/lib" ]; then
+    return
+  fi
+  local removed=0
+  while IFS= read -r -d '' target; do
+    rm -rf "$target"
+    removed=1
+  done < <(find "$runtime_dir/lib" -maxdepth 3 -type d \
+    \( -name 'deepscientist' -o -name 'deepscientist-*.dist-info' \) \
+    -print0 2>/dev/null)
+  if [ "$removed" -eq 1 ]; then
+    print_step "Invalidated runtime Python env; next 'ds' start will reinstall deepscientist"
+  fi
+}
+
 source_copy_excludes() {
   cat <<'EOF'
 ./.git
@@ -347,14 +364,14 @@ build_ui() {
     return
   fi
   print_step "Building web UI in install tree"
-  npm --prefix "$1/src/ui" install --include=dev --no-audit --no-fund
+  npm --prefix "$1/src/ui" ci --include=dev --no-audit --no-fund
   npm --prefix "$1/src/ui" run build
   rm -rf "$1/src/ui/node_modules" "$1/src/ui/lib/node_modules"
 }
 
 install_root_runtime() {
   print_step "Installing root runtime dependencies in install tree"
-  npm --prefix "$1" install --omit=dev --no-audit --no-fund
+  npm --prefix "$1" ci --omit=dev --no-audit --no-fund
 }
 
 build_tui() {
@@ -371,7 +388,7 @@ build_tui() {
     return
   fi
   print_step "Building TUI in install tree"
-  npm --prefix "$1/src/tui" install --include=dev --no-audit --no-fund
+  npm --prefix "$1/src/tui" ci --include=dev --no-audit --no-fund
   npm --prefix "$1/src/tui" run build
   npm --prefix "$1/src/tui" prune --omit=dev --no-audit --no-fund
 }
@@ -582,6 +599,8 @@ stop_existing_install
 safe_remove_dir "$INSTALL_DIR"
 mv "$STAGING_DIR" "$INSTALL_DIR"
 trap - EXIT
+
+invalidate_runtime_python_env
 
 print_step "Writing launcher wrappers"
 mkdir -p "$BIN_DIR"
