@@ -2,9 +2,10 @@
 
 This does **not** create the project yet.
 
-It opens the first choice screen, where DeepScientist asks:
+It opens the SetupAgent intake page, where you can describe:
 
-- do you want a quieter, human-led start
-- or do you want the normal autonomous project flow
+- the research goal
+- the materials you already have
+- the execution limits and desired outputs
 
-If your goal is a normal first project, the usual next click is **Autonomous**.
+You can send the request to SetupAgent, or manually enter the restored full Context Form.

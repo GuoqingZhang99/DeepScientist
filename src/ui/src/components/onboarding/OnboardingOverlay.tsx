@@ -410,48 +410,27 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
     route: 'landing',
     targetId: 'landing-start-research',
     title: {
-      en: 'Open the launch dialog',
-      zh: '先打开启动模式弹框',
+      en: 'Open the Start Research intake',
+      zh: '打开 Start Research 输入框',
     },
     body: onboardingStepBodies['landing-open-dialog'],
     actionTargetId: 'landing-start-research',
     advanceMode: 'wait_for_element',
-    waitForElementId: 'experiment-launch-dialog',
+    waitForElementId: 'start-research-intake',
   },
   {
-    id: 'launch-mode-overview',
+    id: 'start-research-intake',
     route: 'landing',
-    targetId: 'experiment-launch-dialog',
+    targetId: 'start-research-intake',
     title: {
-      en: 'First choose between Copilot and Autonomous',
-      zh: '先在 Copilot 和全自动之间做选择',
-    },
-    body: onboardingStepBodies['launch-mode-overview'],
-    placement: 'top',
-  },
-  {
-    id: 'launch-mode-copilot',
-    route: 'landing',
-    targetId: 'launch-mode-copilot-card',
-    title: {
-      en: 'Copilot is for human-in-the-loop work',
-      zh: 'Copilot 适合人机共研',
-    },
-    body: onboardingStepBodies['launch-mode-copilot'],
-    placement: 'right',
-  },
-  {
-    id: 'launch-mode-autonomous',
-    route: 'landing',
-    targetId: 'launch-mode-autonomous-card',
-    title: {
-      en: 'The walkthrough now follows the autonomous path',
-      zh: '这个教程接下来走全自动主线',
+      en: 'Describe the task first',
+      zh: '先描述任务',
     },
     body: onboardingStepBodies['launch-mode-autonomous'],
-    actionTargetId: 'launch-mode-autonomous-card',
+    actionTargetId: 'start-research-intake-form',
     advanceMode: 'wait_for_element',
     waitForElementId: 'start-research-dialog',
+    placement: 'top',
   },
   {
     id: 'dialog-overview',
@@ -1615,7 +1594,7 @@ export function OnboardingOverlay() {
   }, [advance, navigate, status, step])
 
   const restoreBenchstoreStartStep = React.useCallback(async () => {
-    triggerTargetAction('experiment-launch-close')
+    triggerTargetAction('start-research-close')
     if (!queryTarget('benchstore-dialog')) {
       triggerTargetAction('landing-benchstore')
       await waitForTarget('benchstore-dialog')
@@ -1640,9 +1619,9 @@ export function OnboardingOverlay() {
       void restoreBenchstoreStartStep()
       return
     }
-    if (step?.id === 'launch-mode-overview') {
-      triggerTargetAction('experiment-launch-close')
-      goToStep(8)
+    if (step?.id === 'start-research-intake') {
+      triggerTargetAction('start-research-close')
+      goToStep(7)
       return
     }
     previousStep()

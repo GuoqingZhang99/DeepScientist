@@ -6,7 +6,6 @@ import { FolderOpen, Sparkles } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { CreateCopilotProjectDialog } from '@/components/projects/CreateCopilotProjectDialog'
 import { CreateProjectDialog } from '@/components/projects/CreateProjectDialog'
-import { ExperimentLaunchModeDialog } from '@/components/projects/ExperimentLaunchModeDialog'
 import { OpenQuestDialog } from '@/components/projects/OpenQuestDialog'
 import { BenchStoreDialog } from '@/components/landing/BenchStoreDialog'
 import { Button } from '@/components/ui/button'
@@ -34,7 +33,7 @@ const clamp = (value: number, min: number, max: number) => Math.min(Math.max(val
 
 export type LandingDialogRequest = 'quests' | 'copilot' | 'autonomous' | 'benchstore'
 
-type ActiveLandingDialog = LandingDialogRequest | 'launch' | null
+type ActiveLandingDialog = LandingDialogRequest | null
 
 function sortQuests(items: QuestSummary[]) {
   return [...items].sort((left, right) => {
@@ -602,7 +601,7 @@ export default function Hero(props: {
                           className="h-12 rounded-full bg-[#C7AD96] px-7 text-[#2D2A26] shadow-[0_12px_28px_-14px_rgba(45,42,38,0.55)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[#D7C6AE]"
                           onClick={() => {
                             window.setTimeout(() => {
-                              setActiveDialog(isPortraitMode ? 'autonomous' : 'launch')
+                              setActiveDialog('autonomous')
                             }, 120)
                           }}
                           data-onboarding-id="landing-start-research"
@@ -675,14 +674,6 @@ export default function Hero(props: {
 
       </div>
 
-      <ExperimentLaunchModeDialog
-        open={activeDialog === 'launch'}
-        locale={locale}
-        onClose={() => setActiveDialog(null)}
-        onSelectMode={(mode) => {
-          setActiveDialog(mode === 'copilot' ? 'copilot' : 'autonomous')
-        }}
-      />
       <OpenQuestDialog
         open={activeDialog === 'quests'}
         quests={quests}
@@ -768,7 +759,7 @@ export default function Hero(props: {
         }}
         onBack={() => {
           setBenchSetupPacket(null)
-          setActiveDialog('launch')
+          setActiveDialog(null)
           void cleanupSetupQuest()
         }}
         loading={autonomousCreating}

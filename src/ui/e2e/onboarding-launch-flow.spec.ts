@@ -270,7 +270,7 @@ async function openMobileLandingFirstRun(page: Page) {
 }
 
 test.describe('onboarding launch flow', () => {
-  test('the landing tutorial can pass through BenchStore and reach the launch-mode dialog', async ({ page }) => {
+  test('the landing tutorial can pass through BenchStore and reach the Start Research form', async ({ page }) => {
     await page.setViewportSize({ width: 1600, height: 1000 })
     await openLandingTutorial(page, 'en')
 
@@ -291,12 +291,14 @@ test.describe('onboarding launch flow', () => {
     await expect(page.getByRole('heading', { name: 'BenchStore starts as a storefront view' })).toBeVisible()
 
     await advanceToStep(page, 10, 12)
-
-    await expect(page.locator('[data-onboarding-id="experiment-launch-dialog"]')).toBeVisible({ timeout: 30_000 })
+    await expect(page.locator('[data-onboarding-id="start-research-intake"]')).toBeVisible({ timeout: 30_000 })
     await expectStepProgress(page, 10)
-    await expect(page.getByRole('heading', { name: 'First choose between Copilot and Autonomous' })).toBeVisible()
-    await expect(page.locator('[data-onboarding-id="launch-mode-copilot-card"]')).toBeVisible()
-    await expect(page.locator('[data-onboarding-id="launch-mode-autonomous-card"]')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Describe the task first' })).toBeVisible()
+    await expect(page.locator('[data-onboarding-id="start-research-intake-form"]')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Next' }).click()
+    await expect(page.locator('[data-onboarding-id="start-research-dialog"]')).toBeVisible({ timeout: 30_000 })
+    await expect(page.locator('[data-onboarding-id="start-research-title"]')).toBeVisible({ timeout: 30_000 })
   })
 
   test('uses the compact mobile onboarding card on phone-sized screens', async ({ page }) => {
@@ -326,15 +328,17 @@ test.describe('onboarding launch flow', () => {
     await openProjectTutorial(page, 'en')
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (await page.getByRole('heading', { name: 'Canvas shows the research map' }).isVisible().catch(() => false)) {
+        break
+      }
       const step = await readCurrentStep(page)
-      if (step && step.current >= 30) {
+      if (step && step.current >= 28) {
         break
       }
       await page.getByRole('button', { name: 'Next' }).click()
       await page.waitForTimeout(700)
     }
 
-    await expectStepProgress(page, 30)
     await expect(page.getByRole('heading', { name: 'Canvas shows the research map' })).toBeVisible()
 
     const nodeCount = await page.locator('.react-flow__node').count()

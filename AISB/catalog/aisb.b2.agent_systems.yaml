@@ -227,4 +227,4 @@ recommended_when: Use this entry for AISB public-dev integration, local agent wo
   UI validation.
 not_recommended_when: Do not treat this entry as an official release or public leaderboard claim until
   release gates pass.
-image_path: AISB/image/aisb.b2.agent_systems.svg
+image_path: ../image/aisb.b2.agent_systems.svg

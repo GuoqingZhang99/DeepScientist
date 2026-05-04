@@ -248,7 +248,7 @@ recommended_when: Use this entry for AISB public-dev integration, local agent wo
   UI validation.
 not_recommended_when: Do not treat this entry as an official release or public leaderboard claim until
   release gates pass.
-image_path: AISB/image/aisb.b8.lifesci_drug.svg
+image_path: ../image/aisb.b8.lifesci_drug.svg
 pilot:
   status: selected
   reason: B8 has real public-dev ADMET CSVs, label-stripped hidden inputs, CPU-safe baseline/evaluator,

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 const entryId = 'aisb.t3.tdc_admet'
+const aisbEntryId = 'aisb.b1.agentic_coding'
 
 async function installBenchStoreStubs(page: Page) {
   const setupQuestId = 'setup-bench-001'
@@ -178,7 +179,7 @@ async function installBenchStoreStubs(page: Page) {
       }
       await route.continue()
     }),
-    page.route('**/api/benchstore/entries', async (route) => {
+    page.route(/\/api\/benchstore\/entries(?:\?.*)?$/, async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -229,12 +230,54 @@ async function installBenchStoreStubs(page: Page) {
                 local_path: '/tmp/AISB/installs/tdc_admet',
               },
             },
+            {
+              id: aisbEntryId,
+              name: 'AISB B1 Agentic Coding',
+              one_line: 'FeatureBench-lite public-dev package for repository navigation, code edits, and test-driven repair.',
+              aisb_direction: 'B1',
+              discovery: {
+                collection: 'AISB',
+                collection_priority: 100,
+                recommendation_weight: 700,
+                featured: false,
+              },
+              display: {
+                placement: 'grid',
+                card_size: 'm',
+                badge: 'AISB',
+              },
+              capability_tags: ['agentic_coding', 'software_engineering', 'feature_implementation'],
+              track_fit: ['paper_track', 'benchmark_track'],
+              task_mode: 'benchmark',
+              paper: {
+                title: 'AISB B1 Agentic Coding',
+                venue: 'AISB',
+                year: 2026,
+                url: 'https://example.com/aisb-b1',
+              },
+              image_path: 'AISB/image/aisb.b1.agentic_coding.svg',
+              image_url: `/api/benchstore/entries/${aisbEntryId}/image`,
+              resources: {
+                minimum: { cpu_cores: 4, ram_gb: 16, gpu_count: 0 },
+                recommended: { cpu_cores: 16, ram_gb: 64, gpu_count: 0 },
+              },
+              compatibility: {
+                recommended_ok: true,
+                minimum_ok: true,
+                score: 86,
+                recommendation_tier: 'recommended',
+                recommended_reasons: ['CPU benchmark package is runnable on this host.'],
+              },
+              install_state: {
+                status: 'not_installed',
+              },
+            },
           ],
-          total: 1,
+          total: 2,
         }),
       })
     }),
-    page.route(`**/api/benchstore/entries/${entryId}`, async (route) => {
+    page.route(new RegExp(`/api/benchstore/entries/${entryId}(?:\\?.*)?$`), async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -292,7 +335,7 @@ async function installBenchStoreStubs(page: Page) {
         }),
       })
     }),
-    page.route(`**/api/benchstore/entries/${entryId}/setup-packet`, async (route) => {
+    page.route(new RegExp(`/api/benchstore/entries/${entryId}/setup-packet(?:\\?.*)?$`), async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -302,17 +345,17 @@ async function installBenchStoreStubs(page: Page) {
           setup_packet: {
             entry_id: entryId,
             assistant_label: 'BenchStore Setup Agent · Codex',
-            project_title: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 Autonomous Research',
+            project_title: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 全自动研究',
             benchmark_local_path: '/tmp/AISB/installs/tdc_admet',
             device_fit: 'recommended',
-            benchmark_goal: '通过TreeHFD算法将XGBoost集成预测分解为可解释的主效应和二阶交互作用。',
+            benchmark_goal: '使用Hoeffding函数分解（HFD）评估XGBoost集成的可解释性。\n\n核心研究目标：把 baseline 视为可信起点，验证TreeHFD是否能稳定分解主效应和二阶交互作用。',
             constraints: [
               '- benchmark_local_path: /tmp/AISB/installs/tdc_admet',
               '- device_fit: recommended',
             ],
             suggested_form: {
-              title: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 Autonomous Research',
-              goal: '通过TreeHFD算法将XGBoost集成预测分解为可解释的主效应和二阶交互作用。',
+              title: '通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 全自动研究',
+              goal: '使用Hoeffding函数分解（HFD）评估XGBoost集成的可解释性。\n\n核心研究目标：把 baseline 视为可信起点，验证TreeHFD是否能稳定分解主效应和二阶交互作用。',
               baseline_urls: 'https://example.com/benchmark.zip',
               paper_urls: 'https://example.com/paper',
               runtime_constraints: '- benchmark_local_path: /tmp/AISB/installs/tdc_admet\n- device_fit: recommended',
@@ -337,10 +380,54 @@ async function installBenchStoreStubs(page: Page) {
         body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" fill="#d9c7b5"/><rect x="12" y="12" width="136" height="66" rx="10" fill="#9db9c6"/><text x="80" y="49" text-anchor="middle" font-size="12" fill="#2f2924">Bench</text></svg>',
       })
     }),
+    page.route(`**/api/benchstore/entries/${aisbEntryId}/image**`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" fill="#efe6dc"/><rect x="18" y="14" width="124" height="62" rx="14" fill="#20242a"/><text x="80" y="50" text-anchor="middle" font-size="13" fill="#f6efe7">AISB B1</text></svg>',
+      })
+    }),
   ])
 }
 
 test.describe('benchstore storefront', () => {
+  test('starts an installed benchmark directly from the storefront row', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem(
+        'ds:onboarding:v1',
+        JSON.stringify({
+          firstRunHandled: true,
+          completed: true,
+          neverRemind: true,
+          language: 'zh',
+        })
+      )
+      window.localStorage.setItem('ds:ui-language', 'zh')
+      ;(window as typeof window & { __DEEPSCIENTIST_RUNTIME__?: unknown }).__DEEPSCIENTIST_RUNTIME__ = {
+        auth: {
+          enabled: false,
+          tokenQueryParam: 'token',
+          storageKey: 'ds_local_auth_token',
+        },
+      }
+    })
+
+    await installBenchStoreStubs(page)
+    await page.goto('/')
+    await expect(page.locator('[data-onboarding-id="landing-hero"]')).toBeVisible({ timeout: 30_000 })
+
+    await page.getByRole('button', { name: 'BenchStore' }).first().click()
+    await expect(page.locator('[data-onboarding-id="benchstore-dialog"]')).toBeVisible({ timeout: 20_000 })
+    const directStartButton = page
+      .locator('[data-onboarding-id="benchstore-dialog"]')
+      .getByRole('button', { name: /开始/ })
+      .first()
+    await expect(directStartButton).toBeVisible({ timeout: 20_000 })
+    await directStartButton.click()
+    await expect(page.locator('[data-onboarding-id="start-research-dialog"]')).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('[data-onboarding-id="start-research-title"] input')).toHaveValue('通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 全自动研究', { timeout: 20_000 })
+  })
+
   test('opens the storefront, renders the detail surface, and moves benchmark start into the autonomous dialog', async ({ page }, testInfo) => {
     await page.addInitScript(() => {
       window.localStorage.setItem(
@@ -368,10 +455,19 @@ test.describe('benchstore storefront', () => {
 
     await page.getByRole('button', { name: 'BenchStore' }).first().click()
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 20_000 })
-    await expect(page.getByText('SetupAgent').first()).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('[data-onboarding-id="benchstore-dialog"]')).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByText('探索').first()).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('[data-onboarding-id="benchstore-dialog"]').getByRole('button', { name: /开始/ }).first()).toBeVisible({ timeout: 20_000 })
+    await page.locator('[data-onboarding-id="benchstore-dialog"]').getByRole('button', { name: '查看全部' }).first().click()
+    await expect(page.locator('[data-onboarding-id="benchstore-all-catalog"]')).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByText('2 个 Benchmark 全量展示')).toBeVisible({ timeout: 20_000 })
+
+    await page.locator('[data-onboarding-id="benchstore-dialog"]').getByRole('button', { name: /AISB/ }).first().click()
+    await expect(page.getByText('AISB B1 Agentic Coding').first()).toBeVisible({ timeout: 20_000 })
+
     await page.getByRole('button', { name: '进入 Library' }).click()
-    await page.getByPlaceholder(/搜索 benchmark/).fill('Hoeffding')
-    const discoveryCard = page.getByRole('button', { name: /查看详情/ }).first()
+    await page.locator('aside input[placeholder="搜索"]').fill('Hoeffding')
+    const discoveryCard = page.locator('[data-onboarding-id="benchstore-dialog"]').getByRole('button', { name: /Hoeffding/ }).first()
     await expect(discoveryCard).toBeVisible({ timeout: 20_000 })
     await expect
       .poll(
@@ -386,15 +482,18 @@ test.describe('benchstore storefront', () => {
       .toBeGreaterThan(0)
 
     await discoveryCard.click()
-    await expect(page.getByText('任务描述')).toBeVisible({ timeout: 20_000 })
-    await expect(page.getByRole('button', { name: 'Start' })).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('[data-onboarding-id="benchstore-detail-surface"]')).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByText('任务信息')).toBeVisible({ timeout: 20_000 })
+    await expect(page.locator('[data-onboarding-id="benchstore-detail-surface"]').getByText('Catalog ID').first()).toBeVisible({ timeout: 20_000 })
+    const startButton = page.locator('[data-onboarding-id="benchstore-detail-action-strip"]').getByRole('button', { name: '开始', exact: true })
+    await expect(startButton).toBeVisible({ timeout: 20_000 })
 
-    await page.getByRole('button', { name: 'Start' }).click()
+    await startButton.click()
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 20_000 })
     await expect(page.locator('[data-onboarding-id="start-research-dialog"]')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText('SetupAgent').first()).toBeVisible({ timeout: 20_000 })
-    const titleInput = page.locator('input').first()
-    const goalTextarea = page.locator('textarea').first()
+    const titleInput = page.locator('[data-onboarding-id="start-research-title"] input')
+    const goalTextarea = page.locator('[data-onboarding-id="start-research-goal"] textarea')
     await expect(titleInput).toHaveValue('通过Hoeffding函数分解与TreeHFD算法实现树集成模型可解释性 全自动研究', { timeout: 20_000 })
     await expect(goalTextarea).toHaveValue(/Hoeffding函数分解（HFD）评估XGBoost集成的可解释性/, { timeout: 20_000 })
     await expect(goalTextarea).toHaveValue(/核心研究目标：把 baseline 视为可信起点/, { timeout: 20_000 })

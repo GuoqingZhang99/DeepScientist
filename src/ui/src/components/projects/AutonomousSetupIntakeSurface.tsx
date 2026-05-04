@@ -61,7 +61,10 @@ export function AutonomousSetupIntakeSurface(props: AutonomousSetupIntakeSurface
   const t = copy(props.locale)
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#F6F1EA]">
+    <div
+      className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#F6F1EA]"
+      data-onboarding-id="start-research-intake"
+    >
       <div className="pointer-events-none absolute inset-0 opacity-90" aria-hidden="true">
         <div className="absolute left-[-14%] top-[-24%] h-[520px] w-[520px] rounded-full bg-[rgba(198,213,217,0.42)] blur-3xl" />
         <div className="absolute right-[-12%] top-[-28%] h-[540px] w-[540px] rounded-full bg-[rgba(225,207,178,0.48)] blur-3xl" />
@@ -69,7 +72,15 @@ export function AutonomousSetupIntakeSurface(props: AutonomousSetupIntakeSurface
       </div>
 
       <div className="absolute right-4 top-4 z-20">
-        <Button type="button" variant="ghost" size="icon" className="rounded-full bg-white/48" onClick={props.onClose} aria-label={t.closeLabel}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="rounded-full bg-white/48"
+          onClick={props.onClose}
+          aria-label={t.closeLabel}
+          data-onboarding-id="start-research-close"
+        >
           <X className="h-4 w-4" />
         </Button>
       </div>
@@ -97,7 +108,13 @@ export function AutonomousSetupIntakeSurface(props: AutonomousSetupIntakeSurface
                 <ArrowUpRight className="mr-1.5 h-4 w-4" />
                 {t.manualCopilot}
               </Button>
-              <Button type="button" variant="secondary" className="w-full rounded-full sm:w-auto" onClick={props.onSwitchToForm}>
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full rounded-full sm:w-auto"
+                onClick={props.onSwitchToForm}
+                data-onboarding-id="start-research-intake-form"
+              >
                 {t.manualAutonomous}
               </Button>
             </div>

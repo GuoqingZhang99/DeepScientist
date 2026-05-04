@@ -1,4 +1,4 @@
-For this tutorial, click **Autonomous**.
+For this tutorial, choose **Manual autonomous** from the intake page.
 
 This opens the real project launch form.
 
