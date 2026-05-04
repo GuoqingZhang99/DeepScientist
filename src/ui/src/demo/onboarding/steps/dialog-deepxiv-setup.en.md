@@ -1,9 +1,9 @@
-Read this as a **safety checklist**, not as something you must finish right now.
+DeepXiv setup connects paper discovery and reading into the current launch flow.
 
-The simple version is:
+For literature-heavy work, confirm:
 
-1. register from the official page
-2. keep the token local
-3. never paste the token into prompts, chat, screenshots, or issue text
+- whether the DeepXiv service or index is available
+- whether the paper source matches this project
+- whether results should be written back to the quest library and Memory
 
-If you are only learning the interface today, it is completely fine to read this and continue without doing the real setup yet.
+For a quick benchmark launch, you can skip this and configure it later in Settings.

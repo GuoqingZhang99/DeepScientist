@@ -1,19 +1,14 @@
-如果你想从这个 benchmark 开始一个真实 Project，就点 `Start`。
+这里的动作区决定下一步走向。
 
-点击之后会发生这些事情：
+- `开始 / Start`：任务已经安装，DeepScientist 会读取 setup packet，把 benchmark 目标、本地路径、论文和运行约束带入 Start Research 表单
+- `获取 / GET`：任务还没安装，先下载、校验并准备本地资源
+- 进度条：下载或准备过程中会显示当前状态
+- `已就绪`：说明本地状态足够进入启动流程
 
-1. `Start` 会打开全自动项目启动表单
-2. DeepScientist 会把 benchmark 目标、本地路径和启动上下文预先填进去
-3. 你检查这个表单
-4. 你点击 `Create project`
-5. 系统就会基于这个 benchmark 创建真实工作区
+实际规则很简单：
 
-另外两个按钮可以这样理解：
+- 已就绪就 `Start`
+- 没安装就 `GET`
+- 安装状态异常时再重新获取或检查详情页里的本地路径
 
-- `Download` = 先把缺失的本地资源补齐
-- `Reinstall` = 本地状态坏了或不完整，需要重新整理
-
-所以实际规则很简单：
-
-- benchmark 已经就绪，就点 `Start`
-- benchmark 还没安装好，就先点 `Download`
+教程会先关闭 BenchStore，然后继续展示 Start Research 的大输入框和完整启动表单。

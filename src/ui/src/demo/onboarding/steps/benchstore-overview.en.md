@@ -1,16 +1,16 @@
-BenchStore is where you choose a benchmark before starting a project.
+This is the current BenchStore overview.
 
-Use it like this:
+Read it like a benchmark App Store:
 
-1. start in **Recommended**
-2. open one benchmark detail card
-3. decide whether it fits your machine and your interests
-4. if it looks right, use `Start` to send it into the project launch form
+- the sidebar switches between **Recommended / All / AISB / LLM / CV / ML / Systems / Installed**
+- search narrows the current catalog quickly
+- the hero card highlights a recommended task
+- `See All` opens the complete catalog, not only the visible summary section
+- installed rows show `Start`; missing rows show `GET`
 
-Read the sections like this:
+Recommended browsing order:
 
-- **Store** = browse available benchmarks
-- **Library** = revisit tasks you already saved or started
-- **Recommended** = the fastest place for a first choice
-
-Tip: do not try to read everything. Pick one recommended task, open its detail page, and make one concrete decision.
+1. Start in Recommended to get a runnable candidate quickly
+2. Use All when you want a full catalog audit
+3. Switch to AISB, LLM, CV, ML, or Systems when the domain is clear
+4. Use Installed / Library to revisit and launch tasks already prepared locally

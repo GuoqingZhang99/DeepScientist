@@ -288,12 +288,15 @@ test.describe('onboarding launch flow', () => {
     await page.getByRole('button', { name: 'Next' }).click()
     await expect(page.locator('[data-onboarding-id="benchstore-dialog"]')).toBeVisible({ timeout: 30_000 })
     await expectStepProgress(page, 4)
-    await expect(page.getByRole('heading', { name: 'BenchStore starts as a storefront view' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'BenchStore is now a benchmark storefront' })).toBeVisible()
 
-    await advanceToStep(page, 10, 12)
+    await advanceToStep(page, 9, 12)
+    await expect(page.getByRole('heading', { name: 'Open the Start Research intake' })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Next' }).click()
     await expect(page.locator('[data-onboarding-id="start-research-intake"]')).toBeVisible({ timeout: 30_000 })
     await expectStepProgress(page, 10)
-    await expect(page.getByRole('heading', { name: 'Describe the task first' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Use the intake before the full form' })).toBeVisible()
     await expect(page.locator('[data-onboarding-id="start-research-intake-form"]')).toBeVisible()
 
     await page.getByRole('button', { name: 'Next' }).click()

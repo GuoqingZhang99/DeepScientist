@@ -1,15 +1,10 @@
-Canvas: Your research map
+Canvas shows the quest research map.
 
-Think of this as your research tech tree.
+It is not decorative. It visualizes stages, branches, and evidence relationships:
 
-You'll see:
-- Starting point: The initial baseline
-- Branches: Different ideas you tried
-- Failed paths: Attempts that didn't work (still valuable)
-- Main trunk: The successful route
-- Outcomes: Papers, analysis, figures
+- baseline or initial state
+- stage nodes such as scout, idea, experiment, and write
+- branches that were promoted, rejected, or need review
+- files, diffs, summaries, and artifacts linked to each node
 
-Why look at the map?
-It shows you how the project grew, not just where it ended.
-
-Tip: Every node is an exploration—even failed paths teach you something.
+The point is not only to ask whether the project succeeded. It is to understand why it reached the current state: what was tested, what failed, and where to inspect next.

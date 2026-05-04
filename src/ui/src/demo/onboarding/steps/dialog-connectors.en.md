@@ -1,14 +1,10 @@
-This block is **optional**.
+Connector is an optional delivery target, not a required launch field.
 
-If you leave it empty, the run stays fully inside the web workspace.
-
-Choose one delivery target only when you want messages outside the page, such as:
+If left empty, all progress stays inside the Web workspace. When selected, DeepScientist can send key messages to an external conversation, such as:
 
 - milestone updates
-- interruption notices
-- long-run progress
+- long-run completion or failure notices
+- interruptions waiting for your decision
+- requests for credentials, data, or direction changes
 
-**Good beginner choice**
-
-- for a tutorial or quick practice run: leave it empty
-- for a long autonomous run: bind one target
+If you use a proxy and the WeChat QR code does not appear, check the connector/proxy guidance in Settings; WeChat-related requests may need to bypass the proxy.

@@ -11,6 +11,7 @@ export function OverlayDialog({
   onClose,
   children,
   className,
+  contentClassName,
   hideHeader = false,
   dataOnboardingId,
   closeButtonDataOnboardingId,
@@ -21,6 +22,7 @@ export function OverlayDialog({
   onClose: () => void
   children: ReactNode
   className?: string
+  contentClassName?: string
   hideHeader?: boolean
   dataOnboardingId?: string
   closeButtonDataOnboardingId?: string
@@ -61,7 +63,12 @@ export function OverlayDialog({
             </Button>
           </div>
         )}
-        <div className="feed-scrollbar modal-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        <div
+          className={
+            contentClassName ||
+            'feed-scrollbar modal-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain'
+          }
+        >
           {children}
         </div>
       </div>

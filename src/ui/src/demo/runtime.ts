@@ -147,7 +147,7 @@ export function getDemoTimelineState(projectId: string, scenario: TutorialDemoSc
 function resolveTutorialStageFloor(projectId: string, totalStages: number): number | null {
   if (typeof window === 'undefined') return null
   if (!/^demo-/.test(String(projectId || '').trim())) return null
-  if (!/^\/projects\/demo-/.test(window.location.pathname)) return null
+  if (!/(?:^|\/)projects\/demo-/.test(window.location.pathname)) return null
   const state = useOnboardingStore.getState()
   if (state.status !== 'running') return null
   if (state.stepIndex < CANVAS_TUTORIAL_STAGE_INDEX) return null

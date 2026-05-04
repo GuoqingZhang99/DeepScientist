@@ -1,5 +1,9 @@
-You are now inside the launch form.
+You are now in the full Context Form.
 
-**Simple beginner rule:** go from top to bottom and only fill the blocks the tutorial points at.
+It splits a quest launch into auditable modules:
 
-The left side holds the information that matters most for a first run. Advanced controls still exist, but you do not need to master them on day one.
+- left side: task goal, references, materials, connector, DeepXiv, launch contract, and runtime constraints
+- right side: SetupAgent or launch preview, used to inspect the context before it reaches the agent
+- bottom: create action plus current template/status hints
+
+For a first run, you do not need every advanced option. Confirm title, goal, references, runtime constraints, and the launch preview first.

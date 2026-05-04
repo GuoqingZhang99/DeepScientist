@@ -1,12 +1,13 @@
-Open one benchmark detail card.
+Open one benchmark detail page now.
 
-This is the first moment where your choice becomes concrete.
+The overview is for comparison; the detail page is for decisions. Once you enter the detail page, do not only read the title and subtitle. Check whether this task should really become your next quest.
 
-You are not just browsing anymore. You are checking:
+Inspect:
 
-- can this machine run it
-- what task it will actually ask you to do
-- what risk it carries
-- whether it is ready to launch now, or needs `Download` first
+- compatibility and score: whether this machine meets the minimum or recommended resources
+- task goal: reproduction, improvement, evaluation, writing, or another mode
+- paper and provenance: paper, venue, repo, download URL, or dataset source
+- install state: whether a local path exists, or whether you need GET / reinstall
+- risks and constraints: credentials, external data, long runtime, or high cost
 
-If the detail page looks promising, the next step is simple: stay on that page and decide whether to `Start`, `Download`, or leave it.
+If these signals look reasonable, then consider starting it.

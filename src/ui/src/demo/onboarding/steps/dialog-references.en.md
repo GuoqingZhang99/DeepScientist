@@ -1,12 +1,11 @@
-Use this area to give the run a **strong starting anchor**.
+Put strong anchors here so the system does not drift.
 
-If you already know any of these, place them here:
+The most useful references are usually:
 
-- the baseline repo
-- the main paper
-- the benchmark page
-- a known reference implementation
+- confirmed baseline or local path
+- paper URL, arXiv, DOI, or PDF
+- benchmark page, leaderboard, or dataset notes
+- known runnable reference implementation
+- conclusions from previous quests or Memory records
 
-**Why it helps**
-
-It stops the first round from drifting too broadly.
+If the task came from BenchStore, this area is usually prefilled with paper, download URL, and local install path. You can still add your own materials.

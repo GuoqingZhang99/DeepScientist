@@ -506,7 +506,6 @@
   .feed-scrollbar {
     scrollbar-width: thin;
     scrollbar-color: rgba(145, 153, 165, 0.45) transparent;
-    scrollbar-gutter: stable;
   }
 
   .feed-scrollbar::-webkit-scrollbar {
@@ -542,6 +541,33 @@
 
   .modal-scrollbar::-webkit-scrollbar-thumb:hover {
     background: rgba(86, 91, 99, 0.7);
+  }
+
+  .benchstore-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(92, 104, 120, 0.42) transparent;
+  }
+
+  .benchstore-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+    background: transparent;
+  }
+
+  .benchstore-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .benchstore-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(92, 104, 120, 0.42);
+    background-clip: content-box;
+    border-radius: 999px;
+    border: 2px solid transparent;
+  }
+
+  .benchstore-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(72, 84, 100, 0.58);
+    background-clip: content-box;
   }
 
   .markdown-body {

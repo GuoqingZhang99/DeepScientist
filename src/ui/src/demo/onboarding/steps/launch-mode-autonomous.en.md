@@ -1,12 +1,14 @@
-For this tutorial, choose **Manual autonomous** from the intake page.
+This is the Start Research intake box.
 
-This opens the real project launch form.
+The recommended path is to let SetupAgent organize the launch first. If you already know how the fields should be filled, you can click **Manual autonomous**.
 
-After that, the normal path is:
+In this tutorial, we use the manual entry so you can see the full launch form and understand its sections.
 
-1. fill the essential fields such as `Project title` and `Primary research request`
-2. review the generated launch prompt on the right
-3. click `Create project`
-4. enter the real workspace that DeepScientist just created
+In normal use, this intake is the best place for:
 
-The form stays beginner-friendly because deeper options are pushed behind advanced sections.
+- benchmark context carried over from BenchStore Start
+- your manually written research goal
+- dropped papers, code, data, or config files
+- current machine and runner constraints
+
+Remember: SetupAgent plans the launch only. It does not start long-running research execution at this step.

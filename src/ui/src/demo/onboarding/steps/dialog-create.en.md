@@ -1,14 +1,12 @@
-Ready? Click "Create Project"
+When ready, click `Create project`.
 
-Don't worry—this is tutorial mode:
-- No real compute resources used
-- No charges incurred
-- Just a guided tour of a demo project
+In real use, this creates a quest workspace and compiles the form into the first research context. In the workspace you will see:
 
-After clicking, you'll see:
-- Where project files live
-- What the research map looks like
-- How the memory system works
-- Where the AI assistant is
+- Canvas: stage graph and branch routes
+- Explorer / Files: real local files, notes, run records, and artifacts
+- Diff: important changes and branch comparisons
+- Details: current status briefing
+- Memory: reusable decisions, lessons, and boundaries across rounds
+- Copilot: ongoing collaboration, questions, route changes, and closeout
 
-Tip: This is like a game tutorial level—feel free to explore.
+Tutorial mode enters a demo project; real projects start advancing according to your launch contract.

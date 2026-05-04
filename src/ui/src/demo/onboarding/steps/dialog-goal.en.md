@@ -1,17 +1,13 @@
-Most important step: Define your research goal clearly
+Write the real research request here. It determines how the agent decomposes the first round.
 
-State three things in plain language:
+Use this structure:
 
-1. What problem do I want to investigate?
-2. What result counts as success?
-3. What conditions must be verified?
+1. Background: the problem, benchmark, or paper
+2. Goal: reproduce, improve, evaluate, write, or first audit feasibility
+3. Success criteria: what evidence proves completion
+4. Constraints: GPU, time, network, data privacy, external APIs, and files that must not change
+5. Outputs: run logs, comparison table, figures, report, paper draft, issue, or PR
 
-**Good example:**
+Weak request: `Study deep learning`.
 
-`Reproduce ResNet on CIFAR-10, compare against the paper's baseline, and confirm it trains on a single 24GB GPU.`
-
-**Bad example:**
-
-`Study deep learning` (too vague)
-
-Tip: The more specific you are, the better the AI can help.
+Stronger request: `Reproduce paper X's baseline on dataset Y and match the official metric; if the reproduction is trustworthy, try one small improvement and output a comparison table plus failure analysis.`

@@ -1,10 +1,10 @@
-This is your **final pre-launch check**.
+This is the final preview before project creation.
 
-Read it like a pilot checklist:
+It shows the launch context that will be handed to the agent. Before creating, check at least four things:
 
-- does it describe the right task
-- does it mention the right evidence
-- does it feel too broad
-- does it sound impossible for the current machine
+- the task matches what you actually want
+- benchmark, local path, paper, and baseline are correct
+- runtime limits are explicit enough to avoid excessive resource use
+- desired outputs are concrete, such as tables, figures, report, paper draft, or PR
 
-If it reads wrong here, go back and fix the earlier fields first.
+If the preview reads wrong, edit the fields on the left or switch back to SetupAgent and ask it to rewrite the launch.

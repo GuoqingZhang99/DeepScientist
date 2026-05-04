@@ -1,18 +1,13 @@
-三个入口，三种开始方式。
+这里有三个主要入口，对应三种不同状态。
 
-如果你的目标是现在就开始一个真实 Project：
+- **Start Research**：你已经知道要研究什么，直接打开启动输入框
+- **BenchStore**：你还没确定任务，先从 benchmark 商店里浏览、筛选、安装或启动
+- **Settings**：你暂时不启动项目，而是先调整 runner、模型、connector、DeepXiv、代理或诊断项
 
-- 已经知道要做什么，就点 **Start Research**
-- 还不知道做哪个任务，就点 **BenchStore**
-- 只是想先改配置，不打算马上启动项目，就点 **Settings**
+更具体地说：
 
-可以这样理解这三个按钮：
+- 从 **Start Research** 进入时，默认先看到大输入框。把目标、材料、限制、期望产物写进去，SetupAgent 会先做启动规划。
+- 从 **BenchStore** 进入时，先像 App Store 一样浏览任务。已安装的任务可以直接 `Start`，未安装的任务先 `GET / Download`。
+- 从 **Settings** 进入时，主要处理系统层问题，例如 Codex / Claude / Kimi / OpenCode runner、微信 connector、代理、DeepXiv 和 issue 诊断。
 
-- **Start Research**：打开新项目启动流程
-- **BenchStore**：先看 benchmark 列表，选中一个任务后再交给启动表单
-- **Settings**：进入运行时、runner、connector、诊断等配置页面
-
-如果只记住一句话：
-
-- **Start Research** = “我已经知道要启动什么项目。”
-- **BenchStore** = “先帮我选一个任务。”
+如果只记一句话：**Start Research 是自定义任务入口，BenchStore 是开放 benchmark 入口，Settings 是系统控制面。**

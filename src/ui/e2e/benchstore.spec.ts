@@ -3,6 +3,44 @@ import { expect, test, type Page } from '@playwright/test'
 const entryId = 'aisb.t3.tdc_admet'
 const aisbEntryId = 'aisb.b1.agentic_coding'
 
+async function expectSingleBenchStoreScrollSurface(page: Page, surfaceId: string) {
+  const scrollInfo = await page.evaluate((targetSurfaceId) => {
+    const dialog = document.querySelector('[data-onboarding-id="benchstore-dialog"]')
+    if (!dialog) return { count: -1, records: [] }
+
+    const records = Array.from(dialog.querySelectorAll('*'))
+      .map((element) => {
+        const node = element as HTMLElement
+        const style = window.getComputedStyle(node)
+        const scrollableY =
+          /(auto|scroll)/.test(style.overflowY) &&
+          node.scrollHeight > node.clientHeight + 1
+        if (!scrollableY) return null
+        return {
+          id: node.getAttribute('data-onboarding-id') || '',
+          className: node.className,
+          clientHeight: node.clientHeight,
+          scrollHeight: node.scrollHeight,
+        }
+      })
+      .filter(Boolean) as Array<{
+        id: string
+        className: string
+        clientHeight: number
+        scrollHeight: number
+      }>
+
+    return {
+      count: records.length,
+      records,
+      targetCount: records.filter((record) => record.id === targetSurfaceId).length,
+    }
+  }, surfaceId)
+
+  expect(scrollInfo.records, JSON.stringify(scrollInfo.records, null, 2)).toHaveLength(1)
+  expect(scrollInfo.targetCount, JSON.stringify(scrollInfo.records, null, 2)).toBe(1)
+}
+
 async function installBenchStoreStubs(page: Page) {
   const setupQuestId = 'setup-bench-001'
   page.on('pageerror', (error) => {
@@ -457,6 +495,7 @@ test.describe('benchstore storefront', () => {
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 20_000 })
     await expect(page.locator('[data-onboarding-id="benchstore-dialog"]')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText('探索').first()).toBeVisible({ timeout: 20_000 })
+    await expectSingleBenchStoreScrollSurface(page, 'benchstore-overview-surface')
     await expect(page.locator('[data-onboarding-id="benchstore-dialog"]').getByRole('button', { name: /开始/ }).first()).toBeVisible({ timeout: 20_000 })
     await page.locator('[data-onboarding-id="benchstore-dialog"]').getByRole('button', { name: '查看全部' }).first().click()
     await expect(page.locator('[data-onboarding-id="benchstore-all-catalog"]')).toBeVisible({ timeout: 20_000 })
@@ -485,6 +524,7 @@ test.describe('benchstore storefront', () => {
     await expect(page.locator('[data-onboarding-id="benchstore-detail-surface"]')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText('任务信息')).toBeVisible({ timeout: 20_000 })
     await expect(page.locator('[data-onboarding-id="benchstore-detail-surface"]').getByText('Catalog ID').first()).toBeVisible({ timeout: 20_000 })
+    await expectSingleBenchStoreScrollSurface(page, 'benchstore-detail-surface')
     const startButton = page.locator('[data-onboarding-id="benchstore-detail-action-strip"]').getByRole('button', { name: '开始', exact: true })
     await expect(startButton).toBeVisible({ timeout: 20_000 })
 

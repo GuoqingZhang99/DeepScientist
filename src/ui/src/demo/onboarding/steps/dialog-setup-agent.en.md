@@ -1,13 +1,10 @@
-The right side is **not** just a preview panel.
+The right side is SetupAgent, the launch-planning assistant.
 
-`SetupAgent` can help turn your rough idea into a safer, more complete launch form by using:
+It uses the left-side form, BenchStore setup packet, local machine limits, and dropped materials to complete a safer launch context. Use it to answer:
 
-- your goal
-- your local machine limits
-- benchmark context, if one exists
+- whether the goal is too broad and should be narrowed
+- whether this machine is suitable for the task
+- whether baseline, paper, data, and runtime limits are explicit enough
+- whether to launch autonomously or start in Copilot mode
 
-**If you do not know how to start, try this**
-
-`Help me turn this into a safe first run on my current machine.`
-
-You can also drag local files into the input box so the agent can use them as part of the setup context.
+If you want to inspect the final prompt yourself, click `Preview` at the top to switch to the launch preview.

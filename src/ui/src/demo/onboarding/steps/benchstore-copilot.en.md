@@ -1,12 +1,14 @@
-This is the assistant panel on the right side of `BenchStore`.
+This is the BenchStore sidebar and category control area.
 
-It is not static help. It is the prelaunch `BenchStore Copilot`.
+Task selection happens through the catalog, search, categories, compatibility signals, and detail pages. The sidebar is the fastest way to change the question you are asking the catalog.
 
-Use it in two common ways:
+The key sidebar entries are:
 
-- if you have not chosen a task yet, ask it to recommend directions that fit **this machine**
-- if you already picked a benchmark, ask it to keep filling the launch details from the task, install state, and local paths
+- **Recommended**: tasks that are more likely to fit this machine
+- **All**: the complete catalog for auditing and comparison
+- **AISB**: AI Scientist Bench tasks in one place
+- **LLM / CV / ML / Systems**: domain-specific filters
+- **Installed**: tasks already installed or linked to local quests
+- **Bench Library**: the local task-library view
 
-After you start it, this side turns into a live copilot and writes suggestions back into the launch form.
-
-If you already have papers, docs, or config files, you can drag them into the input box so the agent can use them too.
+When a task is already installed, its row action changes from `GET` to `Start`, so it can enter the launch flow directly.

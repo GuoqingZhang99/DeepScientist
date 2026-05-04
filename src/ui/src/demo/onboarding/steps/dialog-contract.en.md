@@ -1,12 +1,11 @@
-This block controls **how bold the first round should be**.
+The launch contract decides how the first research round begins.
 
-If the labels feel abstract, read them like this:
+Read the fields like this:
 
-- **Launch mode** = what path the project enters with
-- **Research intensity** = how hard the first round pushes
-- **Decision policy** = how often the system may stop and wait for you
-- **Runtime constraints** = hard limits it must obey
+- **Launch mode**: standard research graph or custom route
+- **Research intensity**: how deep the first round should push, balancing speed and exploration
+- **Decision policy**: when the system must stop and wait for you
+- **Runtime constraints**: hard boundaries such as time, GPU, network, data, and safety requirements
+- **Need research paper**: whether writing a paper/report is part of the desired output
 
-**Safe beginner reading rule**
-
-Stay moderate, give clear runtime limits, and avoid over-optimizing this block on your very first run.
+Safe default: use the standard route with balanced intensity, and write hard limits clearly. Do not use the contract to compensate for a vague goal.

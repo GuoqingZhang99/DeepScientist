@@ -1,18 +1,13 @@
-Three doors, three ways to start.
+There are three main entry paths, and each one matches a different state.
 
-If your goal is to create a real project right now:
+- **Start Research**: you already know the research goal, so open the intake directly
+- **BenchStore**: you are still choosing a task, so browse, filter, install, or start a benchmark first
+- **Settings**: you are not launching yet; you want to configure runners, models, connectors, DeepXiv, proxy, or diagnostics
 
-- click **Start Research** when you already know what you want to work on
-- click **BenchStore** when you want DeepScientist to help you choose a benchmark first
-- click **Settings** only when you want to configure the system before starting
+More concretely:
 
-Read the buttons like this:
+- **Start Research** opens the large intake box first. Describe the goal, materials, constraints, and desired output; SetupAgent plans the launch before execution.
+- **BenchStore** behaves like a benchmark App Store. Installed tasks can go straight to `Start`; missing tasks go through `GET / Download` first.
+- **Settings** is for system-level work: Codex / Claude / Kimi / OpenCode runners, WeChat connector, proxy, DeepXiv, and issue diagnostics.
 
-- **Start Research**: opens the launch flow for a new project
-- **BenchStore**: opens the benchmark catalog, where you can inspect one task and then hand it into the launch form
-- **Settings**: opens configuration pages such as runtime, runners, connectors, and diagnostics
-
-If you remember just one thing:
-
-- **Start Research** = “I already know the project I want to start.”
-- **BenchStore** = “Help me choose a task first.”
+One sentence version: **Start Research is for custom tasks, BenchStore is for open benchmarks, and Settings is the system control surface.**

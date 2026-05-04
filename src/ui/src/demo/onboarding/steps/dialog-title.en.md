@@ -1,14 +1,15 @@
-Set the **human-readable project name** here.
+Set the human-readable project name here.
 
-Good beginner pattern:
+A good title should still be recognizable a few days later:
 
 - topic + goal
-- short enough to recognize later
-- easy to search in a list
+- short, but with the key benchmark or method name
+- searchable in the quest list, file tree, and Admin tables
 
-**Examples**
+Examples:
 
-- `Long-context benchmark reproduction`
-- `Time-series anomaly baseline check`
+- `TreeHFD benchmark reproduction and improvement`
+- `LLM long-context baseline audit`
+- `AISB B1 Agentic Coding launch check`
 
-You do **not** need to manually change the project ID for your first practice run.
+For a first practice run, you usually do not need to edit the Project ID manually.

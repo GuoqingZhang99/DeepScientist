@@ -2678,7 +2678,7 @@ function AppStoreStorefrontView({
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 10 }}
-      className="h-full overflow-y-auto bg-white px-4 py-6 md:px-10 md:py-10"
+      className="benchstore-scrollbar h-full overflow-y-auto overscroll-contain bg-white px-4 py-6 md:px-10 md:py-10"
       data-onboarding-id="benchstore-overview-surface"
     >
       <div className="mx-auto max-w-[1200px]">
@@ -3217,7 +3217,7 @@ function AisbAppDetailView({
       initial={{ opacity: 0, x: 20 }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: -20 }}
-      className="h-full overflow-y-auto bg-white"
+      className="benchstore-scrollbar h-full overflow-y-auto overscroll-contain bg-white"
       data-onboarding-id="benchstore-detail-surface"
     >
       <div className="sticky top-0 z-40 flex items-center justify-between border-b border-gray-100 bg-white/80 px-6 py-4 backdrop-blur-md">
@@ -3325,14 +3325,14 @@ function AisbAppDetailView({
                       animate={{ opacity: 1, y: 0, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.96 }}
                       onClick={() => void onPrimaryAction()}
-                      className="group flex h-full w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-[#007aff] to-[#00c6ff] font-black text-white shadow-lg shadow-blue-200 transition-all hover:scale-[1.02] hover:shadow-blue-300 active:scale-95"
+                      className="group flex h-full w-full items-center justify-center gap-2 rounded-full border border-[#B7D2DE] bg-[linear-gradient(180deg,#F5FBFF,#DDEFF7)] font-bold text-[#0B6388] shadow-[0_16px_34px_-28px_rgba(0,90,140,0.58),inset_0_0_0_1px_rgba(255,255,255,0.82)] transition-all hover:border-[#9FC2D2] hover:bg-[linear-gradient(180deg,#EFF8FD,#D3EAF4)] hover:text-[#074F70] active:scale-[0.98]"
                     >
                       <Play
                         size={18}
                         fill="currentColor"
-                        className="transition-transform group-hover:translate-x-1"
+                        className="transition-transform group-hover:translate-x-0.5"
                       />
-                      <span className="tracking-widest uppercase">
+                      <span className="tracking-[0.08em] uppercase">
                         {locale === "zh" ? "开始" : "START"}
                       </span>
                     </motion.button>
@@ -3764,10 +3764,13 @@ function BenchAppStoreShell({
 
   return (
     <div
-      className="flex h-[90svh] min-h-0 overflow-hidden bg-white font-sans text-gray-900 selection:bg-[#007aff]/20 selection:text-[#007aff]"
+      className="flex h-full min-h-0 overflow-hidden bg-white font-sans text-gray-900 selection:bg-[#007aff]/20 selection:text-[#007aff]"
       data-onboarding-id="benchstore-dialog"
     >
-      <aside className="hidden h-full w-64 shrink-0 flex-col border-r border-[#e5e5e5] bg-[#f6f6f6]/85 backdrop-blur-xl md:flex">
+      <aside
+        className="hidden h-full w-64 shrink-0 flex-col border-r border-[#e5e5e5] bg-[#f6f6f6]/85 backdrop-blur-xl md:flex"
+        data-onboarding-id="benchstore-sidebar"
+      >
         <div className="space-y-4 p-4">
           <label className="group relative block">
             <Search
@@ -4502,6 +4505,7 @@ export function BenchStoreDialog({
       onClose={onClose}
       hideHeader
       className="h-[90svh] w-[97vw] max-w-[min(1554px,97vw)] bg-white"
+      contentClassName="min-h-0 flex-1 overflow-hidden"
       closeButtonDataOnboardingId="benchstore-close"
     >
       <BenchAppStoreShell

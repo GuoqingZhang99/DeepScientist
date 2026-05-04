@@ -1,11 +1,10 @@
-**下一步：** 点击 `Start Research`。
+现在打开 `Start Research`。
 
-这一步**还不会**直接创建 Project。
+这一步不会直接创建 Project。它会先打开一个大的启动输入框，让你把任务讲清楚：
 
-它会直接打开 SetupAgent 的大输入框页面，让你先说明：
+- 研究目标或 benchmark 背景
+- 已有论文、代码、数据、baseline、reviewer comments
+- 运行限制，例如 GPU、时间、网络、隐私和外部 API
+- 期望产物，例如可信 baseline、改进实验、图表、报告或论文草稿
 
-- 研究目标
-- 已有材料
-- 执行限制和期望产出
-
-你可以把需求交给 SetupAgent，也可以手动进入已经恢复的完整 Context Form。
+你可以直接把内容交给 SetupAgent，也可以点击手动进入全自动，打开完整 Context Form。

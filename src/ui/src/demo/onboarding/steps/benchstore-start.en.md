@@ -1,19 +1,14 @@
-If you want to start a real project from this benchmark, click `Start`.
+This action strip decides what happens next.
 
-What happens next:
+- `Start`: the task is already installed. DeepScientist reads the setup packet and carries the benchmark goal, local path, paper, and runtime constraints into the Start Research form
+- `GET`: the task is not installed yet, so it downloads, verifies, and prepares local resources first
+- Progress state: download or preparation status appears in the same action area
+- `Ready`: the local state is sufficient for the launch flow
 
-1. `Start` opens the autonomous project launch form
-2. DeepScientist pre-fills the form with the benchmark goal, local paths, and startup context
-3. you review the form
-4. you click `Create project`
-5. the real workspace is created from that benchmark context
+The practical rule is simple:
 
-Read the other buttons like this:
+- if ready, use `Start`
+- if missing, use `GET`
+- if the install state looks wrong, reacquire it or inspect the local path in the detail page
 
-- `Download` = bring missing local assets first
-- `Reinstall` = refresh a broken or incomplete local state
-
-So the practical rule is simple:
-
-- if the benchmark is ready, click `Start`
-- if the benchmark is not installed yet, click `Download` first
+The tutorial will close BenchStore next, then continue with the Start Research intake and full launch form.

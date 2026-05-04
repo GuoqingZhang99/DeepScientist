@@ -1,15 +1,9 @@
-Top navigation: Your compass
+The top bar is the global control strip for the workspace.
 
-This bar is like a mini-map in a game—it shows you "where am I?"
+It helps you confirm three things:
 
-You'll see:
-- Current location: Which project, which branch
-- Tutorial controls: Replay, pause, skip
-- Quick jumps: Back to home, switch projects
+- which quest or demo project you are in
+- whether the tutorial is running, paused, skippable, or replayable
+- how to return home, switch surfaces, or reach system controls
 
-When to check it?
-- Lost? Check the navigation bar
-- Want to switch projects? Click here
-- Want to replay the tutorial? Also here
-
-Tip: Always there to help you find your way.
+In long projects, you often come back after time away. Confirm location here first, then check Details or Canvas.

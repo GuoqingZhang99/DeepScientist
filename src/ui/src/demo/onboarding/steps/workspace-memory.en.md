@@ -1,13 +1,10 @@
-Memory: Your research notebook
+Memory stores what remains important across rounds.
 
-Imagine playing a game with no save file—frustrating, right? Memory is your "research save file."
+It is not a chat-history backup. It is the durable layer that keeps long quests from repeating mistakes:
 
-What does it remember?
-- Successful approaches: "This method worked, keep using it"
-- Failed attempts: "This path didn't work, don't retry"
-- Key findings: "These parameters gave the best results"
+- confirmed decisions and boundaries that should not be broken
+- methods that worked, failed routes, and reasons
+- important claims, evidence, and applicability limits
+- lessons future stages should reuse
 
-Why does it matter?
-In long projects, it's the difference between steady progress and going in circles.
-
-Tip: Check Memory regularly to avoid repeating mistakes.
+After many rounds, Memory is often more useful than raw chat. It tells you what has already been established and which traps not to repeat.

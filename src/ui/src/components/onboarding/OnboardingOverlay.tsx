@@ -55,7 +55,7 @@ const COPY: Record<OnboardingLanguage, OverlayCopy> = {
   en: {
     chooserTitle: 'Choose your first tutorial',
     chooserBody:
-      'DeepScientist can walk you through the first run step by step. Choose the guide language, skip for now, or turn the reminder off.',
+      'DeepScientist can walk you through BenchStore, Start Research, the quest workspace, and system supervision. Choose the guide language, skip for now, or turn the reminder off.',
     chooserZh: 'Chinese guide',
     chooserEn: 'English guide',
     chooserSkip: 'Skip for now',
@@ -72,7 +72,7 @@ const COPY: Record<OnboardingLanguage, OverlayCopy> = {
   zh: {
     chooserTitle: '选择首次教程语言',
     chooserBody:
-      'DeepScientist 可以像游戏教程一样，带你一步步完成第一次使用。你可以选择中文或英文讲解，也可以先跳过或不再提醒。',
+      'DeepScientist 会带你走过 BenchStore、Start Research、quest 工作区和系统监管面。你可以选择中文或英文讲解，也可以先跳过或不再提醒。',
     chooserZh: '中文讲解',
     chooserEn: 'English guide',
     chooserSkip: '暂时跳过',
@@ -121,8 +121,8 @@ const MOBILE_ONBOARDING_STEPS: OnboardingStep[] = [
       zh: '从一句清楚的研究需求开始',
     },
     body: {
-      en: 'On mobile, DeepScientist is optimized for starting work, checking progress, reading outputs, and answering decisions. Use Start Research to describe the goal, materials, constraints, and desired result.',
-      zh: '移动端主要用于启动任务、查看进展、阅读产物和处理决策。先点 Start Research，说明目标、材料、限制和希望得到的结果。',
+      en: 'On mobile, DeepScientist is optimized for starting work, checking progress, reading outputs, and answering decisions. Use Start Research to describe the goal, materials, constraints, and expected artifacts.',
+      zh: '移动端主要用于启动任务、查看进展、阅读产物和处理决策。先点 Start Research，说明目标、材料、限制和预期产物。',
     },
     hint: {
       en: 'The full desktop tour is longer; this mobile guide stays focused on the phone workflow.',
@@ -151,8 +151,8 @@ const MOBILE_ONBOARDING_STEPS: OnboardingStep[] = [
       zh: '不确定任务时先看 BenchStore',
     },
     body: {
-      en: 'BenchStore is useful on mobile as a browsable task list. Pick a task, then hand it to SetupAgent instead of filling a long form by hand.',
-      zh: 'BenchStore 在手机上更适合作为任务列表浏览。选中任务后交给 SetupAgent，而不是手动填很长的表单。',
+      en: 'BenchStore is useful on mobile as a browsable benchmark catalog. Pick a task, inspect readiness, then Start or GET instead of filling everything by hand.',
+      zh: 'BenchStore 在手机上适合作为 benchmark 目录浏览。选中任务后先看就绪状态，再 Start 或 GET，不必手动填完整上下文。',
     },
   },
   {
@@ -343,8 +343,8 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
     route: 'landing',
     targetId: 'benchstore-overview-surface',
     title: {
-      en: 'BenchStore starts as a storefront view',
-      zh: 'BenchStore 先以 storefront 方式出现',
+      en: 'BenchStore is now a benchmark storefront',
+      zh: 'BenchStore 现在是 benchmark 商店目录',
     },
     body: onboardingStepBodies['benchstore-overview'],
     placement: 'top',
@@ -353,13 +353,14 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: 'benchstore-copilot',
     route: 'landing',
-    targetId: 'benchstore-assistant-surface',
+    targetId: 'benchstore-sidebar',
     title: {
-      en: 'BenchStore Copilot can recommend and prepare launch details',
-      zh: 'BenchStore Copilot 会帮你推荐并补齐启动信息',
+      en: 'Use the sidebar to choose the right catalog view',
+      zh: '用左侧栏选择合适的目录视图',
     },
     body: onboardingStepBodies['benchstore-copilot'],
     placement: 'left',
+    autoSkipIfTargetMissing: true,
   },
   {
     id: 'benchstore-open-detail',
@@ -423,8 +424,8 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
     route: 'landing',
     targetId: 'start-research-intake',
     title: {
-      en: 'Describe the task first',
-      zh: '先描述任务',
+      en: 'Use the intake before the full form',
+      zh: '先用大输入框整理任务',
     },
     body: onboardingStepBodies['launch-mode-autonomous'],
     actionTargetId: 'start-research-intake-form',
@@ -509,8 +510,8 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
     route: 'landing',
     targetId: 'start-research-assistant-surface',
     title: {
-      en: 'SetupAgent can help complete the launch form',
-      zh: 'SetupAgent 可以协助补齐启动表单',
+      en: 'SetupAgent plans before execution begins',
+      zh: 'SetupAgent 先做启动规划',
     },
     body: onboardingStepBodies['dialog-setup-agent'],
     actionTargetId: 'start-research-toggle-preview',
@@ -1206,7 +1207,7 @@ function OnboardingChooser({
                 First Run
               </div>
               <h2 className="mt-1 text-xl font-semibold tracking-tight">
-                选择首次教程语言 / Choose Your First Tutorial
+                选择 DeepScientist 导览语言 / Choose Your DeepScientist Guide
               </h2>
             </div>
           </div>
@@ -1214,7 +1215,7 @@ function OnboardingChooser({
 
         <div className="feed-scrollbar modal-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-4">
           <p className="text-sm leading-7 text-[rgba(70,61,49,0.84)]">
-            DeepScientist 可以像游戏教程一样，带你一步步完成第一次使用。
+            DeepScientist 会带你理解 BenchStore、Start Research、quest 工作区和系统监管面。
             Choose Chinese or English, skip for now, or turn the reminder off.
           </p>
 
@@ -1226,7 +1227,7 @@ function OnboardingChooser({
             >
               <div className="text-sm font-semibold text-[rgba(38,36,33,0.95)]">中文讲解</div>
               <div className="mt-1 text-[12px] leading-6 text-[rgba(86,82,77,0.82)]">
-                一步步说明页面结构、创建项目和工作区的基本用法。
+                说明新版 BenchStore、启动规划、工作区审计和系统监管。
               </div>
             </button>
             <button
@@ -1236,7 +1237,7 @@ function OnboardingChooser({
             >
               <div className="text-sm font-semibold text-[rgba(38,36,33,0.95)]">English guide</div>
               <div className="mt-1 text-[12px] leading-6 text-[rgba(86,82,77,0.82)]">
-                Walk through the first run, project creation flow, and workspace basics.
+                Walk through BenchStore, launch planning, workspace audit, and system supervision.
               </div>
             </button>
           </div>

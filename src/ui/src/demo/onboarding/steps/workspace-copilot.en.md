@@ -1,15 +1,9 @@
-Copilot: Your AI research partner
+Copilot is the collaboration surface inside the workspace.
 
-Copilot is like an NPC assistant in a game—always there to help.
+Use it for three kinds of work while a project is running:
 
-What can it do?
-- Answer questions: Ask whenever you're stuck
-- Monitor progress: See what the AI is doing
-- Adjust direction: Correct course when needed
+- ask about current state: why this route, where the evidence is, what happens next
+- change direction: be more conservative, go deeper, write first, test first, or stop a branch
+- close out: summarize artifacts, list risks, draft an issue, prepare a PR, or write a handoff
 
-When to use it?
-- Want to know "where are we now?"
-- Need to adjust the research direction
-- Hit a problem and need help
-
-Tip: Think of it as your research partner—ask away.
+The key point: Copilot is not a disconnected chat box. It answers with the current quest, files, stages, and runtime state in context.

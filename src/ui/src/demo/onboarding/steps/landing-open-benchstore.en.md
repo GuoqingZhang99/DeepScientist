@@ -1,11 +1,7 @@
 Open `BenchStore` first.
 
-Why here, before the normal launch form?
+The goal is not to create a project immediately. First answer a more basic question: **which benchmark is worth launching on this machine, with your current interests and data limits?**
 
-Because many beginners are not yet asking:
+The current BenchStore is a storefront-style catalog: the left sidebar has Recommended, All, AISB, LLM, CV, ML, Systems, and Installed; the main area shows recommendations, editorial cards, popular rows, and the complete catalog.
 
-`How do I launch my task?`
-
-They are asking:
-
-`Which task should I launch at all?`
+Next we will inspect the catalog structure, then open one detail page.

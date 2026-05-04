@@ -1,6 +1,7 @@
-This is the first real fork in the road.
+The large intake is the first real launch decision.
 
-- **Copilot** = enter first, inspect first, decide the first action yourself.
-- **Autonomous** = create the workspace and let the system begin the standard workflow.
+- **Ask SetupAgent** when the request still needs structuring, risk checks, benchmark context, or missing-field repair.
+- **Manual autonomous** when you already know the title, goal, references, runtime limits, and launch contract.
+- **Copilot launch** is the cautious workspace path: enter first, inspect first, then decide the first action yourself.
 
-For a beginner tutorial, `Autonomous` is more useful because it exposes the full startup path in one run.
+For this tutorial, we open the full Context Form so the underlying launch contract is visible.
